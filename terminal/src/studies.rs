@@ -29,8 +29,10 @@ pub(super) struct State {
     /// The chart settings as last applied. The groups that apply a part of them to their own
     /// components (alerts, trading display, bottom bar) read it.
     pub(super) settings: ChartSettingsState,
-    symbol_search: SymbolSearchDialog,
+    pub(super) symbol_search: SymbolSearchDialog,
     shortcuts: KeyboardShortcutsDialog,
+    /// Whether symbol search lists the catalog instead of recently opened symbols.
+    pub(super) hide_symbol_recents: bool,
     /// The symbol last entered in the recent symbols of the search.
     recorded: Option<String>,
 }
@@ -66,6 +68,13 @@ impl Terminal {
         self
     }
 
+    /// Lists the whole symbol catalog when the search opens, instead of the recently opened
+    /// symbols. For hosts whose catalog is short enough to show whole.
+    pub fn with_symbol_recents(mut self, shown: bool) -> Self {
+        self.studies.hide_symbol_recents = !shown;
+        self
+    }
+
     pub(super) fn studies_init(&mut self) {
         for control in [
             Control::Indicators,
@@ -84,6 +93,9 @@ impl Terminal {
         state
             .symbol_search
             .set_search_service(self.services.symbol_search.clone());
+        state
+            .symbol_search
+            .set_recents_shown(!state.hide_symbol_recents);
         if let Some(storage) = &self.services.storage {
             state.settings_dialog.templates.set_storage(storage.clone());
             state.symbol_search.set_storage(storage.clone());
@@ -107,6 +119,12 @@ impl Terminal {
             Region::Windows => self.show_study_dialogs(ui.ctx()),
             _ => {}
         }
+    }
+
+    /// Opens symbol search with an empty query, for adding a symbol rather than replacing the
+    /// chart's.
+    pub(super) fn open_symbol_search(&mut self) {
+        self.studies.symbol_search.open();
     }
 
     pub(super) fn studies_perform(&mut self, action: Action) -> Option<Action> {

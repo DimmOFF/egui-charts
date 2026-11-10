@@ -68,6 +68,8 @@ pub(super) struct Search {
     pub(super) sector: Option<String>,
     pub(super) data_source: Option<String>,
     pub(super) recents: TemplateStore<Vec<Recent>>,
+    /// Whether an empty query lists the recently opened symbols; off, it lists the catalog.
+    pub(super) recents_shown: bool,
     opened: Vec<Recent>,
     components: Components,
 }
@@ -97,6 +99,7 @@ impl Default for Search {
             sector: None,
             data_source: None,
             recents: TemplateStore::new(StoreKind::RecentSymbols),
+            recents_shown: true,
             opened: Vec::new(),
             components: Components::default(),
         }
@@ -235,7 +238,7 @@ impl Search {
             return;
         }
         let query = self.request(text, kind, limit);
-        let recent = query.unfiltered() && self.has_recents();
+        let recent = query.unfiltered() && self.recents_shown && self.has_recents();
         if self.query.as_ref() != Some(&query) {
             self.reset();
             self.query = Some(query.clone());
@@ -629,6 +632,29 @@ mod tests {
                 (kind, exchange, country, sector, provider)
             );
         }
+    }
+
+    #[test]
+    fn hiding_recents_lists_the_catalog_on_an_empty_query() {
+        let ctx = egui::Context::default();
+        let mut search = Search::default();
+        search.recents_shown = false;
+        search.set_service(Some(Arc::new(vec![
+            Instrument::new("A"),
+            Instrument::new("B"),
+        ])));
+        search.query(&ctx, "", None, 20);
+        for _ in 0..4 {
+            search.poll(&ctx);
+        }
+        assert_eq!(
+            search
+                .rows
+                .iter()
+                .map(|row| row.symbol.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B"]
+        );
     }
 
     /// The dialog records the chosen row and the host records the chart's instrument, which a

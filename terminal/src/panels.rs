@@ -683,9 +683,9 @@ impl Terminal {
             | Action::Notifications(NotificationsAction::SelectSymbol(symbol))
             | Action::Calendar(CalendarAction::SelectSymbol(symbol)) => self.switch_symbol(symbol),
             Action::Watchlist(WatchlistAction::AddSymbol) => {
-                let leftover = self.perform(Action::TopToolbar(TopToolbarAction::OpenSymbolSearch));
-                self.panels.adding_symbol = leftover.is_none();
-                return leftover;
+                // Adding a symbol starts from an empty field, unlike replacing the chart's symbol.
+                self.open_symbol_search();
+                self.panels.adding_symbol = true;
             }
             Action::Watchlist(WatchlistAction::AdvancedView) => self.panels.wide_watchlist = true,
             Action::Watchlist(WatchlistAction::CompactView) => self.panels.wide_watchlist = false,
@@ -940,6 +940,23 @@ mod tests {
             let left = terminal.run(Action::WidgetBar(action));
             assert_eq!((terminal.panel, left.is_some()), (panel, returned));
         }
+    }
+
+    #[test]
+    fn adding_a_symbol_opens_search_with_an_empty_field() {
+        let mut terminal = terminal();
+        frame(&mut terminal, SIZE, vec![]);
+        terminal.run(Action::Watchlist(WatchlistAction::AddSymbol));
+        assert!(terminal.studies.symbol_search.is_open());
+        // The hint shows only while the field is empty: the chart's symbol is not carried over.
+        let mut painted = texts(&mut terminal);
+        for _ in 0..2 {
+            painted = texts(&mut terminal);
+        }
+        assert!(
+            painted.iter().any(|text| text == "Search symbols"),
+            "{painted:?}"
+        );
     }
 
     #[test]

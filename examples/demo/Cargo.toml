@@ -3,12 +3,18 @@ name = "egui-charts-demo"
 version = "0.0.0"
 edition = "2024"
 publish = false
+default-run = "egui-charts-demo"
 
 [workspace]
 
 [[bin]]
 name = "egui-charts-demo"
 path = "main.rs"
+
+# The assembled terminal on Deriv's and Binance's public endpoints; see `trading_vision.rs`.
+[[bin]]
+name = "TradingVision"
+path = "trading_vision.rs"
 
 [dependencies]
 egui-charts = { path = "../..", features = ["ui", "alert-engine", "strategies", "detectors"] }
@@ -29,6 +35,19 @@ rfd = "0.17.2"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 egui_extras = { version = "0.37.0", default-features = false, features = ["file"] }
 maudio = "0.1.15"
+# Deriv WebSocket client for the `deriv` binary.
+futures-util = "0.3"
+tokio = { version = "1", features = ["rt", "net", "time", "io-util"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+# `tokio-tungstenite` enables rustls without choosing a crypto provider.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# Binance klines are a plain REST call; the quotes and ticks come over WebSocket.
+# `gzip` shrinks `exchangeInfo` from 18 MB to about 0.3 MB on the wire.
+ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
+# The assembled terminal: toolbars, panels, dialogs and a chart on the same feed.
+egui-charts-terminal = { path = "../../terminal" }
+# MetaTrader 5 over the terminal's local named pipe, without the Python package.
+mt5-rs = "0.1"
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "glow", "links", "x11", "wayland"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

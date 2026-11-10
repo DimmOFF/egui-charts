@@ -258,6 +258,12 @@ impl SymbolSearchDialog {
         self.search.recents.set_storage(storage);
     }
 
+    /// Whether an empty query lists the recently opened symbols. Off, it lists the catalog, for
+    /// hosts whose catalog is short enough to show whole.
+    pub fn set_recents_shown(&mut self, shown: bool) {
+        self.search.recents_shown = shown;
+    }
+
     /// Restricts results to an exchange, or removes that filter, as the exchange menu does.
     pub fn set_exchange_filter(&mut self, exchange: Option<String>) {
         self.search.exchange = exchange;

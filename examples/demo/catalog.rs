@@ -73,6 +73,14 @@ impl Catalog {
         let binance = Symbols::default();
         let mt5 = Symbols::default();
         let connection = Connection::open();
+        // Local and quick, and the chart's first symbol may be an MT5 one, so it is ready before
+        // the window opens rather than when the network fetches finish.
+        let mt5_pairs = connection
+            .as_ref()
+            .map(Connection::instruments)
+            .unwrap_or_default();
+        let mt5_count = mt5_pairs.len();
+        mt5.insert(mt5_pairs.clone());
         let ready = Arc::new(Ready {
             list: Mutex::new(None),
             loaded: Condvar::new(),
@@ -81,7 +89,7 @@ impl Catalog {
             ready: ready.clone(),
             deriv: deriv.clone(),
             binance: binance.clone(),
-            mt5: mt5.clone(),
+            mt5,
             connection: connection.clone(),
         };
         let spawn = std::thread::Builder::new()
@@ -108,12 +116,6 @@ impl Catalog {
                     }
                     Err(error) => eprintln!("Binance futures catalogue error: {error}"),
                 }
-                let mt5_pairs = connection
-                    .as_ref()
-                    .map(Connection::instruments)
-                    .unwrap_or_default();
-                let mt5_count = mt5_pairs.len();
-                mt5.insert(mt5_pairs.clone());
                 instruments.extend(mt5_pairs);
                 eprintln!(
                     "Symbol catalogue: {deriv_count} Deriv + {spot_count} Binance spot + \
@@ -146,6 +148,15 @@ impl Catalog {
     /// The terminal this machine runs, shared by the feeds that read from it.
     pub fn connection(&self) -> Option<Connection> {
         self.connection.clone()
+    }
+
+    /// Whether every catalogue has finished loading, including the network ones.
+    pub fn is_ready(&self) -> bool {
+        self.ready
+            .list
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_some()
     }
 }
 

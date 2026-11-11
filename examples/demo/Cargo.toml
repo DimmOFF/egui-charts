@@ -50,6 +50,10 @@ egui-charts-terminal = { path = "../../terminal" }
 mt5-rs = "0.1"
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "glow", "links", "x11", "wayland"] }
 
+# The icon that goes on the Windows executables.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Check recording size before the browser allocates its bytes.
 rfd = { version = "0.17.2", features = ["file-handle-inner"] }

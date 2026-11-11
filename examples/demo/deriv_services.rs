@@ -284,7 +284,7 @@ impl Storage for FileStorage {
 }
 
 /// Where the store lives: the per-user application data directory.
-fn default_path() -> PathBuf {
+pub(crate) fn default_path() -> PathBuf {
     std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .or_else(|| {

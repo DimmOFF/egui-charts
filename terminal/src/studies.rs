@@ -68,6 +68,11 @@ impl Terminal {
         self
     }
 
+    /// Replaces the study catalogue, such as after the host edited its scripts.
+    pub fn set_indicator_factory(&mut self, factory: IndicatorFactory) {
+        self.studies.indicators.set_factory(factory);
+    }
+
     /// Lists the whole symbol catalog when the search opens, instead of the recently opened
     /// symbols. For hosts whose catalog is short enough to show whole.
     pub fn with_symbol_recents(mut self, shown: bool) -> Self {

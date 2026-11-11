@@ -191,12 +191,17 @@ impl IndicatorDialog {
     /// List and create the studies of `factory`, such as the built-ins and the host's own
     /// added with [`IndicatorFactory::register`]
     pub fn with_factory(mut self, factory: IndicatorFactory) -> Self {
+        self.set_factory(factory);
+        self
+    }
+
+    /// Replaces the listed studies, such as after the host recompiled or removed its own scripts.
+    pub fn set_factory(&mut self, factory: IndicatorFactory) {
         self.option_catalog = None;
         self.option_profile_registered = false;
         self.indicators = IndicatorInfo::from_factory(&factory);
         self.factory = factory;
         self.refresh_order_flow_availability();
-        self
     }
 
     /// List the metrics and, when declared by `set_feed_capabilities`, the option-chain

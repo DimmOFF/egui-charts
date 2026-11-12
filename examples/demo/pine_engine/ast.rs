@@ -60,6 +60,8 @@ pub enum Expr {
         id: NodeId,
         /// `ta.ema` is `["ta", "ema"]`; a script's own function is `["myFunc"]`.
         callee: Vec<String>,
+        /// The object or array a method is called on: `values.push(1)` keeps `values` here.
+        receiver: Option<Box<Expr>>,
         args: Vec<Arg>,
         line: usize,
     },
@@ -115,15 +117,55 @@ pub enum Stmt {
         value: Expr,
         /// `var x = …` evaluates on the first bar only.
         sticky: bool,
+        /// `x := …` writes the variable in the scope that declared it.
+        reassign: bool,
+    },
+    /// `[a, b] = f()`: the names take the values a call answers with.
+    Tuple {
+        names: Vec<String>,
+        value: Expr,
+        /// `var [a, b] = …` evaluates on the first bar only.
+        sticky: bool,
     },
     If {
         cond: Expr,
         then: Block,
         otherwise: Option<Block>,
     },
+    /// Pine's `for i = from to to [by step]`.
+    For {
+        line: usize,
+        var: String,
+        from: Expr,
+        to: Expr,
+        step: Option<Expr>,
+        body: Block,
+    },
+    /// Pine's `for value in array`, and `for [a, b] in array` for tuples.
+    ForIn {
+        line: usize,
+        vars: Vec<String>,
+        iterable: Expr,
+        body: Block,
+    },
+    While {
+        line: usize,
+        cond: Expr,
+        body: Block,
+    },
+    Break,
+    Continue,
+    /// `object.field := value`.
+    FieldAssign {
+        target: Expr,
+        name: String,
+        value: Expr,
+    },
     Expr(Expr),
     Function(Function),
-    /// Parsed and reported, not run: loops, `switch`, `strategy.*` calls and the like.
+    /// A user-defined `type` or `enum`, whose instances `Type.new(…)` builds.
+    Type(TypeDecl),
+    /// Parsed and reported, not run: `switch`, `strategy.*` calls and the like.
     Unsupported {
         line: usize,
         message: String,
@@ -135,6 +177,20 @@ pub struct Function {
     pub name: String,
     pub params: Vec<String>,
     pub body: Block,
+}
+
+/// One field of a user type, with the default its `new()` starts from.
+#[derive(Clone, Debug)]
+pub struct FieldDecl {
+    pub name: String,
+    pub default: Option<Expr>,
+}
+
+/// A `type` declaration, so `Point.new(x, y)` can build an instance.
+#[derive(Clone, Debug)]
+pub struct TypeDecl {
+    pub name: String,
+    pub fields: Vec<FieldDecl>,
 }
 
 /// A whole script.

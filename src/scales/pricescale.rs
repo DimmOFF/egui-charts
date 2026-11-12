@@ -264,6 +264,9 @@ pub struct PriceScale {
     transform: PriceTransform,
     /// The user zoomed or set the range, so autoscale leaves it alone until reset.
     manual: bool,
+    /// A new symbol's prices still have to be fitted once while `manual` stays on.
+    #[serde(skip)]
+    refit: bool,
     /// Larger magnitude of the data at the last fit, in scale units
     level: f64,
     price_precision: Option<u8>,
@@ -280,6 +283,7 @@ impl PriceScale {
             range: PriceRange::new(0.0, 100.0),
             transform: PriceTransform::default(),
             manual: false,
+            refit: false,
             level: 0.0,
             price_precision: None,
             tick_size: None,
@@ -317,6 +321,7 @@ impl PriceScale {
             .then(|| (self.range.max - self.range.min) * f64::from(bar_spacing / height));
         if self.bar_ratio.is_some() {
             self.manual = true;
+            self.refit = false;
         }
     }
 
@@ -334,6 +339,7 @@ impl PriceScale {
         self.bar_ratio = ratio;
         if ratio.is_some() {
             self.manual = true;
+            self.refit = false;
         }
     }
 
@@ -398,6 +404,14 @@ impl PriceScale {
         self.manual
     }
 
+    /// Keeps the manual choice across a symbol change: the next fit sets the new prices once,
+    /// then autoscaling stays off. An auto-scaled chart is left autoscaling. Like a reset, the
+    /// change drops the price-per-bar lock.
+    pub fn refit_manual(&mut self) {
+        self.bar_ratio = None;
+        self.refit = self.manual;
+    }
+
     /// Fits `min..max` (scale units) plus margins unless the user scaled by hand.
     ///
     /// Non-finite bounds (no drawable data) and a fit that overflows keep the current range.
@@ -406,7 +420,7 @@ impl PriceScale {
             return;
         }
         self.level = min.abs().max(max.abs());
-        if self.manual {
+        if self.manual && !self.refit {
             return;
         }
         let span = match self.transform.mode {
@@ -430,6 +444,7 @@ impl PriceScale {
         }
         if range.min.is_finite() && range.max.is_finite() && range.min < range.max {
             self.range = range;
+            self.refit = false;
         }
     }
 
@@ -452,6 +467,7 @@ impl PriceScale {
         }
         self.range = PriceRange::new(min, max);
         self.manual = true;
+        self.refit = false;
     }
 
     /// Scales the range by `factor` (above 1 zooms out) around the scale value
@@ -501,6 +517,7 @@ impl PriceScale {
     /// Returns to auto-scaling (double click on the axis).
     pub fn reset(&mut self) {
         self.manual = false;
+        self.refit = false;
         self.bar_ratio = None;
     }
 
@@ -888,6 +905,25 @@ mod tests {
                 "{mode:?} {price}: back {back}"
             );
         }
+    }
+
+    /// A manual range keeps its prices while the data moves, but `refit_manual` lets the next
+    /// fit replace it once, for a symbol change, and keeps auto-scaling off afterwards.
+    #[test]
+    fn a_manual_range_refits_once_when_asked() {
+        let mut scale = PriceScale::new(PriceScaleOptions::default());
+        scale.set_range(10.0, 20.0);
+        scale.autoscale(100.0, 200.0);
+        assert_eq!(scale.range(), PriceRange::new(10.0, 20.0));
+
+        scale.refit_manual();
+        scale.autoscale(100.0, 200.0);
+        assert!(scale.is_manual());
+        let range = scale.range();
+        assert!(range.min < 100.0 && range.max > 200.0, "{range:?}");
+
+        scale.autoscale(1000.0, 2000.0);
+        assert_eq!(scale.range(), range);
     }
 
     /// Margins are shares of the pane height: data from 100 to 170 with 20% above and 10% below

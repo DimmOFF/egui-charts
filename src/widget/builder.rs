@@ -101,6 +101,7 @@ impl Chart {
             price_axis_drag: None,
             pending_start_idx: None,
             pending_scroll_time: None,
+            refit_price_on_data: false,
             scroll_animation: None,
             time_axis_rect: egui::Rect::NOTHING,
             chart_type: ChartType::Candles,

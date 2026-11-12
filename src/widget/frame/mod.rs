@@ -904,10 +904,29 @@ impl Chart {
                 .map(scale.transform(), chart_rect.top(), chart_rect.bottom())
                 .with_thousands_sep(self.config.thousands_sep);
             self.pump_marks(ui.ctx());
+            // A chart waiting for its first page says so, and a feed that failed says why.
+            // "No data available" would read as an empty instrument either way.
+            let feed = self.feed_state(super::SeriesId::MAIN);
+            let message = match feed {
+                Some(state) => match &state.last_error {
+                    Some(error) => l10n::format_text(
+                        ui.ctx(),
+                        "No data: {error}",
+                        &[("error", error.to_string())],
+                    ),
+                    // Until the feed reports it has no more history, an empty chart is still
+                    // waiting for its first page.
+                    None if state.loading_history || !state.history_complete => {
+                        l10n::text(ui.ctx(), "Loading data…")
+                    }
+                    None => l10n::text(ui.ctx(), "No data available"),
+                },
+                None => l10n::text(ui.ctx(), "No data available"),
+            };
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                l10n::text(ui.ctx(), "No data available"),
+                message,
                 egui::FontId::proportional(ui.active_theme().text.title),
                 self.config.text_color,
             );
@@ -3100,7 +3119,7 @@ impl Chart {
             .zip(self.rendered_studies().indicators())
             .filter(|(id, study)| study.is_visible() && self.series_pane(**id) == Some(main_pane))
         {
-            if let Some(table) = study.table() {
+            for table in study.tables() {
                 table_rect.max.y =
                     crate::studies::table::paint(ui, table_rect, table, ui.scope_id().with(id))
                         .top()

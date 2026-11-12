@@ -344,7 +344,9 @@ impl Terminal {
                     .drawings_mut()
                     .set_eraser_mode(cursor == CursorType::Eraser);
             }
-            DrawingToolbarAction::ToggleValuesTooltip => chart.set_tooltip_enabled(values_tooltip),
+            DrawingToolbarAction::ToggleValuesTooltip => {
+                chart.set_tooltip_on_long_press(values_tooltip);
+            }
             DrawingToolbarAction::SelectTool(tool) => {
                 chart.drawings_mut().set_active_tool(Some(tool));
             }

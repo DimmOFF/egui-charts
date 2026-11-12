@@ -69,6 +69,12 @@ pub struct UserSettings {
     /// `None`.
     #[serde(deserialize_with = "known_or_unset")]
     pub replay_session: Option<(ReplaySession, Timeframe)>,
+    /// The chart's display settings, as the JSON of `ChartSettingsState`: candle colours, chart
+    /// type, grid and scales. Absent in documents saved before they were kept.
+    pub chart_settings: Option<serde_json::Value>,
+    /// The theme those settings were saved under, `"dark"` or `"light"`. Their colours come
+    /// from it, so a chart opening under another theme keeps that theme's colours.
+    pub chart_settings_theme: Option<String>,
 }
 
 /// What the market heatmap shows, by the identifiers the host gave its universes and metrics.

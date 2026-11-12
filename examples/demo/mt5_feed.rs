@@ -37,28 +37,31 @@ const LIVE_WINDOW: i64 = 300;
 /// MT5's own timeframe codes, which its protocol uses instead of names.
 const TIMEFRAME_D1: i32 = 16408;
 
+/// MT5's own timeframe codes, which its protocol uses instead of names: minute codes are plain
+/// minutes, hourly ones are `16384 + hours`. The 2m, 3m, 10m and 2h presets are native too; a
+/// one-minute code would make the chart keep only the last minute of each slot.
 fn timeframe_code(timeframe: Timeframe) -> i32 {
     match timeframe {
+        Timeframe::Min1 => 1,
         Timeframe::Min5 => 5,
         Timeframe::Min15 => 15,
         Timeframe::Min30 => 30,
         Timeframe::Hour1 => 16385,
         Timeframe::Hour4 => 16388,
         Timeframe::Day1 => TIMEFRAME_D1,
+        Timeframe::Custom(seconds) => match seconds.get() {
+            120 => 2,
+            180 => 3,
+            600 => 10,
+            7200 => 16386,
+            _ => 1,
+        },
         _ => 1,
     }
 }
 
 fn timeframe_seconds(timeframe: Timeframe) -> i64 {
-    match timeframe {
-        Timeframe::Min5 => 300,
-        Timeframe::Min15 => 900,
-        Timeframe::Min30 => 1800,
-        Timeframe::Hour1 => 3600,
-        Timeframe::Hour4 => 14400,
-        Timeframe::Day1 => 86400,
-        _ => 60,
-    }
+    timeframe.duration_ms() / 1000
 }
 
 /// The class a symbol belongs to, as the terminal files it in its own tree.
@@ -438,5 +441,32 @@ impl Quotes for Mt5Quotes {
             }
             eprintln!("MT5 quotes stream ended");
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{timeframe_code, timeframe_seconds};
+    use egui_charts::model::Timeframe;
+    use std::num::NonZeroU64;
+
+    fn custom(seconds: u64) -> Timeframe {
+        Timeframe::Custom(NonZeroU64::new(seconds).unwrap())
+    }
+
+    /// The 3m preset has to be requested as 3m candles: one-minute candles leave the chart's
+    /// three-minute slots empty for two of every three minutes, which draws ragged bars.
+    #[test]
+    fn native_intervals_are_requested_as_they_are() {
+        assert_eq!(timeframe_code(custom(180)), 3);
+        assert_eq!(timeframe_code(custom(120)), 2);
+        assert_eq!(timeframe_code(custom(600)), 10);
+        assert_eq!(timeframe_code(custom(7200)), 16386);
+        assert_eq!(timeframe_code(Timeframe::Min1), 1);
+        assert_eq!(timeframe_code(Timeframe::Min5), 5);
+        assert_eq!(timeframe_code(Timeframe::Hour1), 16385);
+        assert_eq!(timeframe_code(Timeframe::Day1), 16408);
+        assert_eq!(timeframe_seconds(custom(180)), 180);
+        assert_eq!(timeframe_seconds(Timeframe::Hour4), 14400);
     }
 }

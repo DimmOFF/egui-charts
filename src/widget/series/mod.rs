@@ -157,6 +157,10 @@ impl Chart {
         let clock = self.clock();
         let (mut bars, rejected) = clean(bars, &clock);
         retain_bars(&mut bars, self.bar_limit(SeriesId::MAIN));
+        if self.refit_price_on_data && !bars.is_empty() {
+            self.refit_price_on_data = false;
+            self.state.price_scale_mut().refit_manual();
+        }
         self.feed.rejected_bars += rejected;
         self.from_ticks.clear();
         if let Some(marks) = &mut self.change_marks {
@@ -715,6 +719,7 @@ impl Chart {
 
     /// [`apply`](Self::apply) with the slots of `clock`, the chart's.
     pub(super) fn apply_by(&mut self, clock: &BarClock, incoming: Vec<(Bar, Origin)>) -> Merged {
+        let arriving = !incoming.is_empty();
         let before = self.edge();
         #[cfg(feature = "drawings")]
         self.anchor_drawing_points();
@@ -728,6 +733,10 @@ impl Chart {
             merged = merge(bars, from_ticks, clock, incoming);
             merged.first_changed
         });
+        if arriving && self.refit_price_on_data && !self.state.data().bars.is_empty() {
+            self.refit_price_on_data = false;
+            self.state.price_scale_mut().refit_manual();
+        }
         if let (Some(marks), Some(closes)) = (&mut self.change_marks, closes) {
             marks.record(&self.state.data().bars, clock, closes);
         }

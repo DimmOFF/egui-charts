@@ -26,15 +26,22 @@ mod pine_engine;
 use catalog::Catalog;
 use combined::{CombinedFeed, CombinedQuotes};
 use deriv_services::FileStorage;
+use egui_charts::icons::icons;
 use egui_charts::model::Timeframe;
 use egui_charts::services::AlertEngine;
 use egui_charts::ui::export::ExportFormat;
-use egui_charts::ui::top_toolbar::ToolbarEntry;
+use egui_charts::ui::widget_bar::{WidgetBarSection, WidgetBarWidget};
+use egui_charts::widget::SeriesId;
+use egui_charts::widget::settings::ChartSettingsState;
 use egui_charts_terminal::{ExportContents, Terminal};
 use pine_editor::PineScripts;
 use std::sync::Arc;
 
 const SYMBOL: &str = "R_100";
+
+/// The right-rail entry that opens the Pine editor; the terminal's own host widgets use ids near
+/// `u64::MAX`.
+const PINE_WIDGET: u64 = 1;
 
 /// How long a closing window waits for the pending writes to land.
 const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -75,6 +82,7 @@ fn main() -> eframe::Result {
     let started = std::time::Instant::now();
     let mut flushing = false;
     let mut deadline: Option<std::time::Instant> = None;
+    let mut scale_off = false;
     eframe::run_ui_native(
         "TradingVision: Deriv + Binance + MT5",
         options,
@@ -93,18 +101,30 @@ fn main() -> eframe::Result {
             let terminal = terminal.as_mut().expect("the terminal was built above");
             // Actions the terminal leaves to its host: host entries and those without a default.
             for action in terminal.show(ui) {
-                if let egui_charts_terminal::Action::TopToolbar(
-                    egui_charts::ui::top_toolbar::TopToolbarAction::Host(id),
-                ) = &action
-                    && id == "pine"
-                {
-                    pine.open = true;
+                match &action {
+                    egui_charts_terminal::Action::WidgetBar(
+                        egui_charts::ui::widget_bar::WidgetBarAction::WidgetClicked(PINE_WIDGET),
+                    ) => pine.open = !pine.open,
+                    _ => {}
+                }
+            }
+            // Charts open with a manual price scale. The empty chart has no range to freeze
+            // yet, so this waits for its first bars. Once only: afterwards the user's own
+            // auto-scale choice stands.
+            if !scale_off && !terminal.chart().bars(SeriesId::MAIN).is_empty() {
+                scale_off = true;
+                let mut settings = ChartSettingsState::from_chart(terminal.chart());
+                settings.scales_and_lines.auto_scale = false;
+                if let Err(error) = settings.apply_to_chart(terminal.chart_mut()) {
+                    eprintln!("Could not turn auto-scale off: {error}");
                 }
             }
             // A recompiled script replaces the one the indicator dialog lists.
             if pine.show(ui.ctx()) {
                 terminal.set_indicator_factory(pine.factory());
             }
+            // The rail entry stays lit exactly while the editor is open, however it was closed.
+            terminal.widget_bar_mut().active_widget = pine.open.then_some(PINE_WIDGET);
             // Keep the window open until the pending writes land, at most `FLUSH_TIMEOUT`.
             if ui.input(|input| input.viewport().close_requested()) && !flushing {
                 flushing = true;
@@ -168,9 +188,19 @@ fn build_terminal(
     );
     // Deriv's public candles carry no volume; Binance's do.
     terminal.chart_mut().config_mut().show_volume = false;
-    terminal
-        .top_toolbar_mut()
-        .host_entries
-        .push(ToolbarEntry::new("pine", "Pine"));
+    // The values tooltip card is off; the legend still shows the hovered bar's values.
+    terminal.chart_mut().set_tooltip_enabled(false);
+    // TradingView-like wheel zoom: the plain wheel keeps the right bar in place, Ctrl/Cmd zooms
+    // around the pointer.
+    let mut chart_options = terminal.chart().chart_options().clone();
+    chart_options.time_scale.right_bar_stays_on_scroll = true;
+    terminal.chart_mut().set_chart_options(chart_options);
+    // The Pine editor sits on the right rail, as in the reference terminal.
+    terminal.widget_bar_mut().widgets.push(WidgetBarWidget {
+        id: PINE_WIDGET,
+        icon: icons::CODE,
+        tooltip: "Pine Editor".into(),
+        section: WidgetBarSection::Bottom,
+    });
     terminal
 }

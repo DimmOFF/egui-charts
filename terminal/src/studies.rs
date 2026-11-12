@@ -194,6 +194,53 @@ impl Terminal {
         None
     }
 
+    /// Keeps the chart's display settings — candle colours, chart type, grid, scales — so they
+    /// survive a restart. The host-managed trading and alert groups are left to the host.
+    pub(super) fn chart_settings(&mut self, settings: &mut UserSettings, direction: Direction) {
+        match direction {
+            Direction::Save => {
+                let mut state = ChartSettingsState::from_chart(self.chart());
+                // An unlocked ratio is the current view's, changing with every zoom; only a
+                // locked one is a setting.
+                if !state.scales_and_lines.lock_price_to_bar_ratio {
+                    state.scales_and_lines.price_to_bar_ratio = 1.0;
+                }
+                settings.chart_settings = serde_json::to_value(state).ok();
+                settings.chart_settings_theme =
+                    Some(if self.theme.dark { "dark" } else { "light" }.to_owned());
+            }
+            Direction::Load => {
+                let Some(value) = settings.chart_settings.take() else {
+                    return;
+                };
+                // The saved colours come from the theme they were saved under; another theme
+                // brings its own colours instead.
+                if settings.chart_settings_theme.as_deref()
+                    != Some(if self.theme.dark { "dark" } else { "light" })
+                {
+                    return;
+                }
+                let Ok(mut state) = serde_json::from_value::<ChartSettingsState>(value) else {
+                    return;
+                };
+                // The host owns the trading and alert groups; keep the values the host set.
+                state.alerts = self.studies.settings.alerts.clone();
+                state.trading = self.studies.settings.trading.clone();
+                state.adjust_for_dividends = self.studies.settings.adjust_for_dividends;
+                for chart in &mut self.charts {
+                    let applied = state.apply_to_chart(chart).is_ok();
+                    if applied && chart.bars(SeriesId::MAIN).is_empty() {
+                        // The saved range was read from a chart with prices, and this one has
+                        // none yet: fit the first bars once, as a symbol change does, then keep
+                        // the manual scale.
+                        chart.price_scale_mut().refit_manual();
+                    }
+                }
+                self.studies.settings = state;
+            }
+        }
+    }
+
     pub(super) fn studies_settings(&mut self, settings: &mut UserSettings, direction: Direction) {
         let indicators = &mut self.studies.indicators;
         match direction {
@@ -710,6 +757,36 @@ mod tests {
             assert_eq!(terminal.studies.settings, before);
             assert_ne!(terminal.chart().config().bullish_color, Color32::YELLOW);
         }
+    }
+
+    /// Guards that the display settings changed in the dialog — candle colours among them — come
+    /// back when the terminal is reopened.
+    #[test]
+    fn chart_display_settings_survive_restart() {
+        let storage = Arc::new(MemoryStorage::default());
+        let mut terminal = terminal().with_storage(storage.clone());
+        for _ in 0..4 {
+            frame(&mut terminal, SIZE, vec![]);
+        }
+        let mut state = ChartSettingsState::from_chart(terminal.chart());
+        state.candle_colors.body_up = Color32::RED;
+        state.candle_colors.body_down = Color32::BLUE;
+        settings(&mut terminal, state);
+        // Written when the terminal closes, as an application does.
+        drop(terminal);
+        let mut restored = Terminal::new(Arc::new(TestFeed))
+            .with_symbol("AAPL")
+            .with_storage(storage);
+        let mut found = false;
+        for _ in 0..10 {
+            frame(&mut restored, SIZE, vec![]);
+            if restored.chart().config().bullish_color == Color32::RED {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "the saved candle colours are restored");
+        assert_eq!(restored.chart().config().bearish_color, Color32::BLUE);
     }
 
     /// Guards that the dialog opens on what the chart shows now, not on the last applied state,

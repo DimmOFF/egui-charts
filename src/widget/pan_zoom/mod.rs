@@ -111,8 +111,14 @@ impl Chart {
                 } else {
                     // Integrate raw points multiplicatively, independently of frame batching.
                     let zoom_scale = (delta_y / 1000.0).min(80.0).exp_m1() * 10.0;
-                    // Zoom around the pointer, or the right edge while the right bar stays on scroll
-                    let zoom_point_x = self.zoom_anchor(hp.x - chart_rect_min_x, chart_width);
+                    // Ctrl/Cmd zooms around the pointer, as in TradingView; the plain wheel keeps
+                    // the configured anchor, the right edge there.
+                    let anchor_x = hp.x - chart_rect_min_x;
+                    let zoom_point_x = if ui.input(|i| i.modifiers.command) {
+                        anchor_x
+                    } else {
+                        self.zoom_anchor(anchor_x, chart_width)
+                    };
 
                     log::debug!(
                         "[ZOOM INPUT] mouse_x={:.1}, chart_min_x={:.1}, anchor_x={:.1}, chart_width={:.1}",

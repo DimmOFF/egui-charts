@@ -2469,7 +2469,7 @@ impl DemoApp {
             }
             DrawingToolbarAction::ToggleValuesTooltip => {
                 self.chart
-                    .set_tooltip_enabled(self.drawing_toolbar.state.values_tooltip_on_long_press);
+                    .set_tooltip_on_long_press(self.drawing_toolbar.state.values_tooltip_on_long_press);
                 return;
             }
             _ => {}

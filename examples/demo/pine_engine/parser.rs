@@ -4,7 +4,8 @@
 //! the editor can say what is missing instead of failing the whole script.
 
 use crate::pine_engine::ast::{
-    Arg, Block, Diagnostic, Expr, Function, InputDecl, InputKind, NodeId, Program, Stmt, SwitchArm,
+    Arg, Block, Diagnostic, Expr, FieldDecl, Function, InputDecl, InputKind, NodeId, Program, Stmt,
+    SwitchArm, TypeDecl,
 };
 use crate::pine_engine::lexer::{Spanned, Token, lex};
 use crate::pine_engine::value::Value;
@@ -207,41 +208,31 @@ impl Parser {
         if self.at_ident("if") {
             return self.parse_if_statement();
         }
-        if self.at_ident("for") || self.at_ident("while") {
-            let keyword = self.ident()?;
-            self.skip_statement()?;
-            return Ok(Stmt::Unsupported {
-                line,
-                message: unsupported(&format!("`{keyword}`")),
-            });
+        if self.at_ident("for") {
+            return self.parse_for();
         }
-        if self.at_op("[") {
-            // A tuple assignment from a function that answers several values.
-            self.skip_statement()?;
-            return Ok(Stmt::Unsupported {
-                line,
-                message: unsupported("кортежное присваивание"),
-            });
+        if self.at_ident("while") {
+            return self.parse_while();
         }
-        if (self.at_ident("type") || self.at_ident("enum"))
-            && matches!(
-                self.tokens.get(self.at + 1).map(|spanned| &spanned.token),
-                Some(Token::Ident(_))
-            )
-        {
-            // A user-defined type with its fields, which this engine does not build.
-            self.skip_statement()?;
-            return Ok(Stmt::Unsupported {
-                line,
-                message: unsupported("пользовательский тип"),
-            });
+        if self.at_ident("break") {
+            self.advance();
+            self.end_line()?;
+            self.eat_newlines();
+            return Ok(Stmt::Break);
+        }
+        if self.at_ident("continue") {
+            self.advance();
+            self.end_line()?;
+            self.eat_newlines();
+            return Ok(Stmt::Continue);
+        }
+        if self.at_ident("type") || self.at_ident("enum") {
+            let decl = self.parse_type()?;
+            return Ok(Stmt::Type(decl));
         }
         if self.at_ident("method") {
-            self.skip_statement()?;
-            return Ok(Stmt::Unsupported {
-                line,
-                message: unsupported("`method`"),
-            });
+            self.advance();
+            return Ok(Stmt::Function(self.parse_function()?));
         }
         if self.at_ident("export") || self.at_ident("import") {
             self.skip_statement()?;
@@ -263,7 +254,8 @@ impl Parser {
             self.advance();
         }
         // A type word starts a declaration only before a name, not before `line.new`'s `.`.
-        if self.starts_with_type() {
+        // A script's own lowercase type (`hz _hz`) is two identifiers; `switch x` is not.
+        if self.starts_with_type() || (self.at_pair_of_idents() && !self.at_ident("switch")) {
             self.advance();
             if self.at_op("<") {
                 self.skip_type_arguments()?;
@@ -273,13 +265,11 @@ impl Parser {
                 self.expect_op("]")?;
             }
         }
+        if self.at_op("[") {
+            return self.parse_tuple_assignment(line, sticky);
+        }
         if self.looks_like_field_assignment() {
-            // An assignment into a user object's field; this engine has no objects.
-            self.skip_statement()?;
-            return Ok(Stmt::Unsupported {
-                line,
-                message: unsupported("присваивание поля объекта"),
-            });
+            return self.parse_field_assignment();
         }
         let starts_assign = matches!(self.peek(), Token::Ident(_))
             && self
@@ -299,6 +289,7 @@ impl Parser {
                 name,
                 value,
                 sticky,
+                reassign,
             });
         }
         if sticky {
@@ -444,6 +435,182 @@ impl Parser {
         };
         self.eat_newlines();
         Ok(Function { name, params, body })
+    }
+
+    /// Pine's `for i = from to to [by step]` and `for value in iterable`.
+    fn parse_for(&mut self) -> Result<Stmt, String> {
+        let line = self.line();
+        self.expect_ident("for")?;
+        let vars = if self.at_op("[") {
+            self.expect_op("[")?;
+            let mut names = Vec::new();
+            while !self.at_op("]") {
+                names.push(self.ident()?);
+                if !self.eat_op(",") {
+                    break;
+                }
+            }
+            self.expect_op("]")?;
+            names
+        } else {
+            vec![self.ident()?]
+        };
+        if self.eat_ident("in") {
+            let iterable = self.parse_expr()?;
+            self.end_line()?;
+            self.eat_newlines();
+            let body = self.parse_block()?;
+            self.eat_newlines();
+            return Ok(Stmt::ForIn {
+                line,
+                vars,
+                iterable,
+                body,
+            });
+        }
+        let Some(var) = vars.first().cloned() else {
+            return Err(format!("line {line}: `for` needs a variable"));
+        };
+        self.expect_op("=")?;
+        let from = self.parse_expr()?;
+        self.expect_ident("to")?;
+        let to = self.parse_expr()?;
+        let step = if self.eat_ident("by") {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        self.end_line()?;
+        self.eat_newlines();
+        let body = self.parse_block()?;
+        self.eat_newlines();
+        Ok(Stmt::For {
+            line,
+            var,
+            from,
+            to,
+            step,
+            body,
+        })
+    }
+
+    fn parse_while(&mut self) -> Result<Stmt, String> {
+        let line = self.line();
+        self.expect_ident("while")?;
+        let cond = self.parse_expr()?;
+        self.end_line()?;
+        self.eat_newlines();
+        let body = self.parse_block()?;
+        self.eat_newlines();
+        Ok(Stmt::While { line, cond, body })
+    }
+
+    /// `[a, b] = f(...)`, whose names take the values the call answers with. A bracketed line that
+    /// is not an assignment is an array value, which is how a function returns several values.
+    fn parse_tuple_assignment(&mut self, line: usize, sticky: bool) -> Result<Stmt, String> {
+        self.expect_op("[")?;
+        let mut items = Vec::new();
+        while !self.at_op("]") {
+            items.push(self.parse_expr()?);
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        self.expect_op("]")?;
+        if !self.eat_op("=") && !self.eat_op(":=") {
+            self.end_line()?;
+            self.eat_newlines();
+            return Ok(Stmt::Expr(Expr::Array(items)));
+        }
+        let mut names = Vec::new();
+        for item in items {
+            let Expr::Ident(name) = item else {
+                return Err(format!("line {line}: expected a name in a tuple assignment"));
+            };
+            names.push(name);
+        }
+        let value = self.parse_expr()?;
+        self.end_line()?;
+        self.eat_newlines();
+        Ok(Stmt::Tuple {
+            names,
+            value,
+            sticky,
+        })
+    }
+
+    /// `type Foo` or `enum Bar`: the indented fields with their defaults.
+    fn parse_type(&mut self) -> Result<TypeDecl, String> {
+        self.advance();
+        let name = self.ident()?;
+        self.end_line()?;
+        self.eat_newlines();
+        let body = self.parse_block()?;
+        let fields = body
+            .into_iter()
+            .filter_map(|statement| match statement {
+                Stmt::Assign { name, value, .. } => Some(FieldDecl {
+                    name,
+                    default: Some(value),
+                }),
+                // `box[] _box` leaves the type word behind and parses as the bare name.
+                Stmt::Expr(Expr::Ident(name)) => Some(FieldDecl {
+                    name,
+                    default: None,
+                }),
+                _ => None,
+            })
+            .collect();
+        Ok(TypeDecl { name, fields })
+    }
+
+    /// `x := value`, `x += value`, `object.field := value` and the compound field form.
+    fn parse_field_assignment(&mut self) -> Result<Stmt, String> {
+        let line = self.line();
+        let parsed = self.parse_postfix()?;
+        let compound = if self.at_op(":=") || self.at_op("=") {
+            None
+        } else {
+            let op = match self.peek() {
+                Token::Op(op) if matches!(*op, "+" | "-" | "*" | "/" | "%") => *op,
+                _ => return Err(format!("line {line}: expected an assignment")),
+            };
+            self.advance();
+            self.expect_op("=")?;
+            Some(op)
+        };
+        let value = match compound {
+            None => {
+                if !self.eat_op(":=") {
+                    self.expect_op("=")?;
+                }
+                self.parse_expr()?
+            }
+            Some(op) => {
+                let right = self.parse_expr()?;
+                Expr::Binary {
+                    op,
+                    left: Box::new(parsed.clone()),
+                    right: Box::new(right),
+                }
+            }
+        };
+        self.end_line()?;
+        self.eat_newlines();
+        match parsed {
+            Expr::Member { target, name } => Ok(Stmt::FieldAssign {
+                target: *target,
+                name,
+                value,
+            }),
+            Expr::Ident(name) => Ok(Stmt::Assign {
+                name,
+                value,
+                sticky: false,
+                reassign: true,
+            }),
+            _ => Err(format!("line {line}: expected an assignment")),
+        }
     }
 
     fn parse_if_statement(&mut self) -> Result<Stmt, String> {
@@ -714,12 +881,20 @@ impl Parser {
             }
             if self.eat_op("(") {
                 let args = self.parse_args_after_open()?;
-                // A call through a member path has no name; the runtime reports it as an
-                // unsupported object method.
-                let callee = path_of(&target).unwrap_or_default();
+                // `values.push(1)` keeps `values` as the receiver the runtime dispatches on;
+                // `f().g()` keeps `f()` there, whose dotted path has no name.
+                let callee = path_of(&target).unwrap_or_else(|| match &target {
+                    Expr::Member { name, .. } => vec![name.clone()],
+                    _ => Vec::new(),
+                });
+                let receiver = match &target {
+                    Expr::Member { target, .. } => Some(target.clone()),
+                    _ => None,
+                };
                 let expr = Expr::Call {
                     id: self.id(),
                     callee,
+                    receiver,
                     args,
                     line: self.line(),
                 };
@@ -963,6 +1138,33 @@ pub fn inputs_of(block: &Block, inputs: &mut Vec<InputDecl>) {
     for statement in block {
         match statement {
             Stmt::Assign { value, .. } | Stmt::Expr(value) => inputs_of_expr(value, inputs),
+            Stmt::Tuple { value, .. } => inputs_of_expr(value, inputs),
+            Stmt::FieldAssign { target, value, .. } => {
+                inputs_of_expr(target, inputs);
+                inputs_of_expr(value, inputs);
+            }
+            Stmt::For {
+                from,
+                to,
+                step,
+                body,
+                ..
+            } => {
+                inputs_of_expr(from, inputs);
+                inputs_of_expr(to, inputs);
+                if let Some(step) = step {
+                    inputs_of_expr(step, inputs);
+                }
+                inputs_of(body, inputs);
+            }
+            Stmt::ForIn { iterable, body, .. } => {
+                inputs_of_expr(iterable, inputs);
+                inputs_of(body, inputs);
+            }
+            Stmt::While { cond, body, .. } => {
+                inputs_of_expr(cond, inputs);
+                inputs_of(body, inputs);
+            }
             Stmt::If {
                 cond,
                 then,
@@ -975,7 +1177,7 @@ pub fn inputs_of(block: &Block, inputs: &mut Vec<InputDecl>) {
                 }
             }
             Stmt::Function(function) => inputs_of(&function.body, inputs),
-            Stmt::Unsupported { .. } => {}
+            Stmt::Break | Stmt::Continue | Stmt::Type(_) | Stmt::Unsupported { .. } => {}
         }
     }
 }

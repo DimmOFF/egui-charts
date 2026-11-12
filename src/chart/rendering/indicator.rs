@@ -316,14 +316,14 @@ impl IndicatorRenderer {
         }
         #[cfg(feature = "drawings")]
         if !indicator.drawings().is_empty() {
+            // Studies that draw boxes and lines may also plot values, so this neither returns
+            // nor replaces the plots: drawings sit beneath them.
             crate::chart::indicators::plots::paint_drawings(
                 context,
                 indicator,
                 price_scale,
                 coords,
             );
-            crate::chart::indicators::plots::paint_price_lines(&painter, indicator, price_scale);
-            return;
         }
         if !indicator.candles().is_empty() {
             crate::chart::indicators::plots::paint_candles(context, indicator, price_scale, coords);

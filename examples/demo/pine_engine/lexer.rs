@@ -72,7 +72,12 @@ pub fn lex(source: &str) -> Result<Vec<Spanned>, String> {
         }
 
         if !continuing {
-            let width = trimmed.len() - content.len();
+            // A tab is one level like four spaces, as TradingView reads mixed indentation.
+            let width: usize = trimmed
+                .chars()
+                .take_while(|character| character.is_whitespace())
+                .map(|character| if character == '\t' { 4 } else { 1 })
+                .sum();
             if width > *indents.last().unwrap_or(&0) {
                 indents.push(width);
                 tokens.push(Spanned {
@@ -296,6 +301,17 @@ mod tests {
                 "id", "id", "nl", "in", "id", "=", "num", "nl", "de", "id", "=", "num", "nl", "eof"
             ]
         );
+    }
+
+    #[test]
+    fn a_tab_is_four_spaces_of_indentation() {
+        // A tab-indented line and its four-space sibling are one block, not two.
+        let tokens = lex("x = 1\n\ta = 2\n    b = 3\n").unwrap();
+        let indents = tokens
+            .iter()
+            .filter(|spanned| spanned.token == Token::Indent)
+            .count();
+        assert_eq!(indents, 1);
     }
 
     #[test]

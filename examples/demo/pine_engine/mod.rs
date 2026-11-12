@@ -1,4 +1,4 @@
-//! A Pine Script subset: lexer, parser, evaluator and the [`PineStudy`] that charts it.
+﻿//! A Pine Script subset: lexer, parser, evaluator and the [`PineStudy`] that charts it.
 //!
 //! The subset covers what a user's ordinary indicator needs: series with `[n]`, `var`, `:=`,
 //! assignments and `if` values, user functions, `input.*`, `ta.*`, `math.*`, `color.*`, `str.*`,
@@ -63,8 +63,14 @@ impl Script {
     }
 
     /// Runs every bar. `diagnostics` then holds what the run itself could not do.
-    pub fn run(&self, bars: &[egui_charts::model::Bar], context: &Context) -> RunOutput {
-        let mut output = runtime::Evaluator::new(&self.program, bars, context, &self.values).run();
+    pub fn run(
+        &self,
+        bars: &[egui_charts::model::Bar],
+        context: &Context,
+        sources: &[runtime::SecurityData],
+    ) -> RunOutput {
+        let mut output =
+            runtime::Evaluator::new(&self.program, bars, context, &self.values, sources).run();
         output.diagnostics.extend(self.diagnostics.iter().cloned());
         dedup(&mut output.diagnostics);
         output
@@ -91,6 +97,9 @@ fn collect_unsupported(block: &Block, diagnostics: &mut Vec<Diagnostic>) {
                 if let Some(otherwise) = otherwise {
                     collect_unsupported(otherwise, diagnostics);
                 }
+            }
+            Stmt::For { body, .. } | Stmt::ForIn { body, .. } | Stmt::While { body, .. } => {
+                collect_unsupported(body, diagnostics);
             }
             Stmt::Function(function) => collect_unsupported(&function.body, diagnostics),
             _ => {}
@@ -125,17 +134,10 @@ mod tests {
     }
 
     #[test]
-    fn loops_and_tables_become_diagnostics_with_lines() {
+    fn loops_parse_without_diagnostics() {
         let script =
-            Script::parse("indicator(\"T\")\nfor i = 0 to 3\n    plot(close)\ntable.new(1, 1)\n")
-                .unwrap();
-        let lines: Vec<usize> = script
-            .diagnostics()
-            .iter()
-            .map(|diagnostic| diagnostic.line)
-            .collect();
-        assert!(lines.contains(&2), "{:?}", script.diagnostics());
-        // `table.new` is a plain call, so the run reports it; see `runtime::tests`.
+            Script::parse("indicator(\"T\")\nfor i = 0 to 3\n    plot(close)\n").unwrap();
+        assert!(script.diagnostics().is_empty(), "{:?}", script.diagnostics());
     }
 
     #[test]
@@ -162,7 +164,7 @@ mod tests {
                 )
             })
             .collect();
-        let output = script.run(&bars, &Context::default());
+        let output = script.run(&bars, &Context::default(), &[]);
         assert!(output.plots.is_empty());
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     }
@@ -173,8 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn every_script_in_temp_pine_parses_and_runs() {
-        let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/../../temp/pine");
+    fn every_script_in_temp_pine_parses_and_runs() {        let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/../../temp/pine");
         let Ok(entries) = std::fs::read_dir(directory) else {
             // The user's scripts are not part of the repository checkout.
             return;
@@ -206,14 +207,22 @@ mod tests {
                 Ok(script) => script,
                 Err(error) => panic!("{name}: {error}"),
             };
-            let output = script.run(&bars, &Context::default());
+            let output = script.run(&bars, &Context::default(), &[]);
             println!(
-                "{name}: {} notes, {} inputs, {} plots, {} shapes, {} run notes",
+                "{name}: {} notes, {} inputs, {} plots, {} shapes, {} drawings, {} table rows, {} run notes: {}",
                 script.diagnostics().len(),
                 script.inputs().len(),
                 output.plots.len(),
                 output.shapes.len(),
-                output.diagnostics.len()
+                output.drawings.len(),
+                output.tables.first().map_or(0, |table| table.rows.len()),
+                output.diagnostics.len(),
+                output
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| format!("{}: {}", diagnostic.line, diagnostic.message))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             );
         }
     }

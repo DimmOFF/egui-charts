@@ -525,11 +525,12 @@ fn fed(feed: &Arc<Script>, symbol: Option<&str>) -> Chart {
     }
 }
 
-/// Changing symbols fits the new prices, with or without a feed. Repeating a symbol,
-/// replacing its bars or reloading its feed preserves the user's manual range.
-/// Initial ratio-lock configuration still applies to the first frame of supplied bars.
+/// Changing symbols fits the new prices, with or without a feed, and keeps the user's manual
+/// choice: auto-scaling stays off after the fit. Repeating a symbol, replacing its bars or
+/// reloading its feed preserves the user's manual range. Initial ratio-lock configuration still
+/// applies to the first frame of supplied bars.
 #[test]
-fn symbol_changes_reset_manual_price_scaling() {
+fn symbol_changes_keep_manual_price_scaling_and_fit_new_prices() {
     for with_feed in [false, true] {
         for locked in [false, true] {
             let feed = Arc::new(Script::default());
@@ -583,7 +584,7 @@ fn symbol_changes_reset_manual_price_scaling() {
                 chart.set_data(SeriesId::MAIN, next);
             }
             frames.run(&mut chart);
-            assert!(!chart.state.price_scale().is_manual());
+            assert!(chart.state.price_scale().is_manual());
             assert!(!chart.state.price_scale().bar_ratio_locked());
             assert!(!chart.state.has_zoom_history());
             let range = chart.state.price_scale().range();

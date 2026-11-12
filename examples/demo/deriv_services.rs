@@ -161,9 +161,17 @@ struct Inner {
 type Persisted = BTreeMap<String, BTreeMap<String, String>>;
 
 impl FileStorage {
-    /// Opens the store in the user's data directory, reading the documents kept there.
+    /// Opens the store beside the executable, reading the documents kept there. A store left in
+    /// the old per-user directory seeds the new one once, so the move keeps the settings.
     pub fn open() -> Self {
-        Self::open_at(default_path())
+        let path = default_path();
+        if !path.exists()
+            && let Some(legacy) = legacy_path()
+            && legacy.exists()
+        {
+            let _ = std::fs::copy(&legacy, &path);
+        }
+        Self::open_at(path)
     }
 
     /// Opens or creates the store at `path`, reading the documents it already holds.
@@ -283,16 +291,23 @@ impl Storage for FileStorage {
     }
 }
 
-/// Where the store lives: the per-user application data directory.
+/// Where the store lives: beside the executable, so a development build does not overwrite the
+/// settings of another one.
 pub(crate) fn default_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("storage.json")))
+        .unwrap_or_else(|| PathBuf::from("storage.json"))
+}
+
+/// The per-user location the store used before it moved beside the executable.
+fn legacy_path() -> Option<PathBuf> {
     std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
         })
-        .unwrap_or_else(std::env::temp_dir)
-        .join("egui-charts-deriv")
-        .join("storage.json")
+        .map(|dir| dir.join("egui-charts-deriv").join("storage.json"))
 }
 
 fn kind_key(kind: StoreKind) -> &'static str {
@@ -343,6 +358,13 @@ fn flatten(tree: Persisted) -> HashMap<(StoreKind, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_store_lives_beside_the_executable() {
+        let exe = std::env::current_exe().expect("the test binary has a path");
+        assert_eq!(default_path().parent(), exe.parent());
+        assert_eq!(default_path().file_name().unwrap(), "storage.json");
+    }
 
     #[test]
     fn documents_survive_a_reopen() {

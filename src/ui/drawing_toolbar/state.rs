@@ -144,7 +144,7 @@ impl Default for ToolbarState {
             search_open: false,
             search_query: String::new(),
             glyph_picker: Default::default(),
-            values_tooltip_on_long_press: true, // Default: enabled
+            values_tooltip_on_long_press: false, // Off by default, as in the reference terminal
             eraser_mode_enabled: false,
             lock_all: false,
             hide_drawings: false,

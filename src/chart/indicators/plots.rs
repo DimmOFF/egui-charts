@@ -306,7 +306,10 @@ pub(crate) fn mapped_drawings(
     price_to_y: impl Fn(f64) -> f32,
 ) -> Vec<crate::drawings::Drawing> {
     let style = study.plot_style(0);
-    if !style.visible {
+    let keep_style = study.keeps_drawing_style();
+    // A study that paints its drawings in its own colours owns them: hiding its first plot,
+    // as Pine's `display=display.none` does, leaves the lines and labels alone.
+    if !keep_style && !style.visible {
         return Vec::new();
     }
     study
@@ -315,9 +318,11 @@ pub(crate) fn mapped_drawings(
         .filter(|drawing| drawing.visible)
         .map(|drawing| {
             let mut drawing = drawing.clone();
-            drawing.color = style.color.to_srgba_unmultiplied();
-            drawing.stroke_width = style.width;
-            drawing.line_style = style.pattern;
+            if !keep_style {
+                drawing.color = style.color.to_srgba_unmultiplied();
+                drawing.stroke_width = style.width;
+                drawing.line_style = style.pattern;
+            }
             drawing.update_screen_coords(|bar: f32| coords.index_to_x(f64::from(bar)), &price_to_y);
             drawing
         })
@@ -491,5 +496,83 @@ mod tests {
                 (4..5, 5, 399.0, 499.0)
             ]
         );
+    }
+
+    /// A Pine study hides its helper plots with `display=display.none`; the lines and labels it
+    /// draws beside them still belong on the chart.
+    #[test]
+    fn drawings_survive_a_hidden_first_plot() {
+        use crate::drawings::{ChartPoint, Drawing, DrawingToolType};
+        use crate::studies::IndicatorValues;
+
+        struct Hidden {
+            values: IndicatorValues,
+            drawings: Vec<Drawing>,
+        }
+
+        impl crate::studies::Indicator for Hidden {
+            fn name(&self) -> &str {
+                "Hidden"
+            }
+
+            fn calculate(&mut self, _: &[crate::model::Bar]) {}
+
+            fn values(&self) -> &IndicatorValues {
+                &self.values
+            }
+
+            fn colors(&self) -> Vec<egui::Color32> {
+                Vec::new()
+            }
+
+            fn set_colors(&mut self, _: Vec<egui::Color32>) {}
+
+            fn set_visible(&mut self, _: bool) {}
+
+            fn clone_box(&self) -> Box<dyn crate::studies::Indicator> {
+                Box::new(Self {
+                    values: self.values.clone(),
+                    drawings: self.drawings.clone(),
+                })
+            }
+
+            fn plot_style(&self, _: usize) -> crate::studies::PlotStyle {
+                crate::studies::PlotStyle {
+                    color: egui::Color32::WHITE,
+                    width: 1.0,
+                    pattern: crate::model::LineStyle::Solid,
+                    plot_type: crate::studies::PlotType::Line,
+                    visible: false,
+                }
+            }
+
+            fn drawings(&self) -> &[Drawing] {
+                &self.drawings
+            }
+
+            fn keeps_drawing_style(&self) -> bool {
+                true
+            }
+        }
+
+        let mut line = Drawing::new(0, DrawingToolType::TrendLine);
+        line.chart_points = vec![ChartPoint::new(0.0, 100.0), ChartPoint::new(5.0, 110.0)];
+        line.completed = true;
+        let study = Hidden {
+            values: IndicatorValues::new(),
+            drawings: vec![line],
+        };
+        let price = PriceMap::new(
+            PriceTransform::default(),
+            PriceRange::new(80.0, 140.0),
+            0.0,
+            120.0,
+            false,
+        );
+        let rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(600.0, 120.0));
+        let coords = ChartMapping::new(rect, 100.0, 0, 5, 0.0, price);
+        let drawings = mapped_drawings(&study, &coords, |price| price as f32);
+        assert_eq!(drawings.len(), 1);
+        assert_eq!(drawings[0].points.len(), 2);
     }
 }

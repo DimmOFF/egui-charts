@@ -6,6 +6,7 @@ use egui_charts::data::{
 };
 use egui_charts::model::{Bar, Instrument, Tick, Timeframe};
 use futures_util::{SinkExt, StreamExt};
+use std::num::NonZeroU64;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use super::catalog::Symbols;
@@ -32,10 +33,14 @@ pub const SYMBOLS: &[(&str, &str)] = &[
 /// The intervals Deriv serves as native candles.
 pub const TIMEFRAMES: &[Timeframe] = &[
     Timeframe::Min1,
+    Timeframe::Custom(NonZeroU64::new(120).unwrap()),
+    Timeframe::Custom(NonZeroU64::new(180).unwrap()),
     Timeframe::Min5,
+    Timeframe::Custom(NonZeroU64::new(600).unwrap()),
     Timeframe::Min15,
     Timeframe::Min30,
     Timeframe::Hour1,
+    Timeframe::Custom(NonZeroU64::new(7200).unwrap()),
     Timeframe::Hour4,
     Timeframe::Day1,
 ];
@@ -75,6 +80,12 @@ impl DerivFeed {
             Timeframe::Hour1 => 3600,
             Timeframe::Hour4 => 14400,
             Timeframe::Day1 => 86400,
+            // The 2m, 3m, 10m and 2h presets are native too; one-minute candles would make the
+            // chart keep only the last minute of each slot.
+            Timeframe::Custom(seconds) => match seconds.get() {
+                120 | 180 | 600 | 7200 => seconds.get() as u32,
+                _ => 60,
+            },
             _ => 60,
         }
     }
@@ -326,5 +337,28 @@ impl Datafeed for DerivFeed {
         if let Err(error) = spawn {
             eprintln!("Could not start Deriv stream worker: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DerivFeed;
+    use egui_charts::model::Timeframe;
+    use std::num::NonZeroU64;
+
+    fn custom(seconds: u64) -> Timeframe {
+        Timeframe::Custom(NonZeroU64::new(seconds).unwrap())
+    }
+
+    /// Native granularities keep every slot filled; 1m source candles would leave two of every
+    /// three 3m slots empty.
+    #[test]
+    fn native_intervals_are_requested_as_they_are() {
+        assert_eq!(DerivFeed::granularity(custom(180)), 180);
+        assert_eq!(DerivFeed::granularity(custom(120)), 120);
+        assert_eq!(DerivFeed::granularity(custom(600)), 600);
+        assert_eq!(DerivFeed::granularity(custom(7200)), 7200);
+        assert_eq!(DerivFeed::granularity(Timeframe::Min5), 300);
+        assert_eq!(DerivFeed::granularity(Timeframe::Min1), 60);
     }
 }

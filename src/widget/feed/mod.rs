@@ -499,7 +499,9 @@ impl Chart {
                 self.history.clear();
             }
             self.history.edits += 1;
-            self.state.price_scale_mut().reset();
+            // The user's manual choice outlives the new prices: the first bars of the new
+            // symbol are fitted once, then autoscaling stays off, as in the reference terminal.
+            self.refit_price_on_data = true;
             self.state.clear_zoom_history();
             self.pending_scroll_time = None;
             self.legend_instrument = None;

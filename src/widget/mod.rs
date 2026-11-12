@@ -265,6 +265,8 @@ pub struct Chart {
     pub(crate) pending_start_idx: Option<usize>,
     /// Timestamp to centre, retained while older history is loading.
     pub(crate) pending_scroll_time: Option<DateTime<Utc>>,
+    /// Whether the next main bars must fit the price scale once after a symbol change.
+    pub(crate) refit_price_on_data: bool,
     /// Animated scroll requested by the host, advanced each frame (UI state only)
     scroll_animation: Option<time_scale::ScrollAnimation>,
     /// Time axis below the plots in the last frame; zero height while its labels are hidden
@@ -714,6 +716,11 @@ impl Chart {
     /// Enables the configured values readout without changing pan or zoom.
     pub fn set_tooltip_enabled(&mut self, enabled: bool) {
         self.chart_options.tooltip.enabled = enabled;
+    }
+
+    /// Shows the configured values readout only while the pointer is held, like a touch long press.
+    pub fn set_tooltip_on_long_press(&mut self, on_long_press: bool) {
+        self.chart_options.tooltip.on_long_press = on_long_press;
     }
 
     /// The rising and falling body, border and wick colors of a chart type that series settings

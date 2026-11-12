@@ -155,6 +155,7 @@ impl Volume24h {
             } else {
                 "Quote amount unavailable".into()
             })]],
+            ..StudyTable::default()
         });
     }
 

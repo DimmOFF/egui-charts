@@ -1,16 +1,17 @@
 //! A parsed Pine script as a chart study: its plots become lines, `fill` becomes a band and
-//! `plotshape` becomes markers.
+//! `plotshape` becomes text labels.
 
 use egui::Color32;
+use egui_charts::drawings::{ChartPoint, Drawing, DrawingToolType};
 use egui_charts::model::{Bar, Instrument, Timeframe};
 use egui_charts::studies::{
     CrossDirection, Indicator, IndicatorMarker, IndicatorValues, InputKind, InputValue, PlotType,
-    StudyError, StudyFill, StudyInput,
+    StudyData, StudyDataRequest, StudyError, StudyFill, StudyInput, StudyTable,
 };
 
 use crate::pine_engine::Script;
 use crate::pine_engine::ast::InputDecl;
-use crate::pine_engine::runtime::Context;
+use crate::pine_engine::runtime::{Context, DrawingKind, DrawingOutput, SecurityData, ShapeMark};
 use crate::pine_engine::value::Value;
 
 /// A Pine script that the chart calculates and draws.
@@ -24,11 +25,19 @@ pub struct PineStudy {
     colors: Vec<Color32>,
     line_names: Vec<String>,
     plot_types: Vec<PlotType>,
+    patterns: Vec<egui_charts::model::LineStyle>,
+    plot_visible: Vec<bool>,
     widths: Vec<f32>,
     offsets: Vec<isize>,
     per_bar_colors: Vec<Vec<Option<Color32>>>,
     fills: Vec<StudyFill>,
     markers: Vec<IndicatorMarker>,
+    drawings: Vec<Drawing>,
+    tables: Vec<StudyTable>,
+    /// Histories the last run read for `request.security` on other symbols.
+    sources: Vec<SecurityData>,
+    /// Other-symbol histories the script asks the chart for, as `(symbol, interval)`.
+    requests: Vec<(String, Timeframe)>,
     inputs: Vec<StudyInput>,
     visible: bool,
 }
@@ -49,11 +58,17 @@ impl PineStudy {
             colors: Vec::new(),
             line_names: Vec::new(),
             plot_types: Vec::new(),
+            patterns: Vec::new(),
+            plot_visible: Vec::new(),
             widths: Vec::new(),
             offsets: Vec::new(),
             per_bar_colors: Vec::new(),
             fills: Vec::new(),
             markers: Vec::new(),
+            drawings: Vec::new(),
+            tables: Vec::new(),
+            sources: Vec::new(),
+            requests: Vec::new(),
             inputs,
             visible: true,
         })
@@ -71,7 +86,7 @@ impl Indicator for PineStudy {
     }
 
     fn calculate(&mut self, data: &[Bar]) {
-        let output = self.script.run(data, &self.context);
+        let output = self.script.run(data, &self.context, &self.sources);
         self.values = IndicatorValues::new();
         let mut row = vec![f64::NAN; output.plots.len()];
         for bar in 0..data.len() {
@@ -83,6 +98,8 @@ impl Indicator for PineStudy {
         self.line_names = output.plots.iter().map(|plot| plot.title.clone()).collect();
         self.colors = output.plots.iter().map(|plot| plot.color).collect();
         self.plot_types = output.plots.iter().map(|plot| plot.plot_type).collect();
+        self.patterns = output.plots.iter().map(|plot| plot.pattern).collect();
+        self.plot_visible = output.plots.iter().map(|plot| plot.visible).collect();
         self.widths = output.plots.iter().map(|plot| plot.width).collect();
         self.offsets = output.plots.iter().map(|plot| plot.offset).collect();
         self.per_bar_colors = output
@@ -91,6 +108,18 @@ impl Indicator for PineStudy {
             .map(|plot| plot.colors.clone())
             .collect();
         self.fills = output.fills;
+        self.drawings = output.drawings.iter().map(study_drawing).collect();
+        // The chart paints no study markers, so each `plotshape` mark becomes a text label with
+        // the shape's glyph or the script's `text=`.
+        self.drawings.extend(
+            output
+                .shapes
+                .iter()
+                .filter(|shape| !shape.text.is_empty())
+                .map(study_shape),
+        );
+        self.tables = output.tables;
+        self.requests = output.security_requests;
         self.markers = output
             .shapes
             .iter()
@@ -108,6 +137,29 @@ impl Indicator for PineStudy {
 
     fn values(&self) -> &IndicatorValues {
         &self.values
+    }
+
+    fn data_requests(&self) -> Vec<StudyDataRequest> {
+        self.requests
+            .iter()
+            .map(|(symbol, timeframe)| StudyDataRequest {
+                symbol: symbol.clone(),
+                timeframe: Some(*timeframe),
+                metric: None,
+            })
+            .collect()
+    }
+
+    fn update_data(&mut self, data: &[Bar], _from: usize, sources: &[StudyData<'_>]) {
+        self.sources = sources
+            .iter()
+            .map(|source| SecurityData {
+                symbol: source.request.symbol.clone(),
+                timeframe: source.timeframe,
+                bars: source.bars.to_vec(),
+            })
+            .collect();
+        self.calculate(data);
     }
 
     fn inputs(&self) -> Vec<StudyInput> {
@@ -153,9 +205,9 @@ impl Indicator for PineStudy {
         egui_charts::studies::PlotStyle {
             color: self.colors.get(line).copied().unwrap_or(Color32::WHITE),
             width: self.widths.get(line).copied().unwrap_or(1.0),
-            pattern: egui_charts::model::LineStyle::Solid,
+            pattern: self.patterns.get(line).copied().unwrap_or_default(),
             plot_type: self.plot_types.get(line).copied().unwrap_or_default(),
-            visible: true,
+            visible: self.plot_visible.get(line).copied().unwrap_or(true),
         }
     }
 
@@ -175,8 +227,24 @@ impl Indicator for PineStudy {
         self.fills.clone()
     }
 
+    fn table(&self) -> Option<&StudyTable> {
+        self.tables.first()
+    }
+
+    fn tables(&self) -> Vec<&StudyTable> {
+        self.tables.iter().collect()
+    }
+
     fn markers(&self) -> &[IndicatorMarker] {
         &self.markers
+    }
+
+    fn drawings(&self) -> &[Drawing] {
+        &self.drawings
+    }
+
+    fn keeps_drawing_style(&self) -> bool {
+        true
     }
 
     fn line_names(&self) -> Vec<String> {
@@ -207,14 +275,88 @@ impl Indicator for PineStudy {
         let symbol = instrument
             .map(|instrument| instrument.symbol.clone())
             .unwrap_or_default();
-        let changed = symbol != self.context.symbol;
+        let mintick = instrument
+            .and_then(|instrument| instrument.tick_size)
+            .filter(|tick| *tick > 0.0)
+            .unwrap_or(0.01);
+        let exchange = instrument
+            .and_then(|instrument| instrument.exchange.clone())
+            .unwrap_or_default();
+        let root = instrument
+            .and_then(|instrument| instrument.root.clone())
+            .unwrap_or_else(|| symbol.clone());
+        let symbol_type = instrument
+            .and_then(|instrument| instrument.symbol_type)
+            .map(|kind| kind.to_string())
+            .unwrap_or_default();
+        let changed = symbol != self.context.symbol
+            || mintick != self.context.mintick
+            || exchange != self.context.exchange
+            || root != self.context.root
+            || symbol_type != self.context.symbol_type;
         self.context.symbol = symbol;
+        self.context.mintick = mintick;
+        self.context.exchange = exchange;
+        self.context.root = root;
+        self.context.symbol_type = symbol_type;
         changed
     }
 
     fn clone_box(&self) -> Box<dyn Indicator> {
         Box::new(self.clone())
     }
+}
+
+/// One Pine drawing as a chart drawing: a trend line, a text label or a rectangle.
+fn study_drawing(output: &DrawingOutput) -> Drawing {
+    let (tool, points) = match output.kind {
+        DrawingKind::Line => (DrawingToolType::TrendLine, vec![output.first, output.second]),
+        DrawingKind::Label => (DrawingToolType::TextLabel, vec![output.first]),
+        DrawingKind::Box => (DrawingToolType::Rect, vec![output.first, output.second]),
+        // A `linefill` is the polygon through both lines' ends.
+        DrawingKind::Fill => {
+            let mut points = vec![output.first, output.second];
+            points.extend(output.quad.into_iter().flatten());
+            (DrawingToolType::Polyline, points)
+        }
+    };
+    let mut drawing = Drawing::new(0, tool);
+    drawing.chart_points = points
+        .into_iter()
+        .map(|(bar, price)| ChartPoint::new(bar, price))
+        .collect();
+    drawing.completed = true;
+    drawing.closed = output.kind == DrawingKind::Fill;
+    drawing.color = output.color.to_srgba_unmultiplied();
+    drawing.stroke_width = output.width;
+    drawing.line_style = output.style;
+    drawing.font_size = output.font_size;
+    drawing.fill_color = output
+        .fill_color
+        .map(|color| color.to_srgba_unmultiplied());
+    drawing.text_color = output
+        .text_color
+        .map(|color| color.to_srgba_unmultiplied());
+    if !output.text.is_empty() {
+        drawing.text = Some(output.text.clone());
+    }
+    drawing
+}
+
+/// A `plotshape` mark as a text label at its bar and price.
+fn study_shape(mark: &ShapeMark) -> Drawing {
+    let mut drawing = Drawing::new(0, DrawingToolType::TextLabel);
+    drawing.chart_points = vec![ChartPoint::new(mark.bar as f32, mark.value)];
+    drawing.completed = true;
+    drawing.color = mark.color.to_srgba_unmultiplied();
+    drawing.font_size = mark.font_size;
+    drawing.text_color = Some(
+        mark.text_color
+            .unwrap_or(mark.color)
+            .to_srgba_unmultiplied(),
+    );
+    drawing.text = Some(mark.text.clone());
+    drawing
 }
 
 /// The library schema of one `input.*` call.
@@ -352,8 +494,115 @@ mod tests {
     }
 
     #[test]
-    fn plotshape_becomes_markers() {
+    fn display_none_reaches_the_plot_style() {
+        let mut study =
+            PineStudy::new("indicator(\"T\")\nplot(close, display=display.none)\n").unwrap();
+        study.calculate(&bars(&[1.0]));
+        assert!(!study.plot_style(0).visible);
+    }
+
+    #[test]
+    fn another_symbol_becomes_a_study_data_request() {
         let mut study = PineStudy::new(
+            "indicator(\"T\")\nplot(request.security(\"BTCUSDT\", \"5\", close))\n",
+        )
+        .unwrap();
+        assert!(study.data_requests().is_empty());
+        study.calculate(&bars(&[1.0, 2.0]));
+        let requests = study.data_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].symbol, "BTCUSDT");
+        assert_eq!(requests[0].timeframe, Some(Timeframe::Min5));
+    }
+
+    #[test]
+    fn another_symbol_history_reaches_the_plot() {
+        let mut study = PineStudy::new(
+            "indicator(\"T\")\nplot(request.security(\"OTHER\", \"2\", close))\n",
+        )
+        .unwrap();
+        let chart = bars(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        study.calculate(&chart);
+        let request = study.data_requests().pop().expect("another symbol");
+        assert_eq!(request.timeframe, Some(Timeframe::Custom(120.try_into().unwrap())));
+        let source: Vec<Bar> = [100.0, 200.0, 300.0, 400.0, 500.0]
+            .iter()
+            .enumerate()
+            .map(|(at, close)| {
+                Bar::new(
+                    DateTime::UNIX_EPOCH + chrono::Duration::minutes(at as i64 * 2),
+                    *close,
+                    *close,
+                    *close,
+                    *close,
+                    1.0,
+                )
+            })
+            .collect();
+        let timeframe = Timeframe::Custom(120.try_into().unwrap());
+        let data = StudyData {
+            request,
+            bars: &source,
+            clock: egui_charts::model::BarClock::new(timeframe),
+            instrument: None,
+            timeframe,
+        };
+        study.update_data(&chart, 0, &[data]);
+        assert!(study.values().value(0, 0).is_none());
+        assert!(study.values().value(0, 1).is_none());
+        assert_eq!(study.values().value(0, 2), Some(100.0));
+        assert_eq!(study.values().value(0, 3), Some(100.0));
+        assert_eq!(study.values().value(0, 4), Some(200.0));
+    }
+
+    #[test]
+    fn plotchar_text_is_drawn_as_a_label() {
+        let mut study = PineStudy::new(
+            "indicator(\"T\", overlay=true)\nplotchar(close > 0, text=\"Mon\", location=location.abovebar)\n",
+        )
+        .unwrap();
+        study.calculate(&bars(&[10.0]));
+        let drawings = study.drawings();
+        assert_eq!(drawings.len(), 1);
+        assert_eq!(drawings[0].text.as_deref(), Some("Mon"));
+        assert_eq!(drawings[0].chart_points[0].price, 11.0);
+    }
+
+    #[test]
+    fn syminfo_reads_the_instrument() {
+        let mut study = PineStudy::new(
+            "indicator(\"T\")\nplot(syminfo.type == \"crypto\" ? 1 : 0)\nplot(str.length(syminfo.prefix))\nplot(str.length(syminfo.root))\n",
+        )
+        .unwrap();
+        let mut instrument = Instrument::new("BTCUSDT");
+        instrument.exchange = Some("BINANCE".into());
+        instrument.root = Some("BTC".into());
+        instrument.symbol_type = Some(egui_charts::model::SymbolType::Crypto);
+        assert!(study.set_instrument(Some(&instrument)));
+        study.calculate(&bars(&[1.0]));
+        assert_eq!(study.values().value(0, 0), Some(1.0));
+        assert_eq!(study.values().value(1, 0), Some(7.0));
+        assert_eq!(study.values().value(2, 0), Some(3.0));
+    }
+
+    #[test]
+    fn a_pine_line_becomes_a_chart_drawing() {
+        let mut study = PineStudy::new(
+            "//@version=6\nindicator(\"L\", overlay=true)\nif barstate.islast\n    line.new(0, low, bar_index, high, color=color.red, width=2)\n",
+        )
+        .unwrap();
+        let data = bars(&[1.0, 2.0, 3.0]);
+        study.calculate(&data);
+        let drawings = study.drawings();
+        assert_eq!(drawings.len(), 1);
+        assert_eq!(drawings[0].chart_points.len(), 2);
+        assert_eq!(drawings[0].chart_points[0].bar_idx, 0.0);
+        assert_eq!(drawings[0].chart_points[1].bar_idx, 2.0);
+        assert!(study.keeps_drawing_style());
+    }
+
+    #[test]
+    fn plotshape_becomes_markers() {        let mut study = PineStudy::new(
             "//@version=4\nstudy(\"Fractals\", overlay=true)\nn = input(title=\"Periods\", defval=2, type=input.integer)\ndn = high[2] > high[1] and high[2] > high[0]\nplotshape(dn, location=location.abovebar, color=color.white)\n",
         )
         .unwrap();

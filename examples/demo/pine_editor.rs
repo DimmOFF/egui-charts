@@ -78,10 +78,14 @@ impl PineScripts {
             return false;
         }
         let mut open = self.open;
+        let mut close = false;
         let mut changed = false;
         egui::Window::new("Pine-скрипты")
             .open(&mut open)
-            .default_size([640.0, 560.0])
+            .default_size([860.0, 640.0])
+            .min_size([420.0, 320.0])
+            .max_size([1100.0, 900.0])
+            .resizable(true)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let current = self
@@ -124,12 +128,23 @@ impl PineScripts {
                     }
                 });
                 ui.separator();
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.draft)
-                        .code_editor()
-                        .desired_rows(24)
-                        .desired_width(f32::INFINITY),
-                );
+                // Without a bounded height the editor asks for every row it holds, the window grows
+                // past the screen and its close button goes with it. The width is passed in too:
+                // left to itself the field shrinks to a few characters inside the scroll area.
+                let width = ui.available_width();
+                let height = (ui.available_height() - 60.0).clamp(160.0, 900.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("pine-code")
+                    .max_height(height)
+                    .show(ui, |ui| {
+                        ui.set_min_width(width);
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.draft)
+                                .code_editor()
+                                .desired_rows(24)
+                                .desired_width(width),
+                        );
+                    });
                 ui.horizontal(|ui| {
                     if ui.button("Применить").clicked() {
                         changed = true;
@@ -139,12 +154,15 @@ impl PineScripts {
                         changed = true;
                         self.import();
                     }
+                    if ui.button("Закрыть").clicked() {
+                        close = true;
+                    }
                 });
                 for line in &self.status {
                     ui.label(line);
                 }
             });
-        self.open = open;
+        self.open = open && !close;
         changed
     }
 

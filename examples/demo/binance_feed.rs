@@ -58,6 +58,8 @@ impl BinanceFeed {
         Self { symbols }
     }
 
+    /// The interval Binance serves: its own, so bars come already bucketed instead of one-minute
+    /// bars that the chart's clock would drop to the last minute of every slot.
     fn interval(timeframe: Timeframe) -> &'static str {
         match timeframe {
             Timeframe::Min5 => "5m",
@@ -66,6 +68,13 @@ impl BinanceFeed {
             Timeframe::Hour1 => "1h",
             Timeframe::Hour4 => "4h",
             Timeframe::Day1 => "1d",
+            Timeframe::Custom(seconds) => match seconds.get() {
+                120 => "2m",
+                180 => "3m",
+                600 => "10m",
+                7200 => "2h",
+                _ => "1m",
+            },
             _ => "1m",
         }
     }
@@ -343,5 +352,28 @@ impl Quotes for BinanceQuotes {
                 });
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BinanceFeed;
+    use egui_charts::model::Timeframe;
+    use std::num::NonZeroU64;
+
+    fn custom(seconds: u64) -> Timeframe {
+        Timeframe::Custom(NonZeroU64::new(seconds).unwrap())
+    }
+
+    /// The 3m preset has to be requested as 3m candles: one-minute candles leave the chart's
+    /// three-minute slots empty for two of every three minutes, which draws ragged bars.
+    #[test]
+    fn native_intervals_are_requested_as_they_are() {
+        assert_eq!(BinanceFeed::interval(custom(180)), "3m");
+        assert_eq!(BinanceFeed::interval(custom(120)), "2m");
+        assert_eq!(BinanceFeed::interval(custom(600)), "10m");
+        assert_eq!(BinanceFeed::interval(custom(7200)), "2h");
+        assert_eq!(BinanceFeed::interval(Timeframe::Min5), "5m");
+        assert_eq!(BinanceFeed::interval(Timeframe::Min1), "1m");
     }
 }

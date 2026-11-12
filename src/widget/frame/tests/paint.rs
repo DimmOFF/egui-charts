@@ -1134,6 +1134,32 @@ fn volume_uses_themes_alpha_and_pitch_above_a_configured_baseline() {
     }
 }
 
+/// An empty chart says it is waiting for its first page, then whether the feed has no data or
+/// failed, instead of calling every empty chart one with no data.
+#[test]
+fn an_empty_chart_says_whether_it_is_loading_or_failed() {
+    let painted = |chart: &mut crate::widget::Chart, expected: &str| {
+        let ctx = egui::Context::default();
+        let shapes = shapes(&ctx, chart, 0.0, Vec::new());
+        let texts: Vec<String> = shapes
+            .iter()
+            .filter_map(|shape| match shape {
+                Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|text| text == expected), "{texts:?}");
+    };
+    let mut chart = crate::widget::Chart::new(crate::model::BarData::new());
+    chart.feed.loading_history = true;
+    painted(&mut chart, "Loading data…");
+    chart.feed.loading_history = false;
+    chart.feed.history_complete = true;
+    painted(&mut chart, "No data available");
+    chart.feed.last_error = Some(crate::data::FeedError::SymbolNotFound("NOPE".into()));
+    painted(&mut chart, "No data: symbol not found: NOPE");
+}
+
 /// Saved settings drive feed footprints, selected statistics and session profiles together.
 #[cfg(feature = "ui")]
 #[test]

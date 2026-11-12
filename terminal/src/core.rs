@@ -301,6 +301,7 @@ impl Terminal {
     }
 
     fn group_settings(&mut self, settings: &mut UserSettings, direction: Direction) {
+        self.chart_settings(settings, direction);
         self.drawings_settings(settings, direction);
         self.studies_settings(settings, direction);
         self.time_settings(settings, direction);

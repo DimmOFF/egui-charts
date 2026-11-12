@@ -152,6 +152,12 @@ pub trait Indicator: Send {
         None
     }
 
+    /// Every table the study draws, such as a Pine script's panel and its watermark. The default
+    /// is [`Self::table`]; studies with more than one table override this.
+    fn tables(&self) -> Vec<&super::StudyTable> {
+        self.table().into_iter().collect()
+    }
+
     /// Whether this study stores presentation edits itself. Charts wrap other studies once.
     fn has_settings(&self) -> bool {
         false
@@ -685,6 +691,14 @@ pub trait Indicator: Send {
     #[cfg(feature = "drawings")]
     fn drawings(&self) -> &[crate::drawings::Drawing] {
         &[]
+    }
+
+    /// Whether [`drawings`](Self::drawings) keep the colour, stroke width and line style they
+    /// carry instead of adopting plot 0's style. Defaults to `false`, which gives built-in
+    /// drawings one style.
+    #[cfg(feature = "drawings")]
+    fn keeps_drawing_style(&self) -> bool {
+        false
     }
 
     /// Market Profile settings of a study whose session profiles the chart builds with

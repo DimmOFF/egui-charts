@@ -1543,17 +1543,17 @@ impl Chart {
                 for id in &members {
                     if let Some(idx) = self.study_ids.iter().position(|study| study == id) {
                         let study = &studies.indicators()[idx];
-                        if study.is_visible()
-                            && let Some(table) = study.table()
-                        {
-                            table_rect.max.y = crate::studies::table::paint(
-                                ui,
-                                table_rect,
-                                table,
-                                ui.scope_id().with((pane_id, id)),
-                            )
-                            .top()
-                                - 8.0;
+                        if study.is_visible() {
+                            for table in study.tables() {
+                                table_rect.max.y = crate::studies::table::paint(
+                                    ui,
+                                    table_rect,
+                                    table,
+                                    ui.scope_id().with((pane_id, id)),
+                                )
+                                .top()
+                                    - 8.0;
+                            }
                         }
                     }
                 }

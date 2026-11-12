@@ -212,6 +212,11 @@ fn match_declared_styles(study: &dyn Indicator, settings: &mut StudySettings) {
         let mut middle = levels[2];
         middle.visible = false;
         settings.levels.push(middle);
+    } else if study.name() == "KST" && settings.levels.is_empty() && levels.len() == 1 {
+        // Saved before it had a zero guide, a KST keeps drawing none until the guide is shown.
+        let mut zero = levels[0];
+        zero.visible = false;
+        settings.levels.push(zero);
     } else if settings.levels.len() != levels.len() {
         settings.levels = levels;
         settings.fill_between_levels = fill;
@@ -302,8 +307,10 @@ pub struct StudySettings {
     #[serde(default = "enabled_by_default")]
     pub show_legend_values: bool,
     /// Allow user edits through settings, legend and context controls. Host APIs remain writable.
-    #[serde(default = "enabled_by_default")]
-    pub user_edit_enabled: bool,
+    /// `None` keeps the permission declared by the study.
+    /// Read the effective permission through [`Indicator::user_edit_enabled`].
+    #[serde(default)]
+    pub user_edit_enabled: Option<bool>,
     /// Help article requested through the host. None uses the underlying study's metadata.
     #[serde(default)]
     pub help_url: Option<String>,
@@ -320,6 +327,8 @@ pub struct StudySettings {
     /// One style per level of the study's pane, in the order of
     /// [`StudyPane::levels`](super::StudyPane::levels). Settings saved before levels were
     /// editable, and settings with another number of levels, take the study's own levels and fill.
+    /// Only the guide declared since is added, hidden, to a Stochastic saved with two levels or a
+    /// Know Sure Thing saved with none.
     #[serde(default)]
     pub levels: Vec<LevelStyle>,
     /// Whether the band between the boundary levels is filled.
@@ -369,7 +378,7 @@ fn enabled_by_default() -> bool {
 #[derive(Clone)]
 pub struct StudySettingsSnapshot {
     inputs: Vec<(String, InputValue)>,
-    settings: StudySettings,
+    pub(crate) settings: StudySettings,
     timeframe: Option<Timeframe>,
     colors: Vec<Color32>,
     visible: bool,
@@ -549,8 +558,10 @@ impl ConfiguredStudy {
 
     /// Whether the study can be calculated on another interval: it reads one source, or the bars
     /// alone, without data of its own to request or order flow it cannot do without.
+    /// An accepted interval stays available if calculating on it changes those requests.
     fn runs_on_other_bars(&self) -> bool {
-        self.study.source().is_some()
+        self.calculation_timeframe.is_some()
+            || self.study.source().is_some()
             || (self.study.data_requests().is_empty() && !self.study.needs_order_flow())
     }
     /// The bars evicted since the study was last calculated, by which the bars of its kept values
@@ -589,7 +600,9 @@ impl Indicator for ConfiguredStudy {
     }
 
     fn user_edit_enabled(&self) -> bool {
-        self.settings.user_edit_enabled
+        self.settings
+            .user_edit_enabled
+            .unwrap_or_else(|| self.study.user_edit_enabled())
     }
     fn help_url(&self) -> Option<&str> {
         self.settings
@@ -610,9 +623,10 @@ impl Indicator for ConfiguredStudy {
     fn inputs(&self) -> Vec<super::StudyInput> {
         let mut inputs = self.study.inputs();
         if let Some(default) = self.study.source() {
-            let initial = inputs
-                .iter()
-                .find(|input| input.id == "source")
+            let own = inputs.iter().find(|input| input.id == "source");
+            // A study that names its source, where only part of it reads the source, keeps that name.
+            let label = own.map_or_else(|| "Source".into(), |input| input.label.clone());
+            let initial = own
                 .and_then(|input| match input.default {
                     InputValue::Choice(index) => crate::model::PriceSource::all()
                         .get(index)
@@ -626,7 +640,7 @@ impl Indicator for ConfiguredStudy {
             inputs.push(
                 super::StudyInput::new(
                     "source",
-                    "Source",
+                    label,
                     InputValue::Source(self.source.unwrap_or(default)),
                     super::InputKind::Source,
                 )
@@ -1124,6 +1138,8 @@ impl Indicator for ConfiguredStudy {
         let mut snapshot =
             StudySettingsSnapshot::capture(self.study.as_ref(), self.study.is_visible());
         snapshot.settings = self.settings.clone();
+        // As `settings` returns it, so applying unchanged settings adds no history step.
+        snapshot.settings.user_edit_enabled = Some(self.user_edit_enabled());
         snapshot.timeframe = self.timeframe;
         snapshot.overlay = self.overlay;
         snapshot.scale = self.scale;
@@ -1183,6 +1199,7 @@ impl Indicator for ConfiguredStudy {
     }
     fn settings(&self) -> StudySettings {
         let mut settings = self.settings.clone();
+        settings.user_edit_enabled = Some(self.user_edit_enabled());
         // A study can declare a band after its settings were last applied.
         match_declared_styles(self.study.as_ref(), &mut settings);
         settings
@@ -1240,11 +1257,18 @@ impl Indicator for ConfiguredStudy {
         }
         let mut edited = self.clone();
         let mut inputs: Vec<_> = inputs.iter().collect();
-        if inputs.iter().any(|(id, value)| {
-            id == "source" && matches!(value, InputValue::Source(super::StudySource::Study { .. }))
-        }) {
-            inputs.sort_by_key(|(id, _)| {
-                !matches!(id.as_str(), "calculation_symbol" | "calculation_timeframe")
+        // Close-wait applies before clearing its interval; both precede the study's own inputs.
+        if (edited.study.source().is_none() && edited.runs_on_other_bars())
+            || edited.calculation_timeframe.is_some()
+            || inputs.iter().any(|(id, value)| {
+                id == "source"
+                    && matches!(value, InputValue::Source(super::StudySource::Study { .. }))
+            })
+        {
+            inputs.sort_by_key(|(id, _)| match id.as_str() {
+                "wait_for_close" => 0,
+                "calculation_symbol" | "calculation_timeframe" => 1,
+                _ => 2,
             });
         }
         for (id, value) in inputs {
@@ -1410,6 +1434,24 @@ impl Indicator for ConfiguredStudy {
             .filter_map(|mut plot| {
                 plot.bars = chart_bars(&self.spans, &plot.bars)?;
                 Some(plot)
+            })
+            .collect()
+    }
+    fn profile_levels(&self, visible: std::ops::Range<usize>) -> Vec<crate::data::ProfileLevel> {
+        // Kept levels would index the evicted bars too.
+        if self.kept.is_some() {
+            return Vec::new();
+        }
+        if self.aligned.is_none() {
+            return self.study.profile_levels(visible);
+        }
+        // Source bars of a study on another interval or symbol are not chart bars.
+        self.study
+            .profile_levels(source_bars(&self.spans, &visible))
+            .into_iter()
+            .filter_map(|mut level| {
+                level.bars = chart_bars(&self.spans, &level.bars)?;
+                Some(level)
             })
             .collect()
     }
@@ -1636,7 +1678,12 @@ mod tests {
             );
             if dialog {
                 let settings = study.settings();
-                study.apply_settings(&[cleared], settings).unwrap();
+                study
+                    .apply_settings(
+                        &[cleared, ("wait_for_close".into(), InputValue::Toggle(true))],
+                        settings,
+                    )
+                    .unwrap();
             } else {
                 study.set_input(&cleared.0, cleared.1).unwrap();
             }
@@ -1646,6 +1693,141 @@ mod tests {
                 "added on {added_on:?}, dialog {dialog}"
             );
         }
+    }
+
+    /// A study on a daily chart keeps the Interval it accepted once it has run on those bars,
+    /// though on them it requests data of its own: the input stays listed, a template saved from
+    /// the study keeps it, and it can be cleared.
+    #[test]
+    fn calculation_interval_stays_listed_and_clears_after_a_run() {
+        use crate::model::BarClock;
+        let hour = |h: i64| chrono::DateTime::UNIX_EPOCH + chrono::Duration::hours(h);
+        let flat = |time| Bar::new(time, 10.0, 10.0, 10.0, 10.0, 1.0);
+        let days: Vec<_> = (0..21).map(|day| flat(hour(24 * day))).collect();
+        // Each study, the Interval set on it, and the hours between the bars of that Interval.
+        let cases: [(Box<dyn Indicator>, Timeframe, i64); 3] = [
+            (
+                Box::new(super::super::Performance::new()),
+                Timeframe::Hour1,
+                1,
+            ),
+            (
+                Box::new(super::super::PivotPoints::new().with_daily_bars(true)),
+                Timeframe::Hour1,
+                1,
+            ),
+            (
+                Box::new(super::super::Volume24h::new()),
+                Timeframe::Week1,
+                168,
+            ),
+        ];
+        let (mut observed, mut expected) = (Vec::new(), Vec::new());
+        for (inner, interval, step) in cases {
+            let name = inner.name().to_owned();
+            let mut study = ConfiguredStudy::new(inner);
+            study.set_timeframe(Timeframe::Day1);
+            study.set_bar_clock(&BarClock::new(Timeframe::Day1));
+            let chart_requests = study.data_requests();
+            let chosen = InputValue::Timeframe(Some(interval));
+            study
+                .set_input("calculation_timeframe", chosen.clone())
+                .unwrap();
+            let bars: Vec<_> = (0..21 * 24 / step)
+                .map(|at| flat(hour(at * step)))
+                .collect();
+            let request = study.data_requests().pop().unwrap();
+            study.update_data(
+                &days,
+                0,
+                &[super::super::StudyData {
+                    request,
+                    bars: &bars,
+                    clock: BarClock::new(interval),
+                    instrument: None,
+                    timeframe: interval,
+                }],
+            );
+            let listed = study
+                .inputs()
+                .into_iter()
+                .find(|input| input.id == "calculation_timeframe")
+                .map(|input| input.value);
+            let template = crate::studies::StudyTemplate::from_study(&study);
+            let restored = template.create().unwrap();
+            assert!(
+                restored
+                    .inputs()
+                    .iter()
+                    .any(|input| { input.id == "calculation_timeframe" && input.value == chosen })
+            );
+            let saved = template
+                .inputs
+                .into_iter()
+                .find(|(id, _)| id == "calculation_timeframe")
+                .map(|(_, value)| value);
+            let cleared = study
+                .set_input("calculation_timeframe", InputValue::Timeframe(None))
+                .map_err(|error| error.to_string());
+            assert_eq!(study.data_requests(), chart_requests, "{name}");
+            observed.push((name.clone(), listed, saved, cleared));
+            expected.push((
+                name,
+                Some(chosen.clone()),
+                Some(chosen),
+                Ok::<(), String>(()),
+            ));
+        }
+        assert_eq!(observed, expected);
+
+        // A batch can first stop requesting daily bars, then select a calculation interval.
+        let mut pivots = ConfiguredStudy::new(Box::new(
+            super::super::PivotPoints::new().with_daily_bars(true),
+        ));
+        pivots.set_timeframe(Timeframe::Min1);
+        let settings = pivots.settings();
+        pivots
+            .apply_settings(
+                &[
+                    ("daily_bars".into(), InputValue::Toggle(false)),
+                    (
+                        "calculation_timeframe".into(),
+                        InputValue::Timeframe(Some(Timeframe::Hour1)),
+                    ),
+                ],
+                settings,
+            )
+            .unwrap();
+        assert_eq!(pivots.data_requests()[0].timeframe, Some(Timeframe::Hour1));
+
+        // Switching back to price first makes a separate calculation interval available.
+        let mut average = ConfiguredStudy::new(Box::new(super::super::SMA::new(1)));
+        average.set_timeframe(Timeframe::Day1);
+        average
+            .set_input(
+                "source",
+                InputValue::Source(super::super::StudySource::Study { id: 1, plot: 0 }),
+            )
+            .unwrap();
+        let settings = average.settings();
+        average
+            .apply_settings(
+                &[
+                    (
+                        "source".into(),
+                        InputValue::Source(super::super::StudySource::Price(
+                            crate::model::PriceSource::Close,
+                        )),
+                    ),
+                    (
+                        "calculation_timeframe".into(),
+                        InputValue::Timeframe(Some(Timeframe::Hour1)),
+                    ),
+                ],
+                settings,
+            )
+            .unwrap();
+        assert_eq!(average.data_requests()[0].timeframe, Some(Timeframe::Hour1));
     }
 
     #[test]
@@ -1894,7 +2076,7 @@ mod tests {
                 })
                 .collect()
         };
-        for (name, [chart, other], sessions, (view, visible), markers, zones) in [
+        for (name, [chart, other], sessions, (view, visible), markers, zones, levels) in [
             (
                 "finer",
                 [(4, Timeframe::Min5), (20, Timeframe::Min1)],
@@ -1905,6 +2087,7 @@ mod tests {
                 (1..3, (1..3, 105.0, 115.0, vec![10.0])),
                 vec![0, 3],
                 0..4,
+                (2..4, 105.0),
             ),
             (
                 "coarser",
@@ -1916,6 +2099,7 @@ mod tests {
                 (3..12, (0..15, 100.0, 103.0, vec![3.0])),
                 vec![9],
                 5..20,
+                (10..20, 101.0),
             ),
         ] {
             let (interval, source_interval) = (chart.1, other.1);
@@ -1935,12 +2119,22 @@ mod tests {
                 study.update_data(&chart, 0, &[data]);
                 study
             };
+            let mut session = VolProfileSession::new(1);
+            session
+                .set_input("extend_poc", InputValue::Toggle(true))
+                .unwrap();
             let mut studies = [
-                calculated(Box::new(VolProfileSession::new(1))),
+                calculated(Box::new(session)),
                 calculated(Box::new(VolProfileVisible::new(1))),
                 calculated(Box::<Marks>::default()),
             ];
             assert_eq!(profiles(&studies[0], 0..chart.len()), sessions, "{name}");
+            let extended: Vec<_> = studies[0]
+                .profile_levels(0..chart.len())
+                .into_iter()
+                .map(|level| (level.bars, level.price))
+                .collect();
+            assert_eq!(extended, [levels], "{name}");
             assert_eq!(profiles(&studies[1], view), [visible], "{name}");
             let marked: Vec<_> = studies[2]
                 .markers()
@@ -1960,6 +2154,7 @@ mod tests {
             }
             for study in &studies {
                 assert!(profiles(study, 0..chart.len()).is_empty(), "{name}");
+                assert!(study.profile_levels(0..chart.len()).is_empty(), "{name}");
                 assert!(
                     study.markers().is_empty() && study.zones().is_empty(),
                     "{name}"
@@ -2144,6 +2339,41 @@ mod tests {
             study.apply_settings(&[], absent).unwrap();
             assert_eq!(study.settings(), defaults);
         }
+        // A KST opens with a dashed zero guide. Saved before it had one, it restores with the
+        // guide hidden, and a guide shown since keeps its style through a template.
+        let declared =
+            ConfiguredStudy::new(Box::new(crate::studies::KnowSureThing::new())).settings();
+        let zero = LevelStyle {
+            value: None,
+            color: palette::GRAY,
+            pattern: LineStyle::Dashed,
+            width: 1.0,
+            visible: true,
+            price_line: false,
+        };
+        assert_eq!(declared.levels, [zero]);
+        let saved = r#"{"name":"KST","inputs":[["roc_periods [0]",{"Length":10}],["roc_periods [1]",{"Length":15}],["roc_periods [2]",{"Length":20}],["roc_periods [3]",{"Length":30}],["sma_periods [0]",{"Length":10}],["sma_periods [1]",{"Length":10}],["sma_periods [2]",{"Length":10}],["sma_periods [3]",{"Length":15}],["signal_period",{"Length":9}]],"settings":{"show_legend_values":true,"user_edit_enabled":true,"help_url":"https://userfrm.github.io/egui-charts/docs/api/egui_charts/studies/struct.KnowSureThing.html","plots":[{"color":[0,150,136,255],"width":1.0,"pattern":"Solid","plot_type":"Line","visible":true},{"color":[244,67,54,255],"width":1.0,"pattern":"Solid","plot_type":"Line","visible":true}],"precision":2,"hidden_intervals":[],"interval_range":"All","levels":[],"fill_between_levels":false,"level_fill_color":[0,9,9,16],"untagged_plots":[],"price_line_plots":[],"plot_variants":[[],[]],"background":null,"background_visible":true,"fills":[],"gradients":[]},"visible":true,"scale":"Independent"}"#;
+        let mut older = serde_json::from_str::<crate::studies::StudyTemplate>(saved)
+            .unwrap()
+            .create()
+            .unwrap();
+        assert_eq!(
+            older.settings().levels,
+            [LevelStyle {
+                visible: false,
+                ..zero
+            }]
+        );
+        assert_eq!(older.pane().levels[0].1, Color32::TRANSPARENT);
+        let mut shown = older.settings();
+        shown.levels[0].visible = true;
+        shown.levels[0].width = 2.0;
+        older.apply_settings(&[], shown.clone()).unwrap();
+        let again = crate::studies::StudyTemplate::from_study(older.as_ref())
+            .create()
+            .unwrap();
+        assert_eq!(again.settings().levels, shown.levels);
+        assert_eq!(again.pane().levels[0].1, palette::GRAY);
         let mut adx = ConfiguredStudy::new(Box::new(AdxBreakout::default()));
         let settings = adx.settings();
         adx.apply_settings(&[("threshold".into(), InputValue::Length(25))], settings)

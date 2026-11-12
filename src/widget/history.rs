@@ -10,6 +10,7 @@ use crate::drawings::services::HistoryService;
 use crate::model::{ChartType, ChartTypeParams, SeriesAlerts, SeriesScale, Timeframe};
 use crate::scales::PriceScale;
 use crate::studies::{Indicator, StudySettingsSnapshot};
+use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 pub(super) struct ChartHistory {
@@ -18,6 +19,10 @@ pub(super) struct ChartHistory {
     pending: Option<Pending>,
     /// Expires when the divider drag ends or its layout is dropped.
     pub(super) resizing: std::sync::Weak<()>,
+    /// Split size and link membership steps undone or redone since a layout last showed the
+    /// chart, for that layout to apply in the order of their process-wide numbers.
+    pub(super) size_steps: Vec<(u64, Arc<Mutex<super::layout::SizeChange>>)>,
+    pub(super) link_steps: Vec<(u64, Arc<Mutex<super::layout::LinkChange>>)>,
     changed: bool,
     /// User edits recorded, undone or redone, kept when the history is cleared.
     pub(super) edits: u64,
@@ -37,8 +42,8 @@ struct Pending {
 
 #[derive(Default)]
 struct Action {
-    layout_sizes: Option<super::layout::SizeChange>,
-    layout_links: Option<super::layout::LinkChange>,
+    layout_sizes: Option<Arc<Mutex<super::layout::SizeChange>>>,
+    layout_links: Option<Arc<Mutex<super::layout::LinkChange>>>,
     /// The cross-chart edit this action is one chart's part of.
     layout_edit: Option<super::layout::LayoutEditLink>,
     symbol: Option<String>,
@@ -223,7 +228,7 @@ impl ChartHistory {
 
     pub(super) fn record_links(&mut self, change: super::layout::LinkChange) {
         self.push(Action {
-            layout_links: Some(change),
+            layout_links: Some(Arc::new(Mutex::new(change))),
             ..Action::default()
         });
     }
@@ -260,7 +265,7 @@ impl ChartHistory {
 
     pub(super) fn record_sizes(&mut self, change: super::layout::SizeChange) {
         self.push(Action {
-            layout_sizes: Some(change),
+            layout_sizes: Some(Arc::new(Mutex::new(change))),
             ..Action::default()
         });
     }
@@ -289,6 +294,9 @@ impl ChartHistory {
         *self = Self {
             edits: self.edits,
             drawing_edits: self.drawing_edits,
+            // Already undone or redone; the layout still has to apply them.
+            size_steps: std::mem::take(&mut self.size_steps),
+            link_steps: std::mem::take(&mut self.link_steps),
             ..Self::default()
         };
     }
@@ -625,6 +633,11 @@ impl Chart {
     /// Takes `series`, which has left the chart, with all its bars, its price formatter and its
     /// bar limit.
     fn hold_series(&mut self, mut series: PriceSeries) -> HeldSeries {
+        // Removed during a market replay, a fed series takes the live bars its window keeps for
+        // the exit, which its stamp does not describe.
+        if self.market_replay.is_some() && series.fed {
+            series.filled = None;
+        }
         self.replay_release(&mut series);
         let mut held = HeldSeries {
             series,
@@ -636,10 +649,12 @@ impl Chart {
     }
 
     /// Gives a held series its price formatter and bar limit back as it enters the chart, under
-    /// the cutoff of a running replay.
+    /// the cutoff of a running replay. The bars of a fed series stand in for its history until the
+    /// feed answers it.
     fn restore_series(&mut self, mut held: HeldSeries) -> PriceSeries {
         self.swap_series_settings(held.series.id, &mut held.formatter, &mut held.bar_limit);
         self.replay_admit(&mut held.series);
+        held.series.restored = true;
         held.series
     }
 
@@ -907,7 +922,10 @@ impl Chart {
                             .find_map(|change| change.before.as_ref()?.indicator.as_deref())
                     })?;
                 let mut indicator = original.clone_box();
-                indicator.restore_settings(&study.settings).ok()?;
+                let mut settings = study.settings.clone();
+                // Editing permission belongs to the host, independently of user history.
+                settings.settings.user_edit_enabled = original.settings().user_edit_enabled;
+                indicator.restore_settings(&settings).ok()?;
                 Some((
                     id,
                     study.index,
@@ -926,11 +944,14 @@ impl Chart {
             return false;
         };
         let current_view = self.get_time_scale_state();
-        if let Some(sizes) = &mut action.layout_sizes {
-            sizes.swap();
+        // Steps of one preset or slot on different charts only restore it in the order taken.
+        static ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let order = ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(sizes) = &action.layout_sizes {
+            self.history.size_steps.push((order, Arc::clone(sizes)));
         }
-        if let Some(links) = &mut action.layout_links {
-            links.swap();
+        if let Some(links) = &action.layout_links {
+            self.history.link_steps.push((order, Arc::clone(links)));
         }
         let mut current: Vec<_> = action
             .studies
@@ -1555,6 +1576,11 @@ mod tests {
         chart.set_timeframe(Timeframe::Min1);
         chart.config_mut().show_grid = false;
         let host = chart.add_indicator(Box::new(SMA::new(3)));
+        // As restored from settings saved without an editing permission.
+        let study = chart.indicator_mut(host).unwrap();
+        let mut legacy = study.settings();
+        legacy.user_edit_enabled = None;
+        study.apply_settings(&[], legacy).unwrap();
         chart
             .drawings_mut()
             .add_synced_drawing(host_line())
@@ -1574,7 +1600,10 @@ mod tests {
                 "an open action cannot consume completed history"
             );
             chart.set_timeframe(Timeframe::Min1);
-            chart.indicator_mut(host).unwrap().set_overlay(true);
+            let study = chart.indicator_mut(host).unwrap();
+            let unchanged = study.settings();
+            study.apply_settings(&[], unchanged).unwrap();
+            study.set_overlay(true);
             chart.set_indicator_scale(host, crate::studies::StudyScale::Main);
             chart
                 .set_indicator_source(

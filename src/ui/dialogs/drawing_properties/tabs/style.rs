@@ -23,21 +23,40 @@ impl StyleTab {
     pub fn show(ui: &mut Ui, props: &mut DrawingProps, pickers: &mut [ColorPickerState; 2]) {
         let tool = props.tool_settings.as_ref().map(|t| t.settings.tool_type);
         let [color_picker, fill_picker] = pickers;
+        // Positions style their lines, labels and zones from their own settings below.
+        let position = matches!(
+            tool,
+            Some(DrawingToolType::LongPos | DrawingToolType::ShortPos)
+        );
         ui.space_md();
 
         FormGrid::new("style_grid").show(ui, |ui| {
-            if tool != Some(DrawingToolType::FibonacciChannel) {
+            if tool != Some(DrawingToolType::FibonacciChannel) && !position {
                 ui.label(l10n::text(ui.ctx(), "Color"));
-                if let Some(color) =
-                    color_swatch(ui, color_picker, props.color, "drawing_props_color")
+                color_picker.sel_color = props.color;
+                if let Some([r, g, b, a]) = ColorPicker::new(color_picker, "drawing_props_color")
+                    .show_unmultiplied(ui, props.color_rgba())
+                    .inner
                 {
-                    props.color = keep_opacity(color, props.color, color_picker.custom_mode);
+                    // The custom editor sets the opacity; a palette swatch keeps the line's.
+                    let a = if color_picker.custom_mode {
+                        a
+                    } else {
+                        props.color.a()
+                    };
+                    let rgba = [r, g, b, a];
+                    props.color = Color32::from_rgba_unmultiplied(r, g, b, a);
+                    if let Some(template) = &mut props.tool_settings {
+                        template.settings.color = rgba;
+                    }
                 }
                 ui.end_row();
             }
 
-            if tool
-                .is_none_or(|tool| tool.draws_line() && tool != DrawingToolType::FibonacciChannel)
+            if !position
+                && tool.is_none_or(|tool| {
+                    tool.draws_line() && tool != DrawingToolType::FibonacciChannel
+                })
             {
                 ui.label(l10n::text(ui.ctx(), "Line width"));
                 line_width_row(ui, &mut props.line_width);
@@ -55,24 +74,36 @@ impl StyleTab {
                 ui.end_row();
             }
 
+            let exact = props.color_rgba();
             if let Some(template) = &mut props.tool_settings {
                 let settings = &mut template.settings;
                 if matches!(
                     settings.tool_type,
                     DrawingToolType::FibonacciRetracement
+                        | DrawingToolType::FibonacciCircles
+                        | DrawingToolType::FibonacciSpeedResistanceArcs
                         | DrawingToolType::FibonacciExtension
                         | DrawingToolType::FibonacciChannel
                         | DrawingToolType::FibonacciWedge
+                        | DrawingToolType::FibonacciTimeZones
+                        | DrawingToolType::TrendBasedFibTime
                 ) {
                     let mut config = settings.fibonacci_config().into_owned();
                     let original = config.clone();
                     ui.label(l10n::text(ui.ctx(), "All colours"));
-                    if let Some(color) =
-                        color_swatch(ui, fill_picker, props.color, "fibonacci_color")
+                    fill_picker.sel_color = props.color;
+                    if let Some([r, g, b, a]) = ColorPicker::new(fill_picker, "fibonacci_color")
+                        .show_unmultiplied(ui, exact)
+                        .inner
                     {
-                        props.color = keep_opacity(color, props.color, fill_picker.custom_mode);
+                        let line = if fill_picker.custom_mode || props.color.a() == 0 {
+                            a
+                        } else {
+                            props.color.a()
+                        };
+                        props.color = Color32::from_rgba_unmultiplied(r, g, b, line);
+                        settings.color = [r, g, b, line];
                         for level in &mut config.levels {
-                            let [r, g, b, a] = color.to_srgba_unmultiplied();
                             let opacity = if fill_picker.custom_mode {
                                 a
                             } else {
@@ -88,7 +119,14 @@ impl StyleTab {
                     }
                     ui.end_row();
                     if settings.tool_type != DrawingToolType::FibonacciChannel {
-                        ui.label(l10n::text(ui.ctx(), "Trend line"));
+                        ui.label(l10n::text(
+                            ui.ctx(),
+                            if settings.tool_type == DrawingToolType::FibonacciTimeZones {
+                                "Initial line"
+                            } else {
+                                "Trend line"
+                            },
+                        ));
                         ui.checkbox(&mut config.trend_visible, l10n::text(ui.ctx(), "Visible"))
                             .accessible_name(l10n::text(ui.ctx(), "Show construction line"));
                         ui.end_row();
@@ -100,10 +138,76 @@ impl StyleTab {
                         settings.fib_config = Some(config);
                     }
                 }
-                if matches!(
-                    settings.tool_type,
-                    DrawingToolType::LongPos | DrawingToolType::ShortPos
-                ) {
+                if settings.tool_type == DrawingToolType::FibonacciSpiral {
+                    let mut config = settings.fibonacci_config().into_owned();
+                    ui.label("");
+                    if ui
+                        .checkbox(
+                            &mut config.spiral_counterclockwise,
+                            l10n::text(ui.ctx(), "Counterclockwise"),
+                        )
+                        .changed()
+                    {
+                        settings.fib_config = Some(config);
+                    }
+                    ui.end_row();
+                }
+                if position {
+                    let style = &mut settings.position_style;
+                    let rgba = |[r, g, b, a]: [u8; 4]| Color32::from_rgba_unmultiplied(r, g, b, a);
+                    let shown = style.line_color.map_or_else(
+                        || {
+                            ui.active_theme()
+                                .chart
+                                .axis_text_secondary
+                                .gamma_multiply(0.65)
+                        },
+                        rgba,
+                    );
+                    ui.label(l10n::text(ui.ctx(), "Lines"));
+                    if let Some(picked) =
+                        color_swatch(ui, color_picker, shown, "position_line_color")
+                    {
+                        // The theme's line is translucent; a colour picked over it starts opaque.
+                        let current = style.line_color.map_or(Color32::WHITE, rgba);
+                        style.line_color = Some(
+                            keep_opacity(picked, current, color_picker.custom_mode)
+                                .to_srgba_unmultiplied(),
+                        );
+                    }
+                    ui.end_row();
+
+                    ui.label(l10n::text(ui.ctx(), "Line width"));
+                    line_width_row(ui, &mut style.line_width);
+                    ui.end_row();
+
+                    let label = ui.label(l10n::text(ui.ctx(), "Background"));
+                    ui.checkbox(&mut style.fill, l10n::text(ui.ctx(), "Show background"))
+                        .labelled_by(label.id);
+                    ui.end_row();
+
+                    let label = ui.label(l10n::text(ui.ctx(), "Border"));
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut style.border, l10n::text(ui.ctx(), "Show border"))
+                            .labelled_by(label.id);
+                        if style.border
+                            && let Some(picked) = color_swatch(
+                                ui,
+                                fill_picker,
+                                rgba(style.border_color),
+                                "position_border_color",
+                            )
+                        {
+                            style.border_color = keep_opacity(
+                                picked,
+                                rgba(style.border_color),
+                                fill_picker.custom_mode,
+                            )
+                            .to_srgba_unmultiplied();
+                        }
+                    });
+                    ui.end_row();
+
                     for (label, value) in [
                         (
                             "Keep position statistics visible",
@@ -195,7 +299,7 @@ impl StyleTab {
                 }
             }
 
-            if let Some(tool) = tool.filter(|tool| tool.supports_fill()) {
+            if let Some(tool) = tool.filter(|tool| tool.supports_fill() && !position) {
                 let label = ui.label(l10n::text(ui.ctx(), "Fill"));
                 ui.checkbox(&mut props.fill_enabled, l10n::text(ui.ctx(), "Enable fill"))
                     .labelled_by(label.id);
@@ -360,6 +464,7 @@ mod tests {
     use crate::Chart;
     use crate::model::BarData;
     use crate::ui_kit::color_picker::MAIN_COLORS;
+    use crate::ui_kit::color_picker::tests::{click, drag_alpha, open_custom_editor, text_pos};
     use egui::{Context, Event, Modifiers, PointerButton, Pos2, Rect, Shape};
 
     /// Switching Fill on starts from the tool's own fill where it differs from its line, as on
@@ -488,6 +593,192 @@ mod tests {
                             == [r, g, b, if i % 2 == 0 { 51 } else { 153 }])
                 );
             }
+        }
+    }
+
+    /// A palette swatch picked in the Style tab of one drawing in a selection recolours every
+    /// selected drawing and leaves each at its own opacity: a trend line stays opaque and a
+    /// highlighter stays at 51, whichever of the two the dialog was opened on.
+    #[test]
+    fn palette_colour_on_a_selection_keeps_each_line_opacity() {
+        let swatch = MAIN_COLORS[3];
+        let [r, g, b, _] = swatch.to_srgba_unmultiplied();
+        let mut observed = Vec::new();
+        for (opened, alpha) in [(1, 51), (2, 51), (1, 0), (2, 0)] {
+            let ctx = Context::default();
+            ctx.global_style_mut(|style| style.animation_time = 0.0);
+            let mut chart = Chart::new(BarData::new());
+            let mut highlighter = Drawing::new(1, DrawingToolType::Highlighter);
+            let line = Drawing::new(2, DrawingToolType::TrendLine);
+            assert_eq!((highlighter.color[3], line.color[3]), (51, 255));
+            highlighter.color[3] = alpha;
+            chart.drawings_mut().drawings = vec![highlighter, line];
+            chart.drawings_mut().select_drawings([1, 2]);
+            let target = chart.drawings().drawings[opened - 1].clone();
+            let mut props = DrawingProps::from_drawing(&target, &chart);
+            let mut pickers: [ColorPickerState; 2] = Default::default();
+            pickers[0].is_open = true;
+            let mut frame = |events| {
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            Pos2::ZERO,
+                            egui::vec2(1440.0, 900.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| StyleTab::show(ui, &mut props, &mut pickers),
+                );
+                let well = output.shapes.iter().find_map(|s| match &s.shape {
+                    Shape::Rect(r) if r.fill == swatch => Some(r.rect.center()),
+                    _ => None,
+                });
+                output.drop_without_applying_deltas();
+                well
+            };
+            frame(vec![]);
+            let pos = frame(vec![]).expect("the palette shows the swatch");
+            frame(vec![
+                Event::PointerMoved(pos),
+                Event::PointerButton {
+                    pos,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                },
+                Event::PointerButton {
+                    pos,
+                    button: PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Modifiers::NONE,
+                },
+            ]);
+            props
+                .apply_to_chart(
+                    crate::ui::dialogs::drawing_properties::actions::DrawingId(opened),
+                    &mut chart,
+                )
+                .unwrap();
+            observed.push((
+                chart
+                    .drawings()
+                    .drawings
+                    .iter()
+                    .map(|d| d.color)
+                    .collect::<Vec<_>>(),
+                vec![[r, g, b, alpha], [r, g, b, 255]],
+            ));
+            let mut custom =
+                DrawingProps::from_drawing(&chart.drawings().drawings[opened - 1], &chart);
+            custom.color = Color32::from_rgba_unmultiplied(255, 255, 255, 128);
+            custom
+                .apply_to_chart(
+                    crate::ui::dialogs::drawing_properties::actions::DrawingId(opened),
+                    &mut chart,
+                )
+                .unwrap();
+            assert!(
+                chart
+                    .drawings()
+                    .drawings
+                    .iter()
+                    .all(|d| d.color == [255, 255, 255, 128]),
+                "an edited opacity applies to the entire selection"
+            );
+        }
+        assert!(
+            observed.iter().all(|(got, want)| got == want),
+            "{observed:?}"
+        );
+    }
+
+    /// The custom colour editor edits the colour as saved. From the dialog of the default
+    /// highlighter, with a blue trend line also selected, an opacity dragged over several frames
+    /// reaches both drawings and leaves each its hue, and typed channels give both the new hue.
+    #[test]
+    fn custom_colour_edits_on_a_selection_keep_or_set_each_hue() {
+        #[derive(Debug)]
+        enum Edit {
+            OpacityDragged(&'static [u8]),
+            Typed([u8; 3]),
+        }
+        for (edit, want) in [
+            (
+                Edit::OpacityDragged(&[51, 102, 153, 204, 255]),
+                [[242, 54, 69, 255], [41, 98, 255, 255]],
+            ),
+            (
+                Edit::OpacityDragged(&[51, 96, 141, 186, 230]),
+                [[242, 54, 69, 230], [41, 98, 255, 230]],
+            ),
+            (
+                Edit::OpacityDragged(&[51, 141, 230, 192, 153]),
+                [[242, 54, 69, 153], [41, 98, 255, 153]],
+            ),
+            (
+                Edit::Typed([236, 60, 66]),
+                [[236, 60, 66, 51], [236, 60, 66, 255]],
+            ),
+        ] {
+            let ctx = Context::default();
+            ctx.global_style_mut(|style| style.animation_time = 0.0);
+            let mut chart = Chart::new(BarData::new());
+            let highlighter = Drawing::new(1, DrawingToolType::Highlighter);
+            let line = Drawing::new(2, DrawingToolType::TrendLine);
+            assert_eq!(
+                [highlighter.color, line.color],
+                [[242, 54, 69, 51], [41, 98, 255, 255]]
+            );
+            chart.drawings_mut().drawings = vec![highlighter, line];
+            chart.drawings_mut().select_drawings([1, 2]);
+            let mut props = DrawingProps::from_drawing(&chart.drawings().drawings[0], &chart);
+            let paint = props.color;
+            let mut pickers: [ColorPickerState; 2] = Default::default();
+            pickers[0].is_open = true;
+            let mut frame = |events| {
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            Pos2::ZERO,
+                            egui::vec2(1440.0, 900.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| StyleTab::show(ui, &mut props, &mut pickers),
+                );
+                let shapes: Vec<_> = output.shapes.iter().map(|s| s.shape.clone()).collect();
+                output.drop_without_applying_deltas();
+                shapes
+            };
+            let shapes = open_custom_editor(&mut frame, paint);
+            match edit {
+                Edit::OpacityDragged(path) => drag_alpha(&mut frame, &shapes, path),
+                Edit::Typed(rgb) => {
+                    for (channel, value) in ["R ", "G ", "B "].into_iter().zip(rgb) {
+                        let shapes = frame(vec![]);
+                        frame(click(text_pos(&shapes, channel)));
+                        frame(vec![Event::Text(value.to_string())]);
+                    }
+                }
+            }
+            props
+                .apply_to_chart(
+                    crate::ui::dialogs::drawing_properties::actions::DrawingId(1),
+                    &mut chart,
+                )
+                .unwrap();
+            assert_eq!(
+                chart
+                    .drawings()
+                    .drawings
+                    .iter()
+                    .map(|d| d.color)
+                    .collect::<Vec<_>>(),
+                want,
+                "{edit:?}"
+            );
         }
     }
 }

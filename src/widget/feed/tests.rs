@@ -1457,10 +1457,15 @@ fn history_page_after_a_store_loss_keeps_the_matched_cells() {
 /// of the sell of 4 (-1); its last unit, the buy of 2 and 2 of the sell of 6 (-1); its other 4 and
 /// 1 of the buy of 5 (-3); its other 4 (4). One study is away for the last two executions and
 /// another joins at the undo. Holding the last executions before the newest, they lack the first
-/// two bars and match the study that stayed on the others.
+/// two bars and match the study that stayed on the others. In the last two rows nothing is lost,
+/// but a trade page answered in the drain that streams them without an id stands in for the first
+/// executions: the buy of 1, or the buys of 1, 2 and 4 at one instant, so that the bar of 4 and 8
+/// opens a nanosecond after the first. 2t bars of 1 and 2 (3), 4 and 8 (12), 16 and 32 (48), which
+/// the rebuilt studies and an added footprint source, buying 3, 12 and 48, match on every bar.
 #[cfg(feature = "studies")]
 #[test]
-fn restored_order_flow_study_after_a_store_loss_keeps_the_chart_bars() {
+fn restored_order_flow_study_keeps_the_chart_bars() {
+    use crate::data::OrderFlowInput;
     use crate::model::OrderSide::{Buy, Sell};
     use crate::studies::OrderFlowStudy;
     let rows = [
@@ -1476,6 +1481,7 @@ fn restored_order_flow_study_after_a_store_loss_keeps_the_chart_bars() {
                 (64.0, Buy),
             ],
             vec![3.0, 12.0, 48.0, 64.0],
+            0,
         ),
         (
             "5v",
@@ -1488,6 +1494,33 @@ fn restored_order_flow_study_after_a_store_loss_keeps_the_chart_bars() {
                 (5.0, Buy),
             ],
             vec![5.0, -1.0, -1.0, -3.0, 4.0],
+            0,
+        ),
+        (
+            "2t",
+            vec![
+                (1.0, Buy),
+                (2.0, Buy),
+                (4.0, Buy),
+                (8.0, Buy),
+                (16.0, Buy),
+                (32.0, Buy),
+            ],
+            vec![3.0, 12.0, 48.0],
+            1,
+        ),
+        (
+            "2t",
+            vec![
+                (1.0, Buy),
+                (2.0, Buy),
+                (4.0, Buy),
+                (8.0, Buy),
+                (16.0, Buy),
+                (32.0, Buy),
+            ],
+            vec![3.0, 12.0, 48.0],
+            3,
         ),
     ];
     let start = bars(1)[0].time;
@@ -1497,7 +1530,7 @@ fn restored_order_flow_study_after_a_store_loss_keeps_the_chart_bars() {
             .map(|value| (!value.is_nan()).then_some(*value))
             .collect::<Vec<_>>()
     };
-    for (interval, fills, stayed_values) in rows {
+    for (interval, fills, stayed_values, paged) in rows {
         let feed = Arc::new(Script::default());
         let mut chart = fed(&feed, Some("A"));
         chart.set_timeframe(interval.parse().unwrap());
@@ -1509,8 +1542,11 @@ fn restored_order_flow_study_after_a_store_loss_keeps_the_chart_bars() {
             .send(Ok(Instrument::new("A").with_tick_size(1.0)));
         feed.page().send(page(Vec::new(), true));
         frames.run(&mut chart);
-        chart.feed_link.as_mut().unwrap().trades = Trades::new(3);
+        if paged == 0 {
+            chart.feed_link.as_mut().unwrap().trades = Trades::new(3);
+        }
         let sink = feed.sink();
+        let footprint = OrderFlowInput::footprint();
         let mut added = None;
         for (i, &(size, side)) in fills.iter().enumerate() {
             if i + 2 == fills.len() {
@@ -1520,11 +1556,26 @@ fn restored_order_flow_study_after_a_store_loss_keeps_the_chart_bars() {
             if i + 1 == fills.len() {
                 assert!(chart.undo());
                 added = Some(chart.add_indicator(Box::new(OrderFlowStudy::execution_delta(false))));
+                if paged > 0 {
+                    chart.add_indicator(Box::new(PocAndBid {
+                        inputs: [footprint.clone(), OrderFlowInput::book(1)],
+                        clock: BarClock::exact(),
+                        values: crate::studies::IndicatorValues::new(),
+                    }));
+                }
                 frames.run(&mut chart);
             }
-            let at = start + TimeDelta::seconds(i as i64);
-            sink.push_tick(Tick::new(at, 100.0, size, Some(side)));
-            frames.run(&mut chart);
+            // The paged executions share the first instant and drain with the page.
+            let at = start + TimeDelta::seconds(i.saturating_sub(paged.max(1) - 1) as i64);
+            let tick = |&(size, side)| Tick::new(at, 100.0, size, Some(side));
+            if i + 1 == paged {
+                let trades = fills[..paged].iter().map(tick).collect();
+                (feed.trades.lock().unwrap().remove(0)).send(Ok(TradePage::new(trades, false)));
+            }
+            sink.push_tick(tick(&(size, side)));
+            if i + 1 >= paged {
+                frames.run(&mut chart);
+            }
         }
         for _ in 0..8 {
             frames.run(&mut chart);
@@ -1532,26 +1583,125 @@ fn restored_order_flow_study_after_a_store_loss_keeps_the_chart_bars() {
         let all: Vec<_> = stayed_values.iter().copied().map(Some).collect();
         assert_eq!(values(&chart, stayed), all, "{interval}");
         let held: Vec<_> = (all.iter().enumerate())
-            .map(|(bar, value)| value.filter(|_| bar >= 2))
+            .map(|(bar, value)| value.filter(|_| paged > 0 || bar >= 2))
             .collect();
         assert_eq!(values(&chart, restored), held, "{interval}, restored");
         assert_eq!(values(&chart, added.unwrap()), held, "{interval}, added");
+        if paged > 0 {
+            let bought: Vec<_> = (footprint.footprints_from(DateTime::<Utc>::MIN_UTC).bars)
+                .iter()
+                .map(|(open, bar)| (*open, bar.ask))
+                .collect();
+            let opens = chart.bars(SeriesId::MAIN).iter().map(|bar| bar.time);
+            let expected: Vec<_> = opens.zip(stayed_values.iter().copied()).collect();
+            assert_eq!(bought, expected, "{interval}, footprint");
+        }
+    }
+}
+
+/// Hand counts on 2t at price 100: live buys of 1, 2, 4, 8 and 16 one a second from 0 s, so the
+/// chart's bars are 1 and 2 (delta 3) at 0 s, 4 and 8 (12) at 2 s and 16 at 4 s. A trade page
+/// answered in the drain that streams them without an id stands in for the buy of 1, or for the
+/// buys of 1 to 8, which leaves no live execution in the first two bars, or for the buys of 1 to
+/// 4 on a chart limited to two bars, which keeps the 2 s and 4 s bars while the study's source
+/// keeps the 0 s one. The replay cutoff at 3 s is exclusive and falls in the 2 s bar, before
+/// which only the buy of 4 came.
+#[cfg(feature = "studies")]
+#[test]
+fn replay_after_a_trade_page_repeats_a_live_execution_stops_at_the_cutoff() {
+    use crate::model::OrderSide::Buy;
+    use crate::studies::OrderFlowStudy;
+    use std::num::NonZeroUsize;
+    let start = bars(1)[0].time;
+    let tape: Vec<_> = [1.0, 2.0, 4.0, 8.0, 16.0]
+        .iter()
+        .enumerate()
+        .map(|(second, size)| {
+            let at = start + TimeDelta::seconds(second as i64);
+            Tick::new(at, 100.0, *size, Some(Buy))
+        })
+        .collect();
+    // The executions the page holds, the bar limit (none for 0), and the deltas before and during
+    // the replay.
+    let rows: [(usize, usize, &[f64], &[f64]); 3] = [
+        (1, 0, &[3.0, 12.0, 16.0], &[3.0, 4.0]),
+        (4, 0, &[3.0, 12.0, 16.0], &[3.0, 4.0]),
+        (3, 2, &[12.0, 16.0], &[4.0]),
+    ];
+    for (paged, limit, live, replayed) in rows {
+        let feed = Arc::new(Script::default());
+        let mut chart = fed(&feed, Some("A"));
+        chart.set_timeframe("2t".parse().unwrap());
+        chart.set_bar_limit(SeriesId::MAIN, NonZeroUsize::new(limit));
+        chart.add_indicator(Box::new(OrderFlowStudy::execution_delta(false)));
+        let mut frames = Frames::new();
+        frames.run(&mut chart);
+        feed.resolve()
+            .send(Ok(Instrument::new("A").with_tick_size(1.0)));
+        feed.page().send(page(Vec::new(), true));
+        frames.run(&mut chart);
+        let page = TradePage::new(tape[..paged].to_vec(), false);
+        feed.trades.lock().unwrap().remove(0).send(Ok(page));
+        let sink = feed.sink();
+        tape.iter().for_each(|trade| sink.push_tick(trade.clone()));
+        let mut deltas = |chart: &mut Chart| {
+            for _ in 0..8 {
+                frames.run(chart);
+            }
+            let study = chart.indicators().next().unwrap().1;
+            study.values().line(0).to_vec()
+        };
+        assert_eq!(deltas(&mut chart), live, "{paged} paged");
+        chart.set_feed_paused(true);
+        chart.set_replay_time(Some(start + TimeDelta::seconds(3)));
+        assert_eq!(deltas(&mut chart), replayed, "{paged} paged, replay");
+        chart.set_replay_time(None);
+        assert_eq!(deltas(&mut chart), live, "{paged} paged, left");
     }
 }
 
 type PagedCells = Option<Vec<(i64, f64, f64)>>;
 
-/// Runs a chart on `interval` whose history page holds the bars of `tape` and whose trade page
-/// holds `tape[page]`, and returns, for each history bar, the cells the renderer would draw as
-/// (level, bid, ask), or `None` for a candle.
+/// What the stream sends before the trade page. The history page holds the bars of the tape
+/// before it.
+enum Stream {
+    Nothing,
+    /// One execution, which opens a bar of its own.
+    Execution(Tick),
+    /// The tape's complete bars in `pushed`, after the history page or, with `first`, before it.
+    /// The history page holds the bars of the tape's first `history` executions.
+    Bars {
+        history: usize,
+        pushed: std::ops::Range<usize>,
+        first: bool,
+    },
+}
+
+/// Runs a chart on `interval` whose history page holds the bars of `tape` before `stream`, which
+/// the stream sends next, and whose trade page then holds `tape[page]`. Returns, for each
+/// history bar, the cells the renderer would draw as (level, bid, ask), or `None` for a candle.
 fn paged_cells(
     interval: &str,
     tape: &[Tick],
     page_range: std::ops::Range<usize>,
+    stream: &Stream,
 ) -> Vec<PagedCells> {
     let timeframe: Timeframe = interval.parse().unwrap();
     let candles = crate::data::aggregate_trades_with_tick_size(tape, timeframe, Some(1.0)).unwrap();
+    let history = match stream {
+        Stream::Nothing => candles[..].to_vec(),
+        Stream::Execution(trade) => {
+            candles[..candles.partition_point(|bar| bar.time < trade.ts)].to_vec()
+        }
+        Stream::Bars { history, .. } => {
+            crate::data::aggregate_trades_with_tick_size(&tape[..*history], timeframe, Some(1.0))
+                .unwrap()
+        }
+    };
     let feed = Arc::new(Script::default());
+    let push = |pushed: &std::ops::Range<usize>| {
+        (candles[pushed.clone()].iter()).for_each(|bar| feed.sink().push_bar(bar.clone()));
+    };
     let mut chart = fed(&feed, Some("A"));
     chart.set_timeframe(timeframe);
     chart.set_chart_type(ChartType::VolumeFootprint);
@@ -1559,17 +1709,45 @@ fn paged_cells(
     frames.run(&mut chart);
     feed.resolve()
         .send(Ok(Instrument::new("A").with_tick_size(1.0)));
-    feed.page().send(page(candles.clone(), true));
+    if let Stream::Bars {
+        pushed,
+        first: true,
+        ..
+    } = stream
+    {
+        frames.run(&mut chart);
+        push(pushed);
+        frames.run(&mut chart);
+    }
+    feed.page().send(page(history.clone(), true));
     frames.run(&mut chart);
+    frames.run(&mut chart);
+    match stream {
+        Stream::Execution(trade) => feed.sink().push_tick(trade.clone()),
+        Stream::Bars {
+            pushed,
+            first: false,
+            ..
+        } => push(pushed),
+        _ => {}
+    }
     frames.run(&mut chart);
     (feed.trades.lock().unwrap().remove(0))
         .send(Ok(TradePage::new(tape[page_range].to_vec(), false)));
     frames.run(&mut chart);
-    assert_eq!(chart.bars(SeriesId::MAIN), candles, "{interval}");
+    let sent = match stream {
+        Stream::Bars { pushed, .. } => pushed.end,
+        _ => history.len(),
+    };
+    assert_eq!(
+        chart.bars(SeriesId::MAIN)[..sent],
+        candles[..sent],
+        "{interval}"
+    );
     let link = chart.feed_link.as_ref().unwrap();
     let flow = link.footprint.as_ref().unwrap();
     let complete = flow.complete_from();
-    candles
+    candles[..history.len()]
         .iter()
         .map(|bar| {
             flow.bar_at(bar.time)
@@ -1595,8 +1773,23 @@ fn paged_cells(
 /// part of the buy at 101 in the bar before, so a grouping from that buy matches every bar to
 /// the page's end. Its own cells: 1 of that buy, the sell of 5 at 102 and 4 of the sell of 6 at
 /// 103; the other 2, the buy of 5 at 104 and 3 of the buy of 6 at 105; the other 3, the sell of 6
-/// at 106 and 1 of the sell of 4 at 106. The last tape's 10 volume bars split nearly every
-/// boundary, as fractional sizes do.
+/// at 106 and 1 of the sell of 4 at 106. The fifth tape's 10 volume bars split nearly every
+/// boundary, as fractional sizes do. The sixth row repeats the fourth tape with a history of its
+/// four complete bars and, before the page, a live sell of 1 at 106 at the time of the sell of 4
+/// that completes the last of them. Without ids the store leaves out the page's sell of 4, so the
+/// page lacks 1 of that bar, and a grouping from the buy at 101 again matches every bar to its
+/// end: the page's end proves nothing there, and the own cells are those of the fourth tape. The
+/// pushed tape's bars hold the buy of 6 at 100 and the sell of 4 at 101; the buy of 5 at 101 and
+/// the sell of 5 at 102; the buy of 3 at 102 and the sell of 7 at 103; the buy of 4 at 104 and
+/// the sell of 6 at 105. Its history page holds the first three and its trade page starts at a
+/// price the bar before closes at and ends with the third. The host pushes the third bar again
+/// as it is, with or without the fourth, after the history page or before it: only the fourth
+/// is news the history lacks, so the page's end proves its start in every order. The last two
+/// rows repeat the fourth tape, whose history page holds its fourth bar while it forms, through
+/// the sell of 6 at 106 with volume 9, and whose host pushes that bar complete, after the
+/// history page or before it. The page, every execution but the first and the last, lacks the 1
+/// that completes it, and a grouping from the buy at 101 matches every bar to the page's end
+/// with the pushed bar: that bar is news, so the page's end proves nothing there.
 #[test]
 fn split_fill_boundaries_draw_only_a_bars_own_executions() {
     use crate::model::OrderSide::{Buy, Sell};
@@ -1650,6 +1843,38 @@ fn split_fill_boundaries_draw_only_a_bars_own_executions() {
         .filter(|cells| !cells.is_empty())
         .map(|cells| Some(cells.into_values().collect()))
         .collect();
+    let issue = tape(&[
+        (100.0, 9.0, Buy),
+        (101.0, 2.0, Buy),
+        (102.0, 5.0, Sell),
+        (103.0, 6.0, Sell),
+        (104.0, 5.0, Buy),
+        (105.0, 6.0, Buy),
+        (106.0, 6.0, Sell),
+        (106.0, 4.0, Sell),
+    ]);
+    let issue_own = vec![
+        None,
+        Some(vec![(101, 0.0, 1.0), (102, 5.0, 0.0), (103, 4.0, 0.0)]),
+        Some(vec![(103, 2.0, 0.0), (104, 0.0, 5.0), (105, 0.0, 3.0)]),
+        Some(vec![(105, 0.0, 3.0), (106, 7.0, 0.0)]),
+        None,
+    ];
+    let pushed = tape(&[
+        (100.0, 6.0, Buy),
+        (101.0, 4.0, Sell),
+        (101.0, 5.0, Buy),
+        (102.0, 5.0, Sell),
+        (102.0, 3.0, Buy),
+        (103.0, 7.0, Sell),
+        (104.0, 4.0, Buy),
+        (105.0, 6.0, Sell),
+    ]);
+    let pushed_own = vec![
+        None,
+        Some(vec![(101, 0.0, 5.0), (102, 5.0, 0.0)]),
+        Some(vec![(102, 0.0, 3.0), (103, 7.0, 0.0)]),
+    ];
     let rows = [
         (
             "10v",
@@ -1671,6 +1896,7 @@ fn split_fill_boundaries_draw_only_a_bars_own_executions() {
                 Some(vec![(105, 0.0, 3.0), (106, 7.0, 0.0)]),
             ],
             false,
+            Stream::Nothing,
         ),
         (
             "5delta",
@@ -1692,6 +1918,7 @@ fn split_fill_boundaries_draw_only_a_bars_own_executions() {
                 Some(vec![(105, 0.0, 2.0), (106, 0.0, 3.0)]),
             ],
             false,
+            Stream::Nothing,
         ),
         (
             "whole start at a new price, page ending inside a bar",
@@ -1714,29 +1941,16 @@ fn split_fill_boundaries_draw_only_a_bars_own_executions() {
                 None,
             ],
             true,
+            Stream::Nothing,
         ),
         (
             "page ending before the fill that completes its last bar",
             "10v",
-            tape(&[
-                (100.0, 9.0, Buy),
-                (101.0, 2.0, Buy),
-                (102.0, 5.0, Sell),
-                (103.0, 6.0, Sell),
-                (104.0, 5.0, Buy),
-                (105.0, 6.0, Buy),
-                (106.0, 6.0, Sell),
-                (106.0, 4.0, Sell),
-            ]),
+            issue.clone(),
             1..7,
-            vec![
-                None,
-                Some(vec![(101, 0.0, 1.0), (102, 5.0, 0.0), (103, 4.0, 0.0)]),
-                Some(vec![(103, 2.0, 0.0), (104, 0.0, 5.0), (105, 0.0, 3.0)]),
-                Some(vec![(105, 0.0, 3.0), (106, 7.0, 0.0)]),
-                None,
-            ],
+            issue_own.clone(),
             false,
+            Stream::Nothing,
         ),
         (
             "fractional volume tape draws no cells of another bar",
@@ -1745,11 +1959,91 @@ fn split_fill_boundaries_draw_only_a_bars_own_executions() {
             1000..3000,
             fractional_cells,
             false,
+            Stream::Nothing,
+        ),
+        (
+            "stream at the instant that completes the last bar, without ids",
+            "10v",
+            issue.clone(),
+            1..8,
+            issue_own[..4].to_vec(),
+            false,
+            Stream::Execution(Tick::new(
+                start + TimeDelta::seconds(7),
+                106.0,
+                1.0,
+                Some(Sell),
+            )),
+        ),
+        (
+            "page ending with the bar before the first new pushed bar",
+            "10v",
+            pushed.clone(),
+            2..6,
+            pushed_own.clone(),
+            true,
+            Stream::Bars {
+                history: 6,
+                pushed: 2..4,
+                first: false,
+            },
+        ),
+        (
+            "newest history bar pushed again before the history page",
+            "10v",
+            pushed.clone(),
+            2..6,
+            pushed_own.clone(),
+            true,
+            Stream::Bars {
+                history: 6,
+                pushed: 2..3,
+                first: true,
+            },
+        ),
+        (
+            "newest history bar and a new bar pushed before the history page",
+            "10v",
+            pushed,
+            2..6,
+            pushed_own,
+            true,
+            Stream::Bars {
+                history: 6,
+                pushed: 2..4,
+                first: true,
+            },
+        ),
+        (
+            "forming newest history bar pushed complete after the history page",
+            "10v",
+            issue.clone(),
+            1..7,
+            issue_own[..4].to_vec(),
+            false,
+            Stream::Bars {
+                history: 7,
+                pushed: 3..4,
+                first: false,
+            },
+        ),
+        (
+            "newest bar pushed complete before a history page that holds it forming",
+            "10v",
+            issue,
+            1..7,
+            issue_own[..4].to_vec(),
+            false,
+            Stream::Bars {
+                history: 7,
+                pushed: 3..4,
+                first: true,
+            },
         ),
     ];
     let mut failures = Vec::new();
-    for (label, interval, fills, page_range, own, must_draw) in rows {
-        let got = paged_cells(interval, &fills, page_range);
+    for (label, interval, fills, page_range, own, must_draw, stream) in rows {
+        let got = paged_cells(interval, &fills, page_range, &stream);
         assert_eq!(got.len(), own.len(), "{label}");
         for (bar, (got, own)) in got.iter().zip(&own).enumerate() {
             if got != own && (must_draw || got.is_some()) {
@@ -1806,6 +2100,121 @@ fn an_interval_change_page_fills_the_retained_tape() {
         );
         assert!(!chart.feed.trade_history_complete);
     }
+}
+
+/// The page answering an interval change joins the new stream at the instant of its first
+/// execution. Tick size 1, executions a second apart from 00:00:00: buy 9 at 100, buy 2 at 101,
+/// sell 5 at 102, sell 6 at 103, buy 5 at 104, buy 6 at 105, sell 6 at 106 and sell 4 at 106. The
+/// 20 volume stream delivers the second through the seventh. On 10 volume the stream opens with a
+/// sell of 1 at 106 at 00:00:07, the trade page holds every execution but the first and the
+/// history page the four complete bars. By hand those hold the buy of 9 and 1 of the buy of 2;
+/// its other 1, the sell of 5 and 4 of the sell of 6; its other 2, the buy of 5 and 3 of the buy
+/// of 6; its other 3, the sell of 6 and 1 of the sell of 4. With ids the page's sell of 4 is not
+/// held, so it joins the tape in front of the live sell. Without ids it may repeat the live sell
+/// and is left out, so the page's end proves nothing about the bar that sell completes, also when
+/// the history page answers first and the trade page then adds nothing. Either way the page lacks
+/// the buy at 00:00:00, nothing proves where its grouping starts, and every bar draws a candle.
+/// Counting the buy of 2 whole instead matches every bar's prices and volume and gives the bars
+/// at 00:00:01, 00:00:03 and 00:00:05 part of their neighbours' fills, as (level, bid, ask):
+/// (101, 0, 2), (102, 5, 0), (103, 3, 0); (103, 3, 0), (104, 0, 5), (105, 0, 2); and
+/// (105, 0, 4), (106, 6, 0).
+#[test]
+fn an_interval_change_page_draws_only_a_bars_own_executions() {
+    use crate::model::OrderSide::{Buy, Sell};
+    let start = bars(1)[0].time;
+    let fills = [
+        (100.0, 9.0, Buy),
+        (101.0, 2.0, Buy),
+        (102.0, 5.0, Sell),
+        (103.0, 6.0, Sell),
+        (104.0, 5.0, Buy),
+        (105.0, 6.0, Buy),
+        (106.0, 6.0, Sell),
+        (106.0, 4.0, Sell),
+    ];
+    let rows: [(&str, bool, bool, &[f64]); 3] = [
+        (
+            "ids",
+            true,
+            false,
+            &[2.0, 5.0, 6.0, 5.0, 6.0, 6.0, 4.0, 1.0],
+        ),
+        ("no ids", false, false, &[2.0, 5.0, 6.0, 5.0, 6.0, 6.0, 1.0]),
+        (
+            "no ids, history page first",
+            false,
+            true,
+            &[2.0, 5.0, 6.0, 5.0, 6.0, 6.0, 1.0],
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (label, ids, history_first, held) in rows {
+        let identified = |trade: Tick, id| if ids { trade.with_id(id) } else { trade };
+        let tape: Vec<Tick> = (fills.iter().enumerate())
+            .map(|(second, &(price, size, side))| {
+                let at = start + TimeDelta::seconds(second as i64);
+                identified(Tick::new(at, price, size, Some(side)), second as u64 + 1)
+            })
+            .collect();
+        let live = identified(Tick::new(tape[7].ts, 106.0, 1.0, Some(Sell)), 100);
+        let timeframe: Timeframe = "10v".parse().unwrap();
+        let candles =
+            crate::data::aggregate_trades_with_tick_size(&tape, timeframe, Some(1.0)).unwrap();
+        let feed = Arc::new(Script::default());
+        let mut chart = fed(&feed, Some("A"));
+        chart.set_timeframe("20v".parse().unwrap());
+        chart.set_chart_type(ChartType::VolumeFootprint);
+        let mut frames = Frames::new();
+        frames.run(&mut chart);
+        feed.resolve()
+            .send(Ok(Instrument::new("A").with_tick_size(1.0)));
+        frames.run(&mut chart);
+        (tape[1..7].iter()).for_each(|trade| feed.sink().push_tick(trade.clone()));
+        frames.run(&mut chart);
+        chart.set_timeframe(timeframe);
+        frames.run(&mut chart);
+        feed.resolve()
+            .send(Ok(Instrument::new("A").with_tick_size(1.0)));
+        frames.run(&mut chart);
+        feed.sink().push_tick(live);
+        frames.run(&mut chart);
+        // Each subscription asked for its own pages; the newest are the new interval's.
+        let trades = feed.trades.lock().unwrap().pop().unwrap();
+        let history = feed.pages.lock().unwrap().pop().unwrap();
+        let trade_page = Ok(TradePage::new(tape[1..].to_vec(), false));
+        let history_page = page(candles[..4].to_vec(), true);
+        if history_first {
+            history.send(history_page);
+            frames.run(&mut chart);
+            trades.send(trade_page);
+        } else {
+            trades.send(trade_page);
+            frames.run(&mut chart);
+            history.send(history_page);
+        }
+        frames.run(&mut chart);
+        assert_eq!(chart.bars(SeriesId::MAIN)[..4], candles[..4], "{label}");
+        let sizes: Vec<_> = (chart.trades(SeriesId::MAIN).map(|trade| trade.size)).collect();
+        if sizes != held {
+            failures.push(format!("{label}: held {sizes:?}"));
+        }
+        let link = chart.feed_link.as_ref().unwrap();
+        let flow = link.footprint.as_ref().unwrap();
+        let complete = flow.complete_from();
+        let drawn: Vec<Vec<_>> = (candles[..4].iter())
+            .filter(|bar| complete.is_some_and(|from| bar.time >= from))
+            .filter_map(|bar| flow.bar_at(bar.time))
+            .map(|cells| {
+                (cells.levels.values())
+                    .map(|level| (level.level, level.bid, level.ask))
+                    .collect()
+            })
+            .collect();
+        if !drawn.is_empty() {
+            failures.push(format!("{label}: drawn {drawn:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
 }
 
 /// Evicted trades leave the footprint: its bars equal those summed from the held trades, delta
@@ -4224,6 +4633,170 @@ fn comparisons_are_filled_from_the_feed_and_survive_a_snapshot() {
         ..Default::default()
     });
     assert!(!manual.is_fed(id));
+}
+
+/// Undo of a removed feed-backed series shows the bars it held over the frames before its history
+/// reply, merges a live bar into them and then leaves the series to the reply. A candle replay
+/// entered before the reply windows the held bars with the live bar merged. Bars held under
+/// another interval, hours, conversion or adjustment than the chart's are not shown, also when the
+/// interval changed just before the removal, while the series still had its old bars, and neither
+/// are the live feed's bars under a market replay, whether the series left before or during it.
+#[test]
+fn undo_of_a_removed_fed_series_keeps_its_bars() {
+    // MSFT closes at 40 plus the index of the one-minute bar.
+    let msft = |range: std::ops::Range<usize>| -> Vec<Bar> {
+        bars(7)[range]
+            .iter()
+            .map(|bar| {
+                let close = bar.close - 60.0;
+                Bar::new(bar.time, close, close, close, close, 1.0)
+            })
+            .collect()
+    };
+    let held = [40.0, 41.0, 42.0, 43.0, 44.0, 45.0];
+    let merged = [40.0, 41.0, 42.0, 43.0, 44.0, 50.0];
+    // A market replay in the fifth minute of a recording that lacks MSFT, run for a frame.
+    let market = |chart: &mut Chart| {
+        use crate::data::{MarketEvent, ReplayDriver, ReplayEvent};
+        let time = bars(5)[4].time + TimeDelta::seconds(30);
+        let fill = Tick::new(time, 70.0, 1.0, None).with_id(0);
+        let events = vec![ReplayEvent::new("A", time, 0, MarketEvent::Trade(fill))];
+        let driver = ReplayDriver::new(events, vec![Instrument::new("A")]).unwrap();
+        driver.set_speed(0.0).unwrap();
+        driver.seek(time);
+        chart.set_market_replay(Some(Arc::new(driver)));
+        chart.pump(&egui::Context::default());
+    };
+    // How a row ends once a live bar has merged: the history reply arrives, a candle replay
+    // starts before it, or a market replay drives the series and no reply comes.
+    #[derive(PartialEq)]
+    enum End {
+        Reply,
+        CandleReplay,
+        MarketReplay,
+    }
+    // The change, whether it comes before the removal, the closes from undo to the reply,
+    // without and with a live bar of 50 in the last slot, and how the row ends.
+    type Row<'a> = (&'a str, bool, fn(&mut Chart), &'a [f64], &'a [f64], End);
+    let rows: [Row; 8] = [
+        ("none", false, |_| {}, &held, &merged, End::Reply),
+        (
+            "candle replay",
+            false,
+            |_| {},
+            &held,
+            &merged,
+            End::CandleReplay,
+        ),
+        (
+            "interval",
+            true,
+            |chart| chart.set_timeframe(Timeframe::Sec30),
+            &[],
+            &[50.0],
+            End::Reply,
+        ),
+        (
+            "hours",
+            false,
+            |chart| chart.set_extended_hours(true),
+            &[],
+            &[50.0],
+            End::Reply,
+        ),
+        (
+            "conversion",
+            false,
+            |chart| chart.set_conversion(Some("EUR".into())),
+            &[],
+            &[50.0],
+            End::Reply,
+        ),
+        (
+            "adjustment",
+            false,
+            |chart| chart.set_dividend_adjusted(true),
+            &[],
+            &[50.0],
+            End::Reply,
+        ),
+        ("market replay", false, market, &[], &[], End::MarketReplay),
+        (
+            "removed in a market replay",
+            true,
+            market,
+            &[],
+            &[],
+            End::MarketReplay,
+        ),
+    ];
+    for (change, before_removal, apply, shown, live, end) in rows {
+        let feed = Arc::new(Script::default());
+        let mut chart = fed(&feed, None);
+        let id = chart.add_feed_series(crate::widget::SeriesOptions {
+            name: "MSFT".into(),
+            ..Default::default()
+        });
+        let mut frames = Frames::new();
+        frames.run(&mut chart);
+        feed.resolve().send(Ok(Instrument::new("MSFT")));
+        frames.run(&mut chart);
+        feed.page().send(page(msft(0..6), true));
+        frames.run(&mut chart);
+        assert_eq!(closes(&chart, id), held);
+
+        if before_removal {
+            apply(&mut chart);
+        }
+        assert!(chart.user_action(|chart| chart.remove_series(id)));
+        if !before_removal {
+            apply(&mut chart);
+        }
+        frames.run(&mut chart);
+        assert!(chart.undo());
+        assert_eq!(closes(&chart, id), shown, "{change}: right after undo");
+        frames.run(&mut chart);
+        if end != End::MarketReplay {
+            feed.resolve().send(Ok(Instrument::new("MSFT")));
+        }
+        for frame in 0..3 {
+            frames.run(&mut chart);
+            assert_eq!(
+                closes(&chart, id),
+                shown,
+                "{change}: frame {frame} before the reply"
+            );
+        }
+        let last = msft(5..6)[0].time;
+        feed.sink()
+            .push_bar(Bar::new(last, 50.0, 50.0, 50.0, 50.0, 1.0));
+        frames.run(&mut chart);
+        assert_eq!(
+            closes(&chart, id),
+            live,
+            "{change}: a live bar before the reply"
+        );
+        match end {
+            End::Reply => {}
+            End::CandleReplay => {
+                chart.set_replay_time(Some(msft(3..4)[0].time));
+                frames.run(&mut chart);
+                assert_eq!(closes(&chart, id), [40.0, 41.0, 42.0], "{change}: entered");
+                chart.set_replay_time(Some(msft(6..7)[0].time));
+                frames.run(&mut chart);
+                assert_eq!(closes(&chart, id), merged, "{change}: sought past the bars");
+                continue;
+            }
+            End::MarketReplay => continue,
+        }
+        feed.page().send(page(msft(1..7), true));
+        frames.run(&mut chart);
+        assert_eq!(
+            closes(&chart, id),
+            [41.0, 42.0, 43.0, 44.0, 50.0, 46.0],
+            "{change}: the reply replaces the held bars"
+        );
+    }
 }
 
 /// Dividend adjustment is asked of the feed for the main series and the comparisons, and

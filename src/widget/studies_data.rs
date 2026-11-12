@@ -15,6 +15,9 @@ use std::sync::{Arc, Mutex};
 #[derive(Default)]
 pub(super) struct StudyDataCache {
     series: Vec<Series>,
+    /// Counts the times `clear_feed` dropped the feed's histories, so that bars filled from them
+    /// before can be told apart.
+    generation: u64,
 }
 
 struct Series {
@@ -23,6 +26,7 @@ struct Series {
     instrument: Option<Instrument>,
     clock: BarClock,
     error: Option<FeedError>,
+    stream_error: Option<FeedError>,
     stream: Option<Stream>,
     from_ticks: BTreeMap<chrono::DateTime<chrono::Utc>, Origin>,
 }
@@ -42,6 +46,9 @@ struct Stream {
     retry_at: Option<f64>,
     failures: u32,
     end: bool,
+    /// Whether a page arrived since the history was requested, or a replay reset dropped the
+    /// bars: before, they are only the live ones.
+    paged: bool,
     wake: Arc<Mutex<Option<egui::ViewportId>>>,
 }
 
@@ -142,14 +149,30 @@ impl StudyDataCache {
                     instrument: series.instrument.clone(),
                     clock: series.clock.clone(),
                     error: series.error.clone(),
+                    stream_error: series.stream_error.clone(),
                     stream: None,
                     from_ticks: series.from_ticks.clone(),
                 })
                 .collect(),
+            generation: self.generation,
         }
     }
     pub(super) fn clear_feed(&mut self) {
         self.series.retain(|series| series.stream.is_none());
+        self.generation += 1;
+    }
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
+    /// Whether the feed is yet to answer the history of `symbol` at `timeframe` with a page, also
+    /// before the next frame requests it. A history the host supplies is answered.
+    pub(super) fn awaits_page(&self, symbol: &str, timeframe: Timeframe) -> bool {
+        !self.series.iter().any(|series| {
+            series.request.metric.is_none()
+                && series.request.symbol == symbol
+                && series.request.timeframe == Some(timeframe)
+                && series.stream.as_ref().is_none_or(|stream| stream.paged)
+        })
     }
     pub(super) fn pause(&mut self) {
         for series in &mut self.series {
@@ -259,6 +282,7 @@ impl Chart {
             instrument,
             clock,
             error: None,
+            stream_error: None,
             stream: None,
             from_ticks: BTreeMap::new(),
         });
@@ -267,15 +291,17 @@ impl Chart {
 
     /// The last error for a requested study history. Recoverable resolve and page failures retry
     /// with exponential backoff, respecting rate limits; success clears the error. An unavailable
-    /// source leaves gaps.
+    /// source leaves gaps. A live stream error does not stop history paging and clears on the
+    /// next live bar, stream reset or subscription. A history error takes precedence over a
+    /// stream error.
     pub fn study_data_error(&self, request: &StudyDataRequest) -> Option<&FeedError> {
         let request = resolved(request, self.symbol(), self.timeframe());
-        self.study_data
+        let series = self
+            .study_data
             .series
             .iter()
-            .find(|series| series.request == request)?
-            .error
-            .as_ref()
+            .find(|series| series.request == request)?;
+        series.error.as_ref().or(series.stream_error.as_ref())
     }
 
     pub(super) fn invalidate_study_data(&mut self) {
@@ -295,7 +321,7 @@ impl Chart {
     /// the chart has no bars. Allocates only the requests, since it runs every frame.
     fn study_data_reaches(&self) -> Vec<(StudyDataRequest, Option<chrono::DateTime<chrono::Utc>>)> {
         // Price-based chart types run their studies on elements; the source studies asked
-        // here are not given the view, so their histories load in full.
+        // here are not given the view, so their histories load at least to the first source bar.
         let full = self.chart_type.is_time_independent();
         let first = self.state.data().bars.first().map(|bar| bar.time);
         let mut reaches: Vec<(StudyDataRequest, Option<_>)> = self
@@ -305,7 +331,9 @@ impl Chart {
             .collect();
         for (_, study) in self.indicators() {
             for declared in study.data_requests() {
-                let start = study.data_start(&declared).filter(|_| !full);
+                let start = study
+                    .data_start(&declared)
+                    .filter(|start| !full || first.is_some_and(|first| *start < first));
                 let start = first.and(start.or(first));
                 let request = resolved(&declared, self.symbol(), self.timeframe());
                 match reaches.iter_mut().find(|(known, _)| *known == request) {
@@ -379,6 +407,7 @@ impl Chart {
                     instrument: None,
                     clock: clock(request, None, self.extended_hours()),
                     error: None,
+                    stream_error: None,
                     from_ticks: BTreeMap::new(),
                     stream: Some(Stream {
                         feed: Arc::clone(feed),
@@ -392,6 +421,7 @@ impl Chart {
                         retry_at: None,
                         failures: 0,
                         end: false,
+                        paged: false,
                         wake,
                     }),
                 });
@@ -475,6 +505,7 @@ impl Chart {
                             });
                             series.error = None;
                             stream.failures = 0;
+                            stream.paged = true;
                             let empty = page.bars.is_empty();
                             let continuation = page.continue_before.filter(|_| empty);
                             stream.cursor = continuation;
@@ -518,14 +549,17 @@ impl Chart {
                     series.bars.clear();
                     series.from_ticks.clear();
                     series.error = None;
+                    series.stream_error = None;
                     stream.pending = false;
                     stream.history = None;
                     stream.retry_at = None;
                     stream.failures = 0;
                     stream.end = false;
+                    stream.paged = true;
                     changes.note(&series.request, true);
                 }
                 if !updates.bars.is_empty() {
+                    series.stream_error = None;
                     let len = series.bars.len();
                     let merged = merge(
                         &mut series.bars,
@@ -540,13 +574,14 @@ impl Chart {
                     }
                 }
                 if updates.error.is_some() {
-                    series.error = updates.error;
+                    series.stream_error = updates.error;
                 }
             }
             if stream.subscription.is_none()
                 && series.instrument.is_some()
                 && series.error.is_none()
             {
+                series.stream_error = None;
                 let tf = series.request.timeframe.unwrap();
                 let sink = stream.inbox.subscribe(
                     series.request.symbol.clone(),
@@ -1072,9 +1107,13 @@ pub(super) mod tests {
                     feed.answer(metric, Ok(HistoryPage::new(newest, false))).0,
                     None
                 );
+                let live_error = FeedError::Network("stream dropped".into());
+                feed.sinks.lock().unwrap()[0].report_error(live_error.clone());
                 pump(&mut chart, now + 0.25);
+                assert_eq!(chart.study_data_error(&request), Some(&live_error));
                 let failed = feed.answer(metric, Err(error.clone()));
                 pump(&mut chart, now + 0.5);
+                assert_eq!(chart.study_data_error(&request), Some(&error));
                 feed.sinks.lock().unwrap()[0].push_bar(Bar::new(
                     DateTime::UNIX_EPOCH + Duration::hours(1),
                     55.0,
@@ -1084,6 +1123,8 @@ pub(super) mod tests {
                     1.0,
                 ));
                 pump(&mut chart, now + 0.5 + delay - 0.01);
+                assert_eq!(chart.study_data_error(&request), Some(&error));
+                assert!(chart.study_data.series[0].stream_error.is_none());
                 assert_eq!(feed.pending(metric), 0);
                 pump(&mut chart, now + 0.5 + delay);
                 assert_eq!(feed.pending(metric), 1);
@@ -1119,6 +1160,12 @@ pub(super) mod tests {
                 assert_eq!(chart.study_data_error(&request), None);
                 assert_eq!(chart.study_data.series[0].bars[0].close, 99.0);
                 assert_eq!(feed.pending(metric), 0);
+                feed.sinks.lock().unwrap()[0].report_error(live_error.clone());
+                pump(&mut chart, now + 14.0);
+                assert_eq!(chart.study_data_error(&request), Some(&live_error));
+                chart.study_data.pause();
+                pump(&mut chart, now + 15.0);
+                assert_eq!(chart.study_data_error(&request), None);
             }
         }
     }
@@ -1808,29 +1855,14 @@ pub(super) mod tests {
 
     /// Guards #2111: Performance's 1Y target on a one-minute chart lies far before the chart's
     /// first bar, so its daily history pages back to the target, whatever the feed's page size
-    /// and even when a study with no stated start reads the same history. Then it stops.
+    /// and even when a study with no stated start reads the same history. Then it stops. An error
+    /// on the daily bars' live stream leaves that paging as it was and is reported.
     #[test]
     fn performance_daily_history_reaches_a_year_with_short_pages() {
         use crate::studies::Indicator;
-        use chrono::Datelike;
-        let flat = |time, close| Bar::new(time, close, close, close, close, 1.0);
-        let open: DateTime<chrono::Utc> = "2024-03-15T13:30:00Z".parse().unwrap();
-        // A close of 50 at 00:00 UTC on every weekday of the two years before 2024-03-15.
-        let today: DateTime<chrono::Utc> = "2024-03-15T00:00:00Z".parse().unwrap();
-        let daily: Vec<_> = (1..=730)
-            .rev()
-            .map(|day| today - Duration::days(day))
-            .filter(|day| day.weekday().number_from_monday() <= 5)
-            .map(|day| flat(day, 50.0))
-            .collect();
-        for shared in [false, true] {
-            let feed = Arc::new(RetryFeed::default());
-            let minutes = (0..390)
-                .map(|minute| flat(open + Duration::minutes(minute), 100.0))
-                .collect();
-            let mut chart = Chart::new(crate::model::BarData::from_bars(minutes));
-            chart.set_symbol("MAIN");
-            chart.set_timeframe(Timeframe::Min1);
+        let dropped = FeedError::Network("stream dropped".into());
+        for (shared, error) in [(false, None), (true, None), (false, Some(dropped))] {
+            let (mut chart, daily) = minute_chart(|day| Bar::new(day, 50.0, 50.0, 50.0, 50.0, 1.0));
             let id = chart.add_indicator(Box::new(crate::studies::Performance::new()));
             if shared {
                 let mut average = crate::studies::ConfiguredStudy::new(Box::new(SMA::new(2)));
@@ -1842,30 +1874,11 @@ pub(super) mod tests {
                     .unwrap();
                 chart.add_indicator(Box::new(average));
             }
-            let ctx = egui::Context::default();
-            let mut pages = 0;
-            loop {
-                ctx.run_ui(egui::RawInput::default(), |_| {})
-                    .drop_without_applying_deltas();
-                chart.pump_study_data(&ctx, Some(feed.clone()));
-                let resolve = feed.resolves.lock().unwrap().pop();
-                if let Some(reply) = resolve {
-                    reply.send(Ok(Instrument::new("MAIN")));
-                    continue;
-                }
-                let Some((request, reply)) = feed.histories.lock().unwrap().pop() else {
-                    break;
-                };
-                // At most 250 bars a page, the newest before the request.
-                let end = daily
-                    .partition_point(|bar| request.before.is_none_or(|before| bar.time < before));
-                pages += 1;
-                reply.send(Ok(HistoryPage::new(
-                    daily[end.saturating_sub(250)..end].to_vec(),
-                    end <= 250,
-                )));
+            let pages = page_daily(&mut chart, &daily, error.clone());
+            if let Some(error) = &error {
+                let request = chart.study_data_requests().pop().unwrap();
+                assert_eq!(chart.study_data_error(&request), Some(error));
             }
-            chart.recalculate_studies();
             let study = chart
                 .indicators()
                 .find(|(candidate, _)| *candidate == id)
@@ -1873,10 +1886,152 @@ pub(super) mod tests {
                 .1;
             // Every period starts from a close of 50: 100 * (100 - 50) / 50 = 100.
             let changes: Vec<_> = (0..6).map(|line| study.values().value(line, 389)).collect();
-            assert_eq!(changes, [Some(100.0); 6], "shared {shared}");
+            assert_eq!(
+                changes,
+                [Some(100.0); 6],
+                "shared {shared}, error {error:?}"
+            );
             // The first page ends on 2023-03-31 and the second passes the target, 2023-03-15; the
             // two-year feed holds a third.
-            assert_eq!(pages, 2, "shared {shared}");
+            assert_eq!(pages, 2, "shared {shared}, error {error:?}");
+        }
+    }
+
+    /// Pumps `chart` against a feed holding `daily` that answers at most 250 bars a page, the
+    /// newest before the request, and reports `live` once on each new subscription. Returns the
+    /// history pages the chart asked for.
+    fn page_daily(chart: &mut Chart, daily: &[Bar], live: Option<FeedError>) -> usize {
+        let feed = Arc::new(RetryFeed::default());
+        let ctx = egui::Context::default();
+        let (mut pages, mut reported) = (0, 0);
+        loop {
+            ctx.run_ui(egui::RawInput::default(), |_| {})
+                .drop_without_applying_deltas();
+            chart.pump_study_data(&ctx, Some(feed.clone()));
+            if let Some(error) = &live {
+                let sinks = feed.sinks.lock().unwrap();
+                for sink in &sinks[reported..] {
+                    sink.report_error(error.clone());
+                }
+                reported = sinks.len();
+            }
+            let resolve = feed.resolves.lock().unwrap().pop();
+            if let Some(reply) = resolve {
+                reply.send(Ok(Instrument::new("MAIN")));
+                continue;
+            }
+            let Some((request, reply)) = feed.histories.lock().unwrap().pop() else {
+                break;
+            };
+            let end =
+                daily.partition_point(|bar| request.before.is_none_or(|before| bar.time < before));
+            pages += 1;
+            reply.send(Ok(HistoryPage::new(
+                daily[end.saturating_sub(250)..end].to_vec(),
+                end <= 250,
+            )));
+        }
+        chart.recalculate_studies();
+        pages
+    }
+
+    /// 390 one-minute bars of 2024-03-15 at 100 on MAIN, and daily bars at 00:00 UTC on every
+    /// weekday of the two years before, from `bar`.
+    fn minute_chart(bar: impl Fn(DateTime<chrono::Utc>) -> Bar) -> (Chart, Vec<Bar>) {
+        use chrono::Datelike;
+        let open: DateTime<chrono::Utc> = "2024-03-15T13:30:00Z".parse().unwrap();
+        let today: DateTime<chrono::Utc> = "2024-03-15T00:00:00Z".parse().unwrap();
+        let daily = (1..=730)
+            .rev()
+            .map(|day| today - Duration::days(day))
+            .filter(|day| day.weekday().number_from_monday() <= 5)
+            .map(bar)
+            .collect();
+        let minutes = (0..390)
+            .map(|minute| {
+                let time = open + Duration::minutes(minute);
+                Bar::new(time, 100.0, 100.0, 100.0, 100.0, 1.0)
+            })
+            .collect();
+        let mut chart = Chart::new(crate::model::BarData::from_bars(minutes));
+        chart.set_symbol("MAIN");
+        chart.set_timeframe(Timeframe::Min1);
+        (chart, daily)
+    }
+
+    /// Yearly pivots from daily bars take the high, low and close of the whole previous year,
+    /// which lies before the chart's first bar, from a feed that pages its daily bars. The
+    /// confirmed lines of Projected Pivot Points are the same levels.
+    #[test]
+    fn yearly_pivots_read_the_whole_previous_year_of_paged_daily_bars() {
+        use crate::studies::{PivotPoints, PivotTimeframe, ProjectedPivotPoints};
+        let spike: DateTime<chrono::Utc> = "2023-01-10T00:00:00Z".parse().unwrap();
+        let studies: [Box<dyn crate::studies::Indicator>; 2] = [
+            Box::new(
+                PivotPoints::new()
+                    .with_timeframe(PivotTimeframe::Yearly)
+                    .with_daily_bars(true),
+            ),
+            Box::new(
+                ProjectedPivotPoints::new()
+                    .with_timeframe(PivotTimeframe::Yearly)
+                    .with_daily_bars(true),
+            ),
+        ];
+        let mut observed = Vec::new();
+        for study in studies {
+            // 2023 trades up to 200 on 10 January and down to 50 on 11 January, closing at 100.
+            let (mut chart, daily) = minute_chart(|day| {
+                let high = if day == spike { 200.0 } else { 100.0 };
+                let low = if day == spike + Duration::days(1) {
+                    50.0
+                } else {
+                    100.0
+                };
+                Bar::new(day, 100.0, high, low, 100.0, 1.0)
+            });
+            let id = chart.add_indicator(study);
+            let pages = page_daily(&mut chart, &daily, None);
+            let study = chart.indicators().find(|(at, _)| *at == id).unwrap().1;
+            let levels: Vec<_> = (0..3).map(|line| study.values().value(line, 389)).collect();
+            observed.push((study.name().to_owned(), levels, pages));
+        }
+        // P = (200 + 50 + 100) / 3 = 350/3, R1 = 2P - L = 550/3, S1 = 2P - H = 100/3.
+        let want = [350.0 / 3.0, 550.0 / 3.0, 100.0 / 3.0];
+        assert!(
+            observed.iter().all(|(_, levels, pages)| *pages == 2
+                && levels
+                    .iter()
+                    .zip(want)
+                    .all(|(got, want)| got.is_some_and(|got| (got - want).abs() < 1e-9))),
+            "(study, [P, R1, S1], pages) {observed:?}, want {want:?}"
+        );
+    }
+
+    /// Performance on a price-based chart type of one-minute bars pages its daily bars back to
+    /// its 1Y target, as docs/study-data.md states for any page size.
+    #[test]
+    fn performance_on_renko_pages_daily_bars_to_the_year() {
+        use crate::model::ChartType;
+        for chart_type in [
+            ChartType::Renko,
+            ChartType::Kagi,
+            ChartType::Range,
+            ChartType::PointAndFigure,
+            ChartType::LineBreak,
+        ] {
+            let (mut chart, daily) = minute_chart(|day| Bar::new(day, 50.0, 50.0, 50.0, 50.0, 1.0));
+            chart.set_chart_type(chart_type);
+            let id = chart.add_indicator(Box::new(crate::studies::Performance::new()));
+            let pages = page_daily(&mut chart, &daily, None);
+            let study = chart.indicators().find(|(at, _)| *at == id).unwrap().1;
+            let changes: Vec<_> = (0..6).map(|line| study.values().value(line, 389)).collect();
+            // 100 * (100 - 50) / 50 = 100 for every period, from two pages.
+            assert_eq!(
+                (changes, pages),
+                (vec![Some(100.0); 6], 2),
+                "{chart_type:?}"
+            );
         }
     }
 

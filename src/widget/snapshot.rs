@@ -1,7 +1,7 @@
 //! A chart's state as a serializable snapshot, and named layouts of charts as versioned
 //! documents.
 
-use super::{Chart, ChartLayoutMode, PaneId, SeriesOptions};
+use super::{Chart, ChartLayoutMode, ChartLayoutSizing, PaneId, SeriesOptions};
 use crate::drawings::persistence::{DrawingStorage, SaveError, SkippedDrawing};
 use crate::model::{
     ChartType, ChartTypeParams, Marker, MarkerOptions, PriceLine, SeriesStyle, Timeframe,
@@ -152,6 +152,10 @@ pub struct ChartSnapshot {
     pub panes: Vec<SavedPane>,
     /// The space between bars in points.
     pub bar_spacing: f32,
+    /// Numeric key units per spacing unit. Absent in older layouts, on time charts and
+    /// before the numeric keys differ.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub numeric_unit: Option<f64>,
     /// The space after the last bar, in bars.
     pub right_offset: f32,
     /// The symbol's drawings as a drawings document (see [`DrawingStorage::to_json`]).
@@ -346,6 +350,11 @@ impl Chart {
                 })
                 .collect(),
             bar_spacing,
+            numeric_unit: self
+                .state
+                .time_scale()
+                .numeric_positions()
+                .and_then(|positions| positions.unit),
             right_offset,
             drawings,
         };
@@ -531,20 +540,41 @@ impl Chart {
             self.restored_studies.insert(saved.id, id.0);
             self.move_series_to_pane(id, panes[&saved.pane]);
         }
-        let column_ids: Vec<_> = snapshot
+        let saved_columns: Vec<_> = snapshot
             .studies
             .iter()
-            .map(|saved| {
-                let id = self.restored_studies[&saved.id];
+            .zip(self.indicators())
+            .map(|(saved, (_, study))| {
                 // An unknown id from another chart must not claim a future local study's column.
-                let column = if saved.id < next_series { saved.id } else { id };
+                let column = if saved.id < next_series {
+                    saved.id
+                } else {
+                    self.restored_studies[&saved.id]
+                };
                 (
-                    id,
                     self.study_column_ids
                         .get(&saved.id)
                         .copied()
                         .unwrap_or(column),
+                    study.name(),
                 )
+            })
+            .collect();
+        // Saved ids of another chart can meet entries of this chart's earlier studies. The table
+        // keys a column by its id and title, so a column two studies of one title would share is
+        // ambiguous, and each of them takes its own new id instead.
+        let column_ids: Vec<_> = snapshot
+            .studies
+            .iter()
+            .zip(&saved_columns)
+            .map(|(saved, column)| {
+                let id = self.restored_studies[&saved.id];
+                let shared = saved_columns
+                    .iter()
+                    .filter(|other| *other == column)
+                    .count()
+                    > 1;
+                (id, if shared { id } else { column.0 })
             })
             .collect();
         self.study_column_ids.extend(column_ids);
@@ -635,6 +665,14 @@ impl Chart {
             }
         }
         self.pane_layout.maximized = snapshot.maximized.map(|at| panes[&at]);
+        if self.state.time_scale().numeric_positions().is_some() {
+            let positions =
+                crate::model::numeric_positions(self.state.shown(), snapshot.numeric_unit);
+            self.state
+                .time_scale_mut()
+                .set_numeric_positions(Some(positions));
+            self.refresh_time_scale_content();
+        }
         self.apply_synced_time_scale(snapshot.bar_spacing, snapshot.right_offset);
         let skipped = match drawings {
             Some(json) => {
@@ -650,6 +688,9 @@ impl Chart {
         // A layout without the original pane has just left it: the main bars are live again.
         self.follow_feed_pause();
         self.history.clear();
+        // Undone or redone before the restore, they belong to the state it replaced.
+        self.history.size_steps.clear();
+        self.history.link_steps.clear();
         Ok(skipped)
     }
 }
@@ -828,6 +869,7 @@ fn check(
             .is_finite()
         || !snapshot.bar_spacing.is_finite()
         || snapshot.bar_spacing <= 0.0
+        || snapshot.numeric_unit.is_some_and(|unit| !unit.is_finite() || unit <= 0.0)
         || !snapshot.right_offset.is_finite()
         || snapshot
             .maximized
@@ -946,14 +988,20 @@ fn check_source_links(
     Ok(())
 }
 
-/// A named arrangement of charts: the [`ChartLayoutMode`] and a [`ChartSnapshot`] of each chart,
-/// as kept in [`StoreKind::Layouts`](crate::services::StoreKind::Layouts) documents.
+/// A named arrangement of charts: the [`ChartLayoutMode`], a [`ChartSnapshot`] of each chart and
+/// the chart sizes, as kept in [`StoreKind::Layouts`](crate::services::StoreKind::Layouts)
+/// documents.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SavedLayout {
     /// How the charts are arranged.
     pub mode: ChartLayoutMode,
     /// The charts in the order of their slots.
     pub charts: Vec<ChartSnapshot>,
+    /// The chart sizes of the arrangement, as [`ChartLayout::sizes`](super::ChartLayout::sizes)
+    /// gives them; `None`, also read from documents saved before sizes were kept, stands for the
+    /// preset proportions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sizing: Option<ChartLayoutSizing>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1055,6 +1103,7 @@ mod tests {
         let json = SavedLayout {
             mode: ChartLayoutMode::Single,
             charts: vec![chart.snapshot_with(&factory).unwrap()],
+            sizing: None,
         }
         .to_json()
         .unwrap();
@@ -1205,6 +1254,7 @@ mod tests {
         let json = SavedLayout {
             mode: ChartLayoutMode::Single,
             charts: vec![chart.snapshot().unwrap()],
+            sizing: None,
         }
         .to_json()
         .unwrap();
@@ -1278,10 +1328,16 @@ mod tests {
         restored.restore(&snapshot).unwrap();
         assert_eq!(restored.timeframe(), None);
         for bad in [0.0, f32::NAN, f32::INFINITY] {
-            snapshot.bar_spacing = bad;
-            snapshot.symbol = "Invalid".into();
-            assert!(restored.restore(&snapshot).is_err());
-            assert_eq!(restored.symbol(), "A");
+            for (spacing, unit) in [
+                (bad, None),
+                (layout.charts[0].bar_spacing, Some(f64::from(bad))),
+            ] {
+                snapshot.bar_spacing = spacing;
+                snapshot.numeric_unit = unit;
+                snapshot.symbol = "Invalid".into();
+                assert!(restored.restore(&snapshot).is_err());
+                assert_eq!(restored.symbol(), "A");
+            }
         }
         for key in ["price_scale", "panes"] {
             let mut invalid: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1395,6 +1451,7 @@ mod tests {
         let json = SavedLayout {
             mode: ChartLayoutMode::Single,
             charts: vec![original.snapshot().unwrap()],
+            sizing: None,
         }
         .to_json()
         .unwrap();
@@ -1467,6 +1524,7 @@ mod tests {
                 let json = SavedLayout {
                     mode: ChartLayoutMode::Single,
                     charts: vec![snapshot],
+                    sizing: None,
                 }
                 .to_json()
                 .unwrap();
@@ -1829,6 +1887,7 @@ mod tests {
             let layout = SavedLayout {
                 mode: ChartLayoutMode::Single,
                 charts: vec![chart.snapshot().unwrap()],
+                sizing: None,
             };
             let mut document: serde_json::Value =
                 serde_json::from_str(&layout.to_json().unwrap()).unwrap();

@@ -27,7 +27,16 @@ before the target, as when the daily bars stop earlier, that close counts. Daily
 charts, and hosts that supply no daily bars, use the chart's loaded bars. A connected feed pages
 the daily bars back to the start of the date one year before the last chart bar's trading date,
 the oldest period, and stops there or at the end of its history, whatever its page size and the
-chart's first bar. Missing history and zero reference prices show N/A.
+chart's first bar. This also applies on price-based charts such as Renko: a study's stated
+start before the first chart bar is honored, while a later start loads to the first chart bar
+because the source study has no view of the rendered elements. Missing history and zero
+reference prices show N/A.
+
+With Use Daily Bars enabled on an intraday chart, Pivot Points Standard and Projected Pivot
+Points request the symbol's daily bars. A connected feed loads through the full period before
+the oldest retained pivot period, including yearly and aligned multi-year periods. Its start
+is UTC midnight, matching the dates used to group the daily bars, and loading stops there or
+at the end of the feed's history. Hosts supplying snapshots include that earlier period.
 
 The chart supplies Visible Average Price with its visible source range before autoscaling.
 Direct callers use [`set_visible_range(start..end)`](https://userfrm.github.io/egui-charts/docs/api/egui_charts/studies/trait.Indicator.html#method.set_visible_range) before [`calculate`](https://userfrm.github.io/egui-charts/docs/api/egui_charts/studies/trait.Indicator.html#tymethod.calculate). The end is exclusive;
@@ -43,8 +52,11 @@ input chooses another interval; one that is not shorter than the chart's or does
 reads the automatic one. Subsecond and tick-count charts have no request. 24-hour Volume
 requests the automatic interval only where chart bars cannot hold exactly 24 hours, on intervals
 longer than a day or that do not divide one, and sums chart bars until it is supplied. Its Units input sums the supplied volume (default) or, for
-volume in base units, an estimate of the quote amount: each candle's volume times its own close,
-labelled with [`Instrument::currency`](https://userfrm.github.io/egui-charts/docs/api/egui_charts/model/struct.Instrument.html#structfield.currency), which the host must set. Without it, or with a non-finite or
+volume in base units, an estimate of the quote amount: each candle's volume times its own price,
+close unless the Price source input says otherwise, labelled with [`Instrument::currency`](https://userfrm.github.io/egui-charts/docs/api/egui_charts/model/struct.Instrument.html#structfield.currency), which the host must set.
+The Target currency input converts each candle's amount at the rate in effect at its open; the
+chart then requests the dated rates [`StudyDataRequest::exchange_rate`](https://userfrm.github.io/egui-charts/docs/api/egui_charts/data/struct.StudyDataRequest.html#method.exchange_rate) names, which the host supplies
+like any metric. Without the currency or a rate, or with a non-finite or
 negative value in the window, the quote amount is missing. Supply
 the same symbol and session as the chart. Read the request again after a symbol, interval or
 input change:
@@ -67,6 +79,9 @@ fn supply_snapshots(
 
 A response replaces the prior snapshot. The chart sorts, deduplicates and validates it through
 its shared study-data path; a connected [`Datafeed`](https://userfrm.github.io/egui-charts/docs/api/egui_charts/data/trait.Datafeed.html) loads and subscribes automatically.
+A live stream failure is available through `Chart::study_data_error` while older study history
+keeps paging. A new live bar, a stream reset or a renewed subscription clears that stream
+error; an outstanding history error takes precedence and keeps its existing retry policy.
 The fixed range and anchored volume profile drawings add the finer interval that
 [`Instrument::profile_resolutions`](https://userfrm.github.io/egui-charts/docs/api/egui_charts/model/struct.Instrument.html#structfield.profile_resolutions) suggests for their span to these requests. A connected feed
 loads it back to the first bar of the span. Profiles still estimate volume from those bars;

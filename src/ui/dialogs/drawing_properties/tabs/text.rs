@@ -10,6 +10,7 @@ use egui::Ui;
 use super::style::color_swatch;
 use crate::tokens::DESIGN_TOKENS;
 use crate::ui::dialogs::drawing_properties::actions::DrawingProps;
+use crate::ui_kit::color_picker::keep_opacity;
 use crate::ui_kit::ext::UiExt;
 use crate::ui_kit::{ColorPickerState, FormGrid};
 
@@ -18,7 +19,7 @@ const FONT_SIZES: &[f32] = &[8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0, 28.0
 
 /// Tools whose text sits in a box drawn from the text, background and border settings; tables,
 /// posts and ideas keep the theme's colours for their text.
-fn has_text_box(tool: DrawingToolType) -> bool {
+pub(crate) fn has_text_box(tool: DrawingToolType) -> bool {
     use DrawingToolType as T;
     matches!(
         tool,
@@ -56,7 +57,8 @@ fn alignment_row<T: Copy + PartialEq, const N: usize>(
 pub struct TextTab;
 
 impl TextTab {
-    /// Tools with text to write and the trend angle, whose own labels have a font and a colour.
+    /// Tools with text to write, and the trend angle, Fibonacci, Fibonacci time and position
+    /// tools, whose own labels have a font and a colour.
     pub(crate) fn available(tool: DrawingToolType) -> bool {
         tool.supports_text()
             || matches!(
@@ -65,6 +67,10 @@ impl TextTab {
                     | DrawingToolType::FibonacciRetracement
                     | DrawingToolType::FibonacciExtension
                     | DrawingToolType::FibonacciChannel
+                    | DrawingToolType::FibonacciTimeZones
+                    | DrawingToolType::TrendBasedFibTime
+                    | DrawingToolType::LongPos
+                    | DrawingToolType::ShortPos
             )
     }
 
@@ -76,8 +82,14 @@ impl TextTab {
                 DrawingToolType::FibonacciRetracement
                     | DrawingToolType::FibonacciExtension
                     | DrawingToolType::FibonacciChannel
+                    | DrawingToolType::FibonacciTimeZones
+                    | DrawingToolType::TrendBasedFibTime
             )
         {
+            let time = matches!(
+                template.settings.tool_type,
+                DrawingToolType::FibonacciTimeZones | DrawingToolType::TrendBasedFibTime
+            );
             let mut config = template.settings.fibonacci_config().into_owned();
             let original = config.clone();
             FormGrid::new("fibonacci_text").show(ui, |ui| {
@@ -115,17 +127,28 @@ impl TextTab {
                 {
                     config.label_position = Some(position);
                 }
-                alignment_row(
-                    ui,
-                    "Label height",
-                    &mut config.label_vertical,
-                    [
-                        (V::Bottom, "Top"),
-                        (V::Middle, "Middle"),
-                        (V::Top, "Bottom"),
-                    ],
-                );
-                if template.settings.tool_type == DrawingToolType::FibonacciChannel {
+                // Time projections run top to bottom of the pane; retracements measure from the line.
+                let (height, choices) = if time {
+                    (
+                        &mut config.time_label_vertical,
+                        [
+                            (V::Top, "Top"),
+                            (V::Middle, "Middle"),
+                            (V::Bottom, "Bottom"),
+                        ],
+                    )
+                } else {
+                    (
+                        &mut config.label_vertical,
+                        [
+                            (V::Bottom, "Top"),
+                            (V::Middle, "Middle"),
+                            (V::Top, "Bottom"),
+                        ],
+                    )
+                };
+                alignment_row(ui, "Label height", height, choices);
+                if time || template.settings.tool_type == DrawingToolType::FibonacciChannel {
                     return;
                 }
                 ui.label("");
@@ -158,6 +181,64 @@ impl TextTab {
             if config != original {
                 template.settings.fib_config = Some(config);
             }
+            return;
+        }
+        if let Some(template) = &mut props.tool_settings
+            && matches!(
+                template.settings.tool_type,
+                DrawingToolType::LongPos | DrawingToolType::ShortPos
+            )
+        {
+            let target = template.settings.position_colors()[0];
+            let style = &mut template.settings.position_style;
+            let [text_picker, background_picker, _] = pickers;
+            let rgba = |[r, g, b, a]: [u8; 4]| egui::Color32::from_rgba_unmultiplied(r, g, b, a);
+            FormGrid::new("position_text").show(ui, |ui| {
+                let label = ui.label(l10n::text(ui.ctx(), "Font size"));
+                ui.label_inputs_by(label.id, |ui| {
+                    ui.combo_select(
+                        "position_font_size",
+                        &mut style.font_size,
+                        FONT_SIZES.iter().copied(),
+                        |v| format!("{}px", *v as i32),
+                    );
+                });
+                ui.end_row();
+
+                ui.label(l10n::text(ui.ctx(), "Text color"));
+                let text = style.text_color.map_or(egui::Color32::WHITE, rgba);
+                if let Some(picked) = color_swatch(ui, text_picker, text, "position_text_color") {
+                    style.text_color = Some(
+                        keep_opacity(picked, text, text_picker.custom_mode).to_srgba_unmultiplied(),
+                    );
+                }
+                ui.end_row();
+
+                // Until a plate colour is chosen, each label takes its level's colour.
+                let label = ui.label(l10n::text(ui.ctx(), "Background"));
+                ui.horizontal(|ui| {
+                    ui.checkbox(
+                        &mut style.label_background,
+                        l10n::text(ui.ctx(), "Show background"),
+                    )
+                    .labelled_by(label.id);
+                    let plate = rgba(
+                        style
+                            .label_color
+                            .unwrap_or([target[0], target[1], target[2], 255]),
+                    );
+                    if style.label_background
+                        && let Some(picked) =
+                            color_swatch(ui, background_picker, plate, "position_label_background")
+                    {
+                        style.label_color = Some(
+                            keep_opacity(picked, plate, background_picker.custom_mode)
+                                .to_srgba_unmultiplied(),
+                        );
+                    }
+                });
+                ui.end_row();
+            });
             return;
         }
 
@@ -278,6 +359,9 @@ impl TextTab {
                         | DrawingToolType::ExtendedLine
                         | DrawingToolType::InfoLine
                         | DrawingToolType::TrendAngle
+                        | DrawingToolType::Rect
+                        | DrawingToolType::Circle
+                        | DrawingToolType::Ellipse
                 ))
             {
                 return;
@@ -322,6 +406,36 @@ impl TextTab {
                 ui.checkbox(&mut settings.italic, l10n::text(ui.ctx(), "Italic"));
             });
             ui.end_row();
+
+            let plain = matches!(
+                settings.tool_type,
+                DrawingToolType::TextLabel | DrawingToolType::AnchoredText
+            );
+            if plain {
+                let label = ui.label(l10n::text(ui.ctx(), "Text size"));
+                ui.checkbox(
+                    &mut settings.text_follows_zoom,
+                    l10n::text(ui.ctx(), "Scale with zoom"),
+                )
+                .labelled_by(label.id);
+                ui.end_row();
+            }
+
+            if plain || settings.tool_type == DrawingToolType::Callout {
+                let label = ui.label(l10n::text(ui.ctx(), "Text wrap"));
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut settings.text_wrap, l10n::text(ui.ctx(), "Wrap text"))
+                        .labelled_by(label.id);
+                    ui.add_enabled(
+                        settings.text_wrap,
+                        egui::DragValue::new(&mut settings.text_wrap_width)
+                            .range(1.0..=crate::drawings::validation::MAX_TEXT_WRAP_WIDTH)
+                            .suffix(" px"),
+                    )
+                    .labelled_by(label.id);
+                });
+                ui.end_row();
+            }
 
             if !boxed {
                 return;
@@ -373,17 +487,21 @@ mod tests {
     use crate::drawings::Drawing;
 
     /// Line tools offer the text placement, colour and emphasis they draw, and a vertical line
-    /// also offers the orientation of its text.
+    /// also offers the orientation of its text. A rectangle, circle or ellipse writes its text at
+    /// its centre, so it offers the colour and emphasis alone.
     #[test]
-    fn line_tools_offer_the_text_settings_they_draw() {
+    fn tools_offer_the_text_settings_they_draw() {
         let chart = crate::Chart::new(crate::model::BarData::default());
-        for (tool, offered) in [
+        for (tool, placed) in [
             (DrawingToolType::HorizontalLine, true),
             (DrawingToolType::TrendLine, true),
             (DrawingToolType::Ray, true),
             (DrawingToolType::ExtendedLine, true),
             (DrawingToolType::HorizontalRay, true),
             (DrawingToolType::VerticalLine, true),
+            (DrawingToolType::Rect, false),
+            (DrawingToolType::Circle, false),
+            (DrawingToolType::Ellipse, false),
         ] {
             let mut props = DrawingProps::from_drawing(&Drawing::new(1, tool), &chart);
             let output = egui::Context::default().run_ui(Default::default(), |ui| {
@@ -398,12 +516,12 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            for label in [
-                "Horizontal alignment",
-                "Vertical alignment",
-                "Text color",
-                "Bold",
-                "Italic",
+            for (label, offered) in [
+                ("Horizontal alignment", placed),
+                ("Vertical alignment", placed),
+                ("Text color", true),
+                ("Bold", true),
+                ("Italic", true),
             ] {
                 assert_eq!(labels.contains(&label), offered, "{tool:?} {label}");
             }

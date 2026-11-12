@@ -248,6 +248,12 @@ impl StudyTemplate {
                     .inputs
                     .push(("midpoint".to_owned(), InputValue::Toggle(true)));
             }
+            // Higher-interval candles drew their saved interval before one could follow the chart's.
+            "Higher Interval Candles" if !has("auto_interval") => {
+                template
+                    .inputs
+                    .push(("auto_interval".to_owned(), InputValue::Toggle(false)));
+            }
             // An RSI drew no average and no middle line before it opened with both; the hidden
             // level keeps the styles saved for the other two and stays within their band. Its
             // average then chose from None, SMA and EMA, under ids of its own, before it took the
@@ -343,6 +349,61 @@ mod tests {
     };
     use chrono::{NaiveTime, TimeZone, Utc, Weekday};
     use egui::Color32;
+
+    /// Missing permissions inherit the study's declaration; explicit permissions survive saves.
+    #[test]
+    fn legacy_settings_keep_a_read_only_host_study() {
+        #[derive(Clone, Default)]
+        struct Locked(crate::studies::IndicatorValues);
+        impl Indicator for Locked {
+            fn name(&self) -> &str {
+                "Locked"
+            }
+            fn user_edit_enabled(&self) -> bool {
+                false
+            }
+            fn calculate(&mut self, _: &[Bar]) {}
+            fn values(&self) -> &crate::studies::IndicatorValues {
+                &self.0
+            }
+            fn colors(&self) -> Vec<Color32> {
+                vec![Color32::RED]
+            }
+            fn set_colors(&mut self, _: Vec<Color32>) {}
+            fn set_visible(&mut self, _: bool) {}
+            fn clone_box(&self) -> Box<dyn Indicator> {
+                Box::new(self.clone())
+            }
+        }
+        let mut factory = IndicatorFactory::new();
+        factory.register("Locked", || Box::<Locked>::default());
+        for (name, declared) in [("Locked", false), ("SMA", true)] {
+            for saved in [None, Some(true), Some(false)] {
+                let study = factory.create(name).unwrap();
+                let mut json =
+                    serde_json::to_value(StudyTemplate::from_study(study.as_ref())).unwrap();
+                if let Some(enabled) = saved {
+                    json["settings"]["user_edit_enabled"] = enabled.into();
+                } else {
+                    json["settings"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("user_edit_enabled");
+                }
+                let template: StudyTemplate = serde_json::from_value(json).unwrap();
+                let restored = template.create_with(&factory).unwrap();
+                let expected = saved.unwrap_or(declared);
+                assert_eq!(restored.user_edit_enabled(), expected, "{name} {saved:?}");
+                let captured = StudyTemplate::from_study(restored.as_ref());
+                let json = serde_json::to_value(&captured).unwrap();
+                assert_eq!(json["settings"]["user_edit_enabled"], expected);
+                assert_eq!(
+                    captured.create_with(&factory).unwrap().user_edit_enabled(),
+                    expected
+                );
+            }
+        }
+    }
 
     /// What a chart shows of a calculated study: its name, values, line names, crossing
     /// markers, line styles, value scale and drawings, as text.
@@ -621,6 +682,17 @@ mod tests {
                 vec![("midpoint", Toggle(false))],
                 vec![("midpoint", Toggle(false))],
             ),
+            // Saved before the interval could follow the chart's, as new studies do.
+            (
+                "Higher Interval Candles",
+                vec![("interval", Choice(15))],
+                vec![("interval", Choice(15)), ("auto_interval", Toggle(false))],
+            ),
+            (
+                "Higher Interval Candles",
+                vec![("auto_interval", Toggle(true))],
+                vec![("auto_interval", Toggle(true))],
+            ),
             // Saved as Unix milliseconds before the endpoints read as UTC dates and times.
             (
                 "Vol Profile FR",
@@ -638,9 +710,32 @@ mod tests {
                 vec![("start_time", Number(-8e15))],
                 vec![("start_time", Text(String::new()))],
             ),
+            // Saved before the levels could extend past their profiles.
+            (
+                "Vol Profile Session",
+                vec![("row_count", Length(30))],
+                vec![
+                    ("row_count", Length(30)),
+                    ("extend_poc", Toggle(false)),
+                    ("extend_vah", Toggle(false)),
+                    ("extend_val", Toggle(false)),
+                ],
+            ),
         ];
         let factory = IndicatorFactory::new();
-        for (name, saved, restored) in rows {
+        let periods = (0..7).map(|period| {
+            (
+                "Vol Profile Periodic",
+                vec![("period", Choice(period))],
+                vec![
+                    ("period", Choice(period)),
+                    ("extend_poc", Toggle(false)),
+                    ("extend_vah", Toggle(false)),
+                    ("extend_val", Toggle(false)),
+                ],
+            )
+        });
+        for (name, saved, restored) in rows.into_iter().chain(periods) {
             let mut settings = factory.create(name).unwrap().settings();
             for plot in &mut settings.plots {
                 plot.visible = true;

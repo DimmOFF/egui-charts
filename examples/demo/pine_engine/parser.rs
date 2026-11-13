@@ -311,6 +311,15 @@ impl Parser {
             return false;
         }
         at += 1;
+        // A declared return type comes first: `float myAverage(...) =>`.
+        if matches!(self.tokens.get(at).map(|s| &s.token), Some(Token::Ident(_)))
+            && self
+                .tokens
+                .get(at + 1)
+                .is_some_and(|next| next.is_op("("))
+        {
+            at += 1;
+        }
         if !self
             .tokens
             .get(at)
@@ -399,6 +408,15 @@ impl Parser {
     }
 
     fn parse_function(&mut self) -> Result<Function, String> {
+        // A declared return type is accepted and dropped: `float myAverage(...) =>`.
+        if self.at_pair_of_idents()
+            && self
+                .tokens
+                .get(self.at + 2)
+                .is_some_and(|next| next.is_op("("))
+        {
+            self.advance();
+        }
         let name = self.ident()?;
         self.expect_op("(")?;
         let mut params = Vec::new();

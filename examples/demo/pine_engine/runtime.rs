@@ -4465,6 +4465,46 @@ alertcondition(bull, "Bull", "Bull signal")
     }
 
     #[test]
+    fn methods_enums_and_recursion_run_without_diagnostics() {
+        let script = r#"indicator("Odds4")
+type Point
+    float x
+    float y
+method length(Point self) =>
+    math.sqrt(self.x * self.x + self.y * self.y)
+enum Side
+    long = "long"
+    short = "short"
+float fact(float n) =>
+    n <= 1 ? 1 : n * fact(n - 1)
+p = Point.new(3, 4)
+plot(p.length(), "length")
+varip int seen = 0
+seen += 1
+plot(seen, "seen")
+plot(fact(5), "fact")
+side = Side.long
+plot(side == "long" ? 1 : 0, "side")
+plot(str.tostring(Side.short) == "short" ? 1 : 0, "short")
+"#;
+        let output = run(script, &[1.0, 2.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let at = |title: &str| {
+            output
+                .plots
+                .iter()
+                .find(|plot| plot.title == title)
+                .unwrap()
+                .values[1]
+        };
+        assert_eq!(at("length"), 5.0);
+        assert_eq!(at("seen"), 2.0);
+        assert_eq!(at("fact"), 120.0);
+        assert_eq!(at("side"), 1.0);
+        assert_eq!(at("short"), 1.0);
+    }
+
+    #[test]
     fn array_and_map_iteration_and_colour_channels_run_without_diagnostics() {
         let script = r#"indicator("Odds3")
 values = array.from(10, 20, 30)

@@ -1490,6 +1490,13 @@ impl<'a> Evaluator<'a> {
                 None => self.unsupported(line, &name),
             };
         }
+        if let Some(rest) = name.strip_prefix("matrix.") {
+            let values: Vec<Value> = args.iter().map(|arg| self.eval(&arg.value)).collect();
+            return match builtins::matrix(rest, &values) {
+                Some(value) => value,
+                None => self.unsupported(line, &name),
+            };
+        }
         // `line.new(x1, y1, x2, y2)`, `box.get_left(box)` and the rest of the drawing API.
         if callee.len() == 2
             && let Some(kind) = drawing_kind(&callee[0])
@@ -1550,6 +1557,14 @@ impl<'a> Evaluator<'a> {
                 let mut values = vec![Value::Array(items)];
                 values.extend(args.iter().map(|arg| self.eval(&arg.value)));
                 if let Some(result) = builtins::array(method, &values) {
+                    return result;
+                }
+            }
+            // `n.get(0, 1)` reads a matrix through its method form.
+            if let Some(items) = value.matrix() {
+                let mut values = vec![Value::Matrix(items)];
+                values.extend(args.iter().map(|arg| self.eval(&arg.value)));
+                if let Some(result) = builtins::matrix(method, &values) {
                     return result;
                 }
             }
@@ -4036,6 +4051,28 @@ mod tests {
         // `str.match(regex)` reads the symbol, which is empty in this test context.
         assert_eq!(output.plots[2].values[0], 0.0);
         assert_eq!(output.plots[3].values[0], 0.0);
+    }
+
+    #[test]
+    fn matrix_reads_writes_and_multiplies() {
+        let output = run(
+            "indicator(\"T\")\nm = matrix.new(2, 2, 1)\nm.set(0, 1, 3)\nplot(matrix.get(m, 0, 1))\nplot(m.get(1, 0))\nplot(matrix.sum(m))\nplot(matrix.rows(m))\nplot(matrix.columns(m))\nn = matrix.new(2, 2, 2)\nproduct = matrix.mult(m, n)\nplot(product.get(0, 0))\nplot(matrix.det(m))\nplot(matrix.trace(m))\nplot(m.row(0).get(1))\nplot(matrix.transpose(m).get(1, 0))\ninverse = matrix.inv(matrix.identity(2))\nplot(inverse.get(1, 1))\nplot(matrix.is_identity(matrix.identity(2)) ? 1 : 0)\n",
+            &[1.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let at = |index: usize| output.plots[index].values[0];
+        assert_eq!(at(0), 3.0);
+        assert_eq!(at(1), 1.0);
+        assert_eq!(at(2), 6.0);
+        assert_eq!(at(3), 2.0);
+        assert_eq!(at(4), 2.0);
+        assert_eq!(at(5), 8.0);
+        assert_eq!(at(6), -2.0);
+        assert_eq!(at(7), 2.0);
+        assert_eq!(at(8), 3.0);
+        assert_eq!(at(9), 3.0);
+        assert_eq!(at(10), 1.0);
+        assert_eq!(at(11), 1.0);
     }
 
     #[test]

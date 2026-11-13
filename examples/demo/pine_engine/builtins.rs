@@ -1790,7 +1790,7 @@ pub fn display(value: &Value) -> String {
         Value::Bool(flag) => flag.to_string(),
         Value::Str(text) => text.clone(),
         Value::Color(color) => format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b()),
-        Value::Num(_) | Value::Na | Value::Array(_) | Value::Object(_) | Value::Lambda(_) | Value::Plot(_) => {
+        Value::Num(_) | Value::Na | Value::Array(_) | Value::Object(_) | Value::Lambda(_) | Value::Matrix(_) | Value::Plot(_) => {
             "NaN".to_owned()
         }
     }
@@ -2188,6 +2188,470 @@ fn array_known(name: &str, args: &[Value]) -> Option<Value> {
 /// A new array value around `values`.
 fn new_array(values: Vec<Value>) -> Value {
     Value::array_of(values)
+}
+
+/// Calls `matrix.*`; `None` for a name this subset does not run.
+pub fn matrix(name: &str, args: &[Value]) -> Option<Value> {
+    const NAMES: &[&str] = &[
+        "new",
+        "get",
+        "set",
+        "rows",
+        "columns",
+        "elements_count",
+        "fill",
+        "copy",
+        "transpose",
+        "sum",
+        "avg",
+        "median",
+        "min",
+        "max",
+        "add",
+        "sub",
+        "mult",
+        "row",
+        "col",
+        "reshape",
+        "concat",
+        "identity",
+        "is_square",
+        "is_zero",
+        "is_identity",
+        "is_diagonal",
+        "is_symmetric",
+        "trace",
+        "det",
+        "inv",
+        "sort",
+        "reverse",
+    ];
+    if !NAMES.contains(&name) {
+        return None;
+    }
+    Some(matrix_known(name, args).unwrap_or(Value::Na))
+}
+
+fn matrix_known(name: &str, args: &[Value]) -> Option<Value> {
+    let matrix = || args.first().and_then(Value::matrix);
+    let count = |at: usize| {
+        args.get(at)
+            .and_then(number)
+            .map(|value| value.max(0.0) as usize)
+    };
+    let make = |rows: usize, columns: usize, fill: f64| -> Option<Value> {
+        if rows == 0 || columns == 0 || rows.checked_mul(columns)? > MAX_ARRAY_SIZE {
+            return None;
+        }
+        Some(Value::Matrix(std::sync::Arc::new(std::sync::Mutex::new(
+            value::Matrix {
+                rows,
+                columns,
+                values: vec![fill; rows * columns],
+            },
+        ))))
+    };
+    Some(match name {
+        "new" => make(count(0)?, count(1)?, arg(args, 2).unwrap_or(f64::NAN))?,
+        "identity" => {
+            let size = count(0)?;
+            let value = make(size, size, 0.0)?;
+            if let Value::Matrix(fields) = &value {
+                let mut fixed = value::lock_matrix(fields);
+                for at in 0..size {
+                    fixed.values[at * size + at] = 1.0;
+                }
+            }
+            value
+        }
+        "get" => {
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            matrix_number(fixed.get(count(1)?, count(2)?))
+        }
+        "set" => {
+            let handle = matrix()?;
+            let row = count(1)?;
+            let column = count(2)?;
+            let value = arg(args, 3).unwrap_or(f64::NAN);
+            let mut fixed = value::lock_matrix(&handle);
+            let columns = fixed.columns;
+            if row < fixed.rows && column < columns {
+                fixed.values[row * columns + column] = value;
+            }
+            Value::Na
+        }
+        "rows" => {
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            Value::Num(fixed.rows as f64)
+        }
+        "columns" => {
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            Value::Num(fixed.columns as f64)
+        }
+        "elements_count" => {
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            Value::Num((fixed.rows * fixed.columns) as f64)
+        }
+        "fill" => {
+            let handle = matrix()?;
+            let value = arg(args, 1).unwrap_or(f64::NAN);
+            let mut fixed = value::lock_matrix(&handle);
+            let columns = fixed.columns;
+            let last_row = fixed.rows.saturating_sub(1);
+            let last_column = columns.saturating_sub(1);
+            let from_row = count(2).unwrap_or(0).min(last_row);
+            let to_row = count(3).unwrap_or(last_row).min(last_row);
+            let from_column = count(4).unwrap_or(0).min(last_column);
+            let to_column = count(5).unwrap_or(last_column).min(last_column);
+            for row in from_row..=to_row {
+                for column in from_column..=to_column {
+                    fixed.values[row * columns + column] = value;
+                }
+            }
+            Value::Na
+        }
+        "copy" => {
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            let copied = fixed.clone();
+            Value::Matrix(std::sync::Arc::new(std::sync::Mutex::new(copied)))
+        }
+        "transpose" => {
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            let value = make(fixed.columns, fixed.rows, f64::NAN)?;
+            if let Value::Matrix(fields) = &value {
+                let mut transposed = value::lock_matrix(fields);
+                for row in 0..fixed.rows {
+                    for column in 0..fixed.columns {
+                        transposed.values[column * fixed.rows + row] =
+                            fixed.values[row * fixed.columns + column];
+                    }
+                }
+            }
+            value
+        }
+        "sum" | "avg" | "median" | "min" | "max" => {
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            let mut values: Vec<f64> = fixed
+                .values
+                .iter()
+                .copied()
+                .filter(|value| value.is_finite())
+                .collect();
+            if values.is_empty() {
+                return Some(Value::Na);
+            }
+            let value = match name {
+                "sum" => values.iter().sum(),
+                "avg" => values.iter().sum::<f64>() / values.len() as f64,
+                "median" => {
+                    values.sort_by(f64::total_cmp);
+                    let middle = values.len() / 2;
+                    if values.len() % 2 == 0 {
+                        (values[middle - 1] + values[middle]) / 2.0
+                    } else {
+                        values[middle]
+                    }
+                }
+                "min" => values.iter().copied().fold(f64::INFINITY, f64::min),
+                _ => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            };
+            Value::Num(value)
+        }
+        "add" | "sub" => {
+            let first_handle = matrix()?;
+            let first = value::lock_matrix(&first_handle);
+            let second_handle = args.get(1).and_then(Value::matrix)?;
+            let second = value::lock_matrix(&second_handle);
+            if first.rows != second.rows || first.columns != second.columns {
+                return Some(Value::Na);
+            }
+            let value = make(first.rows, first.columns, f64::NAN)?;
+            if let Value::Matrix(fields) = &value {
+                let mut result = value::lock_matrix(fields);
+                for at in 0..first.values.len() {
+                    result.values[at] = if name == "add" {
+                        first.values[at] + second.values[at]
+                    } else {
+                        first.values[at] - second.values[at]
+                    };
+                }
+            }
+            value
+        }
+        "mult" => {
+            let first_handle = matrix()?;
+            let first = value::lock_matrix(&first_handle);
+            match args.get(1)? {
+                Value::Matrix(second) => {
+                    let second = value::lock_matrix(second);
+                    if first.columns != second.rows {
+                        return Some(Value::Na);
+                    }
+                    let value = make(first.rows, second.columns, f64::NAN)?;
+                    if let Value::Matrix(fields) = &value {
+                        let mut result = value::lock_matrix(fields);
+                        for row in 0..first.rows {
+                            for column in 0..second.columns {
+                                let mut total = 0.0;
+                                for at in 0..first.columns {
+                                    total += first.values[row * first.columns + at]
+                                        * second.values[at * second.columns + column];
+                                }
+                                result.values[row * second.columns + column] = total;
+                            }
+                        }
+                    }
+                    value
+                }
+                // The scalar form multiplies every element.
+                other => {
+                    let factor = number(other)?;
+                    let value = make(first.rows, first.columns, f64::NAN)?;
+                    if let Value::Matrix(fields) = &value {
+                        let mut result = value::lock_matrix(fields);
+                        for at in 0..first.values.len() {
+                            result.values[at] = first.values[at] * factor;
+                        }
+                    }
+                    value
+                }
+            }
+        }
+        "row" | "col" => {
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            let at = count(1)?;
+            let values: Vec<Value> = if name == "row" {
+                (0..fixed.columns)
+                    .map(|column| matrix_number(fixed.get(at, column)))
+                    .collect()
+            } else {
+                (0..fixed.rows)
+                    .map(|row| matrix_number(fixed.get(row, at)))
+                    .collect()
+            };
+            Value::array_of(values)
+        }
+        "reshape" => {
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            let rows = count(1)?;
+            let columns = count(2)?;
+            if rows == 0 || columns == 0 || rows.checked_mul(columns)? != fixed.values.len() {
+                return Some(Value::Na);
+            }
+            let value = make(rows, columns, f64::NAN)?;
+            if let Value::Matrix(fields) = &value {
+                value::lock_matrix(fields).values.clone_from(&fixed.values);
+            }
+            value
+        }
+        "concat" => {
+            let first_handle = matrix()?;
+            let first = value::lock_matrix(&first_handle);
+            let second_handle = args.get(1).and_then(Value::matrix)?;
+            let second = value::lock_matrix(&second_handle);
+            if first.columns != second.columns {
+                return Some(Value::Na);
+            }
+            let value = make(first.rows + second.rows, first.columns, f64::NAN)?;
+            if let Value::Matrix(fields) = &value {
+                let mut joined = value::lock_matrix(fields);
+                joined.values[..first.values.len()].copy_from_slice(&first.values);
+                joined.values[first.values.len()..].copy_from_slice(&second.values);
+            }
+            value
+        }
+        "is_square" => Value::Bool({
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            fixed.rows == fixed.columns
+        }),
+        "is_zero" => Value::Bool({
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            fixed.values.iter().all(|value| *value == 0.0)
+        }),
+        "is_identity" => Value::Bool({
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            fixed.rows == fixed.columns
+                && fixed.values.iter().enumerate().all(|(at, value)| {
+                    let row = at / fixed.columns;
+                    let column = at % fixed.columns;
+                    if row == column { *value == 1.0 } else { *value == 0.0 }
+                })
+        }),
+        "is_diagonal" => Value::Bool({
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            fixed.rows == fixed.columns
+                && fixed.values.iter().enumerate().all(|(at, value)| {
+                    at / fixed.columns == at % fixed.columns || *value == 0.0
+                })
+        }),
+        "is_symmetric" => Value::Bool({
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            fixed.rows == fixed.columns
+                && (0..fixed.rows).all(|row| {
+                    (0..fixed.columns).all(|column| {
+                        fixed.values[row * fixed.columns + column]
+                            == fixed.values[column * fixed.columns + row]
+                    })
+                })
+        }),
+        "trace" => {
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            if fixed.rows != fixed.columns {
+                return Some(Value::Na);
+            }
+            let total = (0..fixed.rows)
+                .map(|at| fixed.values[at * fixed.columns + at])
+                .sum::<f64>();
+            Value::Num(total)
+        }
+        "det" => {
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            matrix_number(determinant(&fixed))
+        }
+        "inv" => {
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            let Some(inverted) = inverse(&fixed, &make) else {
+                return Some(Value::Na);
+            };
+            inverted
+        }
+        "sort" => {
+            let fixed = matrix()?;
+            let column = count(1).unwrap_or(0);
+            let descending = matches!(
+                args.get(2).and_then(Value::text),
+                Some("order.descending" | "descending")
+            );
+            let mut fixed = value::lock_matrix(&fixed);
+            if column >= fixed.columns {
+                return Some(Value::Na);
+            }
+            let columns = fixed.columns;
+            let mut rows: Vec<Vec<f64>> = fixed
+                .values
+                .chunks(columns)
+                .map(<[f64]>::to_vec)
+                .collect();
+            rows.sort_by(|first, second| {
+                let order = first[column].total_cmp(&second[column]);
+                if descending { order.reverse() } else { order }
+            });
+            fixed.values = rows.concat();
+            Value::Na
+        }
+        "reverse" => {
+            let fixed = matrix()?;
+            let mut fixed = value::lock_matrix(&fixed);
+            let columns = fixed.columns;
+            let mut rows: Vec<Vec<f64>> = fixed
+                .values
+                .chunks(columns)
+                .map(<[f64]>::to_vec)
+                .collect();
+            rows.reverse();
+            fixed.values = rows.concat();
+            Value::Na
+        }
+        _ => return None,
+    })
+}
+
+/// A matrix value as a number, with `na` for a missing or non-finite one.
+fn matrix_number(value: Option<f64>) -> Value {
+    value
+        .filter(|value| value.is_finite())
+        .map_or(Value::Na, Value::Num)
+}
+
+/// The determinant of a square matrix, or `None` when it has no single value.
+fn determinant(matrix: &value::Matrix) -> Option<f64> {
+    if matrix.rows != matrix.columns {
+        return None;
+    }
+    let size = matrix.rows;
+    let mut values = matrix.values.clone();
+    let mut result = 1.0;
+    for at in 0..size {
+        // A zero pivot is swapped with a lower row that has one, which flips the sign.
+        let pivot = (at..size).find(|row| values[row * size + at] != 0.0)?;
+        if pivot != at {
+            for column in 0..size {
+                values.swap(at * size + column, pivot * size + column);
+            }
+            result = -result;
+        }
+        let pivot = values[at * size + at];
+        result *= pivot;
+        for row in at + 1..size {
+            let factor = values[row * size + at] / pivot;
+            for column in at..size {
+                values[row * size + column] -= factor * values[at * size + column];
+            }
+        }
+    }
+    Some(result)
+}
+
+/// The inverse of a square matrix, produced by the same `make` that builds the call's result.
+fn inverse(
+    matrix: &value::Matrix,
+    make: &impl Fn(usize, usize, f64) -> Option<Value>,
+) -> Option<Value> {
+    if matrix.rows != matrix.columns {
+        return None;
+    }
+    let size = matrix.rows;
+    let mut left = matrix.values.clone();
+    let mut right = vec![0.0; size * size];
+    for at in 0..size {
+        right[at * size + at] = 1.0;
+    }
+    for at in 0..size {
+        let pivot = (at..size).find(|row| left[row * size + at] != 0.0)?;
+        if pivot != at {
+            for column in 0..size {
+                left.swap(at * size + column, pivot * size + column);
+                right.swap(at * size + column, pivot * size + column);
+            }
+        }
+        let pivot = left[at * size + at];
+        for column in 0..size {
+            left[at * size + column] /= pivot;
+            right[at * size + column] /= pivot;
+        }
+        for row in 0..size {
+            if row == at {
+                continue;
+            }
+            let factor = left[row * size + at];
+            for column in 0..size {
+                left[row * size + column] -= factor * left[at * size + column];
+                right[row * size + column] -= factor * right[at * size + column];
+            }
+        }
+    }
+    let value = make(size, size, f64::NAN)?;
+    if let Value::Matrix(fields) = &value {
+        value::lock_matrix(fields).values = right;
+    }
+    Some(value)
 }
 
 /// Pine's `color.*` constants, which an input default often is.

@@ -12,6 +12,30 @@ pub struct Lambda {
     pub body: crate::pine_engine::ast::Expr,
 }
 
+/// A Pine matrix: its shape and row-major values, shared by every variable that refers to it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Matrix {
+    pub rows: usize,
+    pub columns: usize,
+    pub values: Vec<f64>,
+}
+
+impl Matrix {
+    /// The value at a row and column, or `None` outside the matrix.
+    pub fn get(&self, row: usize, column: usize) -> Option<f64> {
+        (row < self.rows && column < self.columns)
+            .then(|| self.values[row * self.columns + column])
+    }
+}
+
+/// A matrix shared between the variables that refer to it.
+pub type MatrixRef = Arc<Mutex<Matrix>>;
+
+/// The contents of a matrix, whichever thread last wrote them.
+pub fn lock_matrix(matrix: &MatrixRef) -> MutexGuard<'_, Matrix> {
+    matrix.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 /// A Pine array, shared by every variable that refers to it, as Pine arrays are references.
 /// The chart runs a script off the UI thread, so the shared cell is a `Mutex`.
 pub type ArrayRef = Arc<Mutex<Vec<Value>>>;
@@ -44,6 +68,8 @@ pub enum Value {
     Object(ObjectRef),
     /// A lambda passed to `array.every`, `array.some` and their siblings.
     Lambda(Arc<Lambda>),
+    /// A Pine matrix.
+    Matrix(MatrixRef),
     /// The plot a `plot()` call declared, for `fill()`.
     Plot(usize),
 }
@@ -59,6 +85,7 @@ impl PartialEq for Value {
             (Value::Array(first), Value::Array(second)) => Arc::ptr_eq(first, second),
             (Value::Object(first), Value::Object(second)) => Arc::ptr_eq(first, second),
             (Value::Lambda(first), Value::Lambda(second)) => Arc::ptr_eq(first, second),
+            (Value::Matrix(first), Value::Matrix(second)) => Arc::ptr_eq(first, second),
             (Value::Plot(first), Value::Plot(second)) => first == second,
             (Value::Na, Value::Na) => true,
             _ => false,
@@ -123,6 +150,14 @@ impl Value {
     pub fn lambda(&self) -> Option<Arc<Lambda>> {
         match self {
             Value::Lambda(lambda) => Some(lambda.clone()),
+            _ => None,
+        }
+    }
+
+    /// The matrix this value is, when it is one.
+    pub fn matrix(&self) -> Option<MatrixRef> {
+        match self {
+            Value::Matrix(matrix) => Some(matrix.clone()),
             _ => None,
         }
     }

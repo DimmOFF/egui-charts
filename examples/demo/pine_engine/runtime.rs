@@ -1517,6 +1517,9 @@ impl<'a> Evaluator<'a> {
             "barcolor" => return self.colour_plot(id, args, PlotType::BarColor),
             "bgcolor" => return self.colour_plot(id, args, PlotType::BackgroundColor),
             "alertcondition" | "alert" => return Value::Na,
+            // `max_bars_back(source, length)` only sizes the history Pine keeps, and this engine
+            // keeps the bars a study reads.
+            "max_bars_back" => return Value::Na,
             // v4's `iff(condition, iftrue, iffalse)` is a function, so both branches evaluate.
             "iff" => {
                 let condition = args
@@ -1787,10 +1790,19 @@ impl<'a> Evaluator<'a> {
                 _ => Value::Na,
             };
         }
+        // `syminfo.ticker(symbol)` reads the ticker part of a symbol, as the `syminfo.ticker`
+        // property reads the chart's own.
+        if name == "syminfo.ticker" {
+            let symbol = args
+                .first()
+                .map(|arg| self.eval(&arg.value))
+                .and_then(|value| value.text().map(str::to_owned))
+                .unwrap_or_else(|| self.context.symbol.clone());
+            return Value::Str(symbol.rsplit(':').next().unwrap_or_default().to_owned());
+        }
         if name == "request.security" {
             return self.security(id, args);
-        }
-        if name == "request.security_lower_tf" {
+        }        if name == "request.security_lower_tf" {
             return self.security_lower_tf(args);
         }
         if name.starts_with("request.") {
@@ -3972,6 +3984,25 @@ mod tests {
         assert_eq!(output.plots[0].values[0], 0.0);
         assert_eq!(output.plots[1].values[0], 209.0);
         assert_eq!(output.plots[2].values[0], 1.0);
+    }
+
+    #[test]
+    fn syminfo_ticker_reads_the_ticker_of_a_symbol() {
+        let output = run(
+            "indicator(\"T\")\nplot(syminfo.ticker(\"BINANCE:BTCUSDT\") == \"BTCUSDT\" ? 1 : 0)\nplot(syminfo.ticker(\"SOLUSDT\") == \"SOLUSDT\" ? 1 : 0)\n",
+            &[1.0],
+        );
+        assert_eq!(output.plots[0].values[0], 1.0);
+        assert_eq!(output.plots[1].values[0], 1.0);
+    }
+
+    #[test]
+    fn max_bars_back_is_accepted() {
+        let output = run(
+            "indicator(\"T\")\nmax_bars_back(close, 1000)\nplot(close)\n",
+            &[1.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     }
 
     #[test]

@@ -4596,6 +4596,17 @@ alertcondition(bull, "Bull", "Bull signal")
     }
 
     #[test]
+    fn an_if_that_returns_a_negative_number_is_a_block() {
+        // The indented `-1` is the `if`'s body, not a continuation of the line above.
+        let output = run(
+            "indicator(\"T\")\nvalue = if close > 1\n    -1\nplot(value)\n",
+            &[1.0, 3.0],
+        );
+        assert!(output.plots[0].values[0].is_nan());
+        assert_eq!(output.plots[0].values[1], -1.0);
+    }
+
+    #[test]
     fn a_strategy_call_is_not_a_second_header() {
         // `strategy.entry(...)` starts with a header word but is a call, not a declaration.
         let output = run("strategy.entry(\"X\", true)\nplot(close)\n", &[1.0, 2.0]);

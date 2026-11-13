@@ -57,8 +57,10 @@ fn continues(line: &str, depth: i32) -> bool {
 
 /// Whether a line starts with a binary operator, so it continues the statement above it.
 fn begins_with_operator(content: &str) -> bool {
+    // `-` is left out: `if cond` followed by an indented `-1` is a local block, not a
+    // continuation. shortcut: a sum wrapped before its `-` needs the `-` on the line above.
     const OPERATORS: &[&str] = &[
-        "+", "-", "*", "/", "%", "==", "!=", "<=", ">=", "<", ">", "and ", "or ", "? ", ": ",
+        "+", "*", "/", "%", "==", "!=", "<=", ">=", "<", ">", "and ", "or ", "? ", ": ",
     ];
     OPERATORS
         .iter()

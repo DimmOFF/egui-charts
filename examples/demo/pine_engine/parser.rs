@@ -1395,7 +1395,19 @@ fn input_declaration(id: NodeId, kind: &str, args: &[Arg]) -> Option<InputDecl> 
         "timeframe" | "resolution" => (InputKind::Timeframe, default_expr),
         "session" => (InputKind::Session, default_expr),
         "symbol" => (InputKind::Symbol, default_expr),
-        "source" => (InputKind::Text, default_expr),
+        "source" => (
+            InputKind::Text,
+            // A source input names a series such as `close`; the chart feeds it at run time.
+            if matches!(default_expr, Value::Na) {
+                positional
+                    .first()
+                    .and_then(|arg| path_of(&arg.value))
+                    .map(|path| Value::Str(path.join(".")))
+                    .unwrap_or(Value::Na)
+            } else {
+                default_expr
+            },
+        ),
         "string" => (
             match options {
                 Some(options) if !options.is_empty() => InputKind::Choice(options),

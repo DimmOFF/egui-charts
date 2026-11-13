@@ -2211,7 +2211,15 @@ fn array_known(name: &str, args: &[Value]) -> Option<Value> {
         "fill" => {
             let items = target()?;
             let value = args.get(1).cloned().unwrap_or(Value::Na);
-            for item in value::lock(&items).iter_mut() {
+            let mut items = value::lock(&items);
+            let len = items.len();
+            let from = index_at(2).unwrap_or(0).min(len);
+            // `array.fill(id, value, from, to)` fills both ends; a missing `to` runs to the end.
+            let to = args
+                .get(3)
+                .and_then(number)
+                .map_or(len, |to| (to.round().max(0.0) as usize + 1).min(len));
+            for item in items.iter_mut().take(to).skip(from) {
                 *item = value.clone();
             }
             Value::Na

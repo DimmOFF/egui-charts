@@ -1436,7 +1436,26 @@ impl<'a> Evaluator<'a> {
             _ => {}
         }
         if name == "input" || name.starts_with("input.") {
-            return self.inputs.get(&id).cloned().unwrap_or(Value::Na);
+            let value = self
+                .inputs
+                .get(&id)
+                .cloned()
+                .or_else(|| {
+                    // Without a setting the script's own default is what Pine answers.
+                    self.program
+                        .inputs
+                        .iter()
+                        .find(|decl| decl.id == id)
+                        .map(|decl| decl.default.clone())
+                })
+                .unwrap_or(Value::Na);
+            // `input.source` holds the name of the series the chart feeds.
+            if name.ends_with(".source")
+                && let Some(source) = value.text()
+            {
+                return self.ident(source);
+            }
+            return value;
         }
         if name == "nz" || name == "fixnan" {
             let value = args.first().map(|arg| self.eval(&arg.value));
@@ -4348,6 +4367,93 @@ alertcondition(bull, "Bull", "Bull signal")
             .find(|drawing| drawing.kind == DrawingKind::Line && drawing.first.0 == 2.0)
             .unwrap();
         assert_eq!(timed.second.0, 2.0);
+    }
+
+    #[test]
+    fn inputs_answer_their_declared_defaults() {
+        let output = run(
+            "indicator(\"T\")\nlen = input.int(3, \"Len\")\nsrc = input.source(low, \"Source\")\nplot(ta.sma(src, len))\nplot(input.float(2.5, \"F\"))\nplot(input.string(\"x\", \"S\") == \"x\" ? 1 : 0)\n",
+            &[1.0, 2.0, 3.0, 4.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        // `ta.sma` of the last three lows, which the fed source names.
+        assert_eq!(output.plots[0].values[3], 2.0);
+        assert_eq!(output.plots[1].values[3], 2.5);
+        assert_eq!(output.plots[2].values[3], 1.0);
+    }
+
+    #[test]
+    fn a_zone_and_label_script_runs_without_diagnostics() {
+        let script = r##"indicator("Sink2", overlay=true)
+len = input.int(14, "Len", minval=1, maxval=200)
+src = input.source(close, "Source")
+tf = input.timeframe("240", "Higher TF")
+grade = input.string("A", "Grade", options=["A", "B", "C"])
+hline(0.0, "Zero", color=color.new(color.gray, 50), linestyle=hline.style_dotted)
+atr = ta.atr(len)
+basis = ta.sma(src, len)
+dev = ta.stdev(src, len)
+upper = basis + dev * 2.0
+lower = basis - dev * 2.0
+p1 = plot(upper, "Upper", color=color.new(color.blue, 60))
+p2 = plot(lower, "Lower", color=color.new(color.red, 60))
+fill(p1, p2, color=color.new(color.gray, 90))
+[hi, lo] = request.security(syminfo.tickerid, tf, [ta.highest(high, len), ta.lowest(low, len)])
+var array<box> zones = array.new<box>()
+var array<label> marks = array.new<label>()
+if array.size(zones) > 20
+    box.delete(array.shift(zones))
+    label.delete(array.shift(marks))
+bull = ta.crossover(src, basis)
+if bull
+    b = box.new(bar_index - len, upper, bar_index, lower, border_color=color.green, bgcolor=color.new(color.green, 85), text="BUY " + grade, text_size=size.tiny, text_color=color.white, border_width=2)
+    array.push(zones, b)
+    l = label.new(bar_index, low, str.tostring(atr, "#.##"), style=label.style_label_up, color=color.new(color.teal, 20), textcolor=color.white, size=size.small)
+    array.push(marks, l)
+plotshape(ta.crossunder(src, basis), "Sell", shape.triangledown, location.abovebar, color.red, size=size.small, text="S")
+bgcolor(ta.highestbars(high, len) == 0 ? color.new(color.red, 90) : na)
+plot(color.from_gradient(atr, 0, ta.highest(atr, 100), color.green, color.red))
+values = array.from(3, 1, 2)
+array.insert(values, 1, 9)
+array.remove(values, 2)
+array.unshift(values, 7)
+arr2 = array.concat(values, array.from(1))
+array.fill(arr2, 0, 0, 2)
+plot(array.sum(arr2), "sum")
+plot(str.length(array.join(values, "-")), "joined")
+plot(str.length(str.tostring(array.avg(values), format.mintick)), "formatted")
+plot(array.every(values, (v) => v > 0) ? 1 : 0, "all")
+plot(array.some(values, (v) => v == 9) ? 1 : 0, "any")
+"##;
+        let output = run(
+            script,
+            &[
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0,
+                7.0, 8.0, 9.0, 10.0,
+            ],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let at = |title: &str| {
+            output
+                .plots
+                .iter()
+                .find(|plot| plot.title == title)
+                .unwrap()
+                .values[19]
+        };
+        // `values` is [7, 3, 9, 2] and the filled copy is [0, 0, 0, 2, 1].
+        assert_eq!(at("sum"), 3.0);
+        assert_eq!(at("joined"), 7.0);
+        assert_eq!(at("all"), 1.0);
+        assert_eq!(at("any"), 1.0);
+        assert!(
+            output
+                .drawings
+                .iter()
+                .any(|drawing| drawing.kind == DrawingKind::Box && drawing.text.starts_with("BUY")),
+            "{:?}",
+            output.diagnostics
+        );
     }
 
     #[test]

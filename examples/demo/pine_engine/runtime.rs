@@ -1412,7 +1412,9 @@ impl<'a> Evaluator<'a> {
             "plotcandle" | "plotbar" => {
                 return self.plot_candle(id, args, name == "plotbar");
             }
-            "plotshape" | "plotchar" | "plotarrow" => return self.plotshape(id, args),
+            "plotshape" | "plotchar" | "plotarrow" => {
+                return self.plotshape(id, args, &name);
+            }
             "fill" => return self.fill(id, args),
             "hline" => return self.hline(id, args),
             "barcolor" => return self.colour_plot(id, args, PlotType::BarColor),
@@ -2059,20 +2061,42 @@ impl<'a> Evaluator<'a> {
         if self.depth > 64 || self.charge(line) {
             return Value::Na;
         }
-        let mut values: Vec<Value> = args.iter().map(|arg| self.eval(&arg.value)).collect();
+        // Each written argument fills its parameter: by name when it has one, else in order.
+        let mut slots: Vec<Option<Value>> = vec![None; function.params.len()];
+        let mut next = 0;
         // A method's first parameter is the object it was called on.
         if let Some(receiver) = receiver {
-            values.insert(0, receiver);
+            if let Some(first) = slots.first_mut() {
+                *first = Some(receiver);
+            }
+            next = 1;
+        }
+        for arg in args {
+            let value = self.eval(&arg.value);
+            let at = arg
+                .name
+                .as_deref()
+                .and_then(|name| function.params.iter().position(|param| param == name))
+                .unwrap_or(next);
+            if let Some(slot) = slots.get_mut(at) {
+                *slot = Some(value);
+            }
+            if arg.name.is_none() {
+                next = at + 1;
+            }
         }
         let mut scope = HashMap::new();
         for (at, param) in function.params.iter().enumerate() {
-            scope.insert(param.clone(), values.get(at).cloned().unwrap_or(Value::Na));
+            scope.insert(
+                param.clone(),
+                slots[at].clone().unwrap_or(Value::Na),
+            );
         }
         self.locals.push(scope);
         // A parameter the caller left out takes the default the script declared for it.
         for (at, default) in function.defaults.iter().enumerate() {
             let Some(default) = default else { continue };
-            if values.get(at).is_some() {
+            if slots[at].is_some() {
                 continue;
             }
             let value = self.eval(default);
@@ -2094,7 +2118,7 @@ impl<'a> Evaluator<'a> {
             return Value::Na;
         };
         let value = self.eval(&first.value);
-        let bar_color = named(args, "color")
+        let bar_color = positional(args, "color", 2)
             .map(|arg| self.eval(&arg.value))
             .and_then(|value| value.color());
         let slot = match self.plot_at.get(&id) {
@@ -2103,15 +2127,15 @@ impl<'a> Evaluator<'a> {
                 let index = self.plots.len();
                 let title = title_of(args).unwrap_or_else(|| format!("Plot {}", index + 1));
                 let color = bar_color.unwrap_or_else(|| plot_color(index));
-                let width = named(args, "linewidth")
+                let width = positional(args, "linewidth", 3)
                     .map(|arg| self.eval(&arg.value))
                     .and_then(|value| value.number())
                     .unwrap_or(1.0) as f32;
-                let offset = named(args, "offset")
+                let offset = positional(args, "offset", 7)
                     .map(|arg| self.eval(&arg.value))
                     .and_then(|value| value.number())
                     .unwrap_or(0.0) as isize;
-                let plot_type = named(args, "style")
+                let plot_type = positional(args, "style", 4)
                     .map(|arg| self.eval(&arg.value))
                     .and_then(|value| value.text().map(plot_type))
                     .unwrap_or(PlotType::Line);
@@ -2121,7 +2145,7 @@ impl<'a> Evaluator<'a> {
                     .map(line_pattern)
                     .unwrap_or_default();
                 let visible = !matches!(
-                    named(args, "display")
+                    positional(args, "display", 11)
                         .map(|arg| self.eval(&arg.value))
                         .and_then(|value| value.text().map(str::to_owned))
                         .as_deref(),
@@ -2162,18 +2186,22 @@ impl<'a> Evaluator<'a> {
             None => {
                 let title =
                     title_of(args).unwrap_or_else(|| format!("Level {}", self.plots.len() + 1));
-                let color = named(args, "color")
+                let color = positional(args, "color", 2)
                     .map(|arg| self.eval(&arg.value))
                     .and_then(|value| value.color())
                     .unwrap_or_else(|| plot_color(self.plots.len()));
                 let index = self.plots.len();
-                let pattern = named(args, "linestyle")
+                let pattern = positional(args, "linestyle", 3)
                     .map(|arg| self.eval(&arg.value))
                     .as_ref()
                     .map(line_pattern)
                     .unwrap_or_default();
+                let width = positional(args, "linewidth", 4)
+                    .map(|arg| self.eval(&arg.value))
+                    .and_then(|value| value.number())
+                    .unwrap_or(1.0) as f32;
                 let visible = !matches!(
-                    named(args, "display")
+                    positional(args, "display", 7)
                         .map(|arg| self.eval(&arg.value))
                         .and_then(|value| value.text().map(str::to_owned))
                         .as_deref(),
@@ -2183,7 +2211,7 @@ impl<'a> Evaluator<'a> {
                     series: PlotSeries {
                         title,
                         color,
-                        width: 1.0,
+                        width: width.clamp(0.5, 8.0),
                         plot_type: PlotType::Line,
                         pattern,
                         visible,
@@ -2212,15 +2240,16 @@ impl<'a> Evaluator<'a> {
                 numbers[at] = self.eval(&arg.value).number();
             }
         }
-        let color = named(args, "color")
+        let color = positional(args, "color", 5)
             .map(|arg| self.eval(&arg.value))
             .and_then(|value| value.color());
         let slot = match self.plot_at.get(&id) {
             Some(slot) => *slot,
             None => {
                 let index = self.plots.len();
-                // `title_of` reads the second argument, which here is the high, so only `title=`.
-                let title = named(args, "title")
+                // `title_of` reads the second argument, which here is the high, so `title=` or
+                // the fifth positional.
+                let title = positional(args, "title", 4)
                     .map(|arg| &arg.value)
                     .and_then(literal)
                     .and_then(|value| value.text().map(str::to_owned))
@@ -2230,7 +2259,7 @@ impl<'a> Evaluator<'a> {
                     .and_then(|value| value.number())
                     .unwrap_or(1.0) as f32;
                 let visible = !matches!(
-                    named(args, "display")
+                    positional(args, "display", 10)
                         .map(|arg| self.eval(&arg.value))
                         .and_then(|value| value.text().map(str::to_owned))
                         .as_deref(),
@@ -2316,10 +2345,14 @@ impl<'a> Evaluator<'a> {
             Some(slot) => *slot,
             None => {
                 let index = self.plots.len();
-                let title = title_of(args).unwrap_or_else(|| match plot_type {
-                    PlotType::BarColor => "Bar Color".to_owned(),
-                    _ => "Background".to_owned(),
-                });
+                let title = positional(args, "title", 4)
+                    .map(|arg| &arg.value)
+                    .and_then(literal)
+                    .and_then(|value| value.text().map(str::to_owned))
+                    .unwrap_or_else(|| match plot_type {
+                        PlotType::BarColor => "Bar Color".to_owned(),
+                        _ => "Background".to_owned(),
+                    });
                 self.plots.push(PlotSlot {
                     series: PlotSeries {
                         title,
@@ -2506,7 +2539,7 @@ impl<'a> Evaluator<'a> {
             return Value::Na;
         };
         let fallback = self.plots[first].series.color;
-        let color = named(args, "color")
+        let color = positional(args, "color", 2)
             .map(|arg| self.eval(&arg.value))
             .and_then(|value| value.color())
             .unwrap_or_else(|| {
@@ -2521,26 +2554,26 @@ impl<'a> Evaluator<'a> {
         Value::Na
     }
 
-    fn plotshape(&mut self, id: NodeId, args: &[Arg]) -> Value {
+    fn plotshape(&mut self, id: NodeId, args: &[Arg], name: &str) -> Value {
         let Some(first) = args.first() else {
             return Value::Na;
         };
         let condition = self.eval(&first.value);
-        let above = named(args, "location")
+        let above = positional(args, "location", 3)
             .map(|arg| self.eval(&arg.value))
             .and_then(|value| value.text().map(str::to_owned))
             .is_none_or(|location| !location.contains("below"));
-        let color = named(args, "color")
+        let color = positional(args, "color", 4)
             .map(|arg| self.eval(&arg.value))
             .and_then(|value| value.color());
-        let offset = named(args, "offset")
+        let offset = positional(args, "offset", 5)
             .map(|arg| self.eval(&arg.value))
             .and_then(|value| value.number())
             .unwrap_or(0.0) as isize;
-        let text_color = named(args, "textcolor")
+        let text_color = positional(args, "textcolor", 7)
             .map(|arg| self.eval(&arg.value))
             .and_then(|value| value.color());
-        let font_size = named(args, "size")
+        let font_size = positional(args, "size", 9)
             .map(|arg| self.eval(&arg.value))
             .and_then(|value| value.text().map(shape_font_size))
             .unwrap_or(12.0);
@@ -2548,20 +2581,24 @@ impl<'a> Evaluator<'a> {
             Some(slot) => *slot,
             None => {
                 let color = color.unwrap_or_else(|| plot_color(self.shapes.len()));
-                let mut argument = |name| {
-                    named(args, name)
-                        .map(|arg| self.eval(&arg.value))
+                let argument = |arg: Option<&Arg>, evaluate: &mut Self| {
+                    arg.map(|arg| evaluate.eval(&arg.value))
                         .and_then(|value| value.text().map(str::to_owned))
                         .unwrap_or_default()
                 };
-                let text = argument("text");
-                let char = argument("char");
+                let text = argument(positional(args, "text", 6), self);
+                // `plotchar` spells its glyph as a third positional, `plotshape` its style.
+                let glyph = if name == "plotchar" {
+                    argument(positional(args, "char", 2), self)
+                } else {
+                    argument(named(args, "char"), self)
+                };
                 let text = if !text.is_empty() {
                     text
-                } else if !char.is_empty() {
-                    char
+                } else if !glyph.is_empty() {
+                    glyph
                 } else {
-                    shape_glyph(&argument("style"))
+                    shape_glyph(&argument(positional(args, "style", 2), self))
                 };
                 self.shapes.push(ShapeSlot {
                     above,
@@ -2855,6 +2892,11 @@ fn drawing_output(object: &value::ObjectRef) -> Option<DrawingOutput> {
 
 fn named<'a>(args: &'a [Arg], name: &str) -> Option<&'a Arg> {
     args.iter().find(|arg| arg.name.as_deref() == Some(name))
+}
+
+/// A named argument, or the positional one at `at` when the script passed it that way.
+fn positional<'a>(args: &'a [Arg], name: &str, at: usize) -> Option<&'a Arg> {
+    named(args, name).or_else(|| args.get(at).filter(|arg| arg.name.is_none()))
 }
 
 /// Puts named `ta.*` arguments where the implementation reads them, so their written order does
@@ -3908,6 +3950,24 @@ plot(display=display.none)
 "#;
         let output = run(script, &[1.0, 2.0]);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    }
+
+    #[test]
+    fn positional_plot_arguments_and_named_user_arguments_answer() {
+        let script = r#"indicator("P", overlay=true)
+plot(close, "c", color.red, 3)
+f(a, b) => a - b
+plot(f(b = 1, a = 5))
+plotshape(close > 0, "s", shape.circle, location.belowbar, color.blue, 0, "t", color.white, true, size.tiny)
+"#;
+        let output = run(script, &[1.0, 2.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.plots[0].color, Color32::RED);
+        assert_eq!(output.plots[0].width, 3.0);
+        assert_eq!(output.plots[1].values[1], 4.0);
+        assert_eq!(output.shapes[0].color, Color32::BLUE);
+        assert!(!output.shapes[0].above);
+        assert_eq!(output.shapes[0].text, "t");
     }
 
     #[test]

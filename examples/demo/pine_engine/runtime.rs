@@ -2069,6 +2069,17 @@ impl<'a> Evaluator<'a> {
             scope.insert(param.clone(), values.get(at).cloned().unwrap_or(Value::Na));
         }
         self.locals.push(scope);
+        // A parameter the caller left out takes the default the script declared for it.
+        for (at, default) in function.defaults.iter().enumerate() {
+            let Some(default) = default else { continue };
+            if values.get(at).is_some() {
+                continue;
+            }
+            let value = self.eval(default);
+            if let Some(scope) = self.locals.last_mut() {
+                scope.insert(function.params[at].clone(), value);
+            }
+        }
         self.depth += 1;
         let control = std::mem::replace(&mut self.control, Control::None);
         let value = self.run_block(&function.body);
@@ -3897,6 +3908,35 @@ plot(display=display.none)
 "#;
         let output = run(script, &[1.0, 2.0]);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    }
+
+    #[test]
+    fn defaults_and_loops_in_user_functions_answer() {
+        let script = r#"indicator("F")
+f(a, b = 2) =>
+    a + b
+plot(f(1))
+plot(f(1, 3))
+plot(nz(na, 5))
+values = array.from(10, 20)
+total = 0
+for [i, v] in values
+    total += i + v
+plot(total)
+g(x) =>
+    if x > 1
+        x * 2
+    else
+        x
+plot(g(2))
+"#;
+        let output = run(script, &[1.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.plots[0].values[0], 3.0);
+        assert_eq!(output.plots[1].values[0], 4.0);
+        assert_eq!(output.plots[2].values[0], 5.0);
+        assert_eq!(output.plots[3].values[0], 31.0);
+        assert_eq!(output.plots[4].values[0], 4.0);
     }
 
     #[test]

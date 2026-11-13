@@ -402,6 +402,7 @@ impl Parser {
         let name = self.ident()?;
         self.expect_op("(")?;
         let mut params = Vec::new();
+        let mut defaults = Vec::new();
         while !self.eat_op(")") {
             // Parameter types are accepted and dropped: scripts are dynamically typed here.
             if self.starts_with_type() || self.at_pair_of_idents() {
@@ -415,10 +416,12 @@ impl Parser {
                 self.expect_op("]")?;
             }
             params.push(self.ident()?);
-            // A default value is accepted and dropped: callers here always pass every argument.
-            if self.eat_op("=") {
-                let _ = self.parse_expr()?;
-            }
+            // A caller may leave out a parameter that declares a default.
+            defaults.push(if self.eat_op("=") {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            });
             if !self.eat_op(",") {
                 self.expect_op(")")?;
                 break;
@@ -434,7 +437,12 @@ impl Parser {
             vec![Stmt::Expr(value)]
         };
         self.eat_newlines();
-        Ok(Function { name, params, body })
+        Ok(Function {
+            name,
+            params,
+            defaults,
+            body,
+        })
     }
 
     /// Pine's `for i = from to to [by step]` and `for value in iterable`.

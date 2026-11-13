@@ -181,6 +181,8 @@ pub enum Stmt {
 pub struct Function {
     pub name: String,
     pub params: Vec<String>,
+    /// The declared default of each parameter, by position; `None` when it has none.
+    pub defaults: Vec<Option<Expr>>,
     pub body: Block,
 }
 

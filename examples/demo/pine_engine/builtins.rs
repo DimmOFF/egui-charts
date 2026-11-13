@@ -236,6 +236,8 @@ pub fn ta(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Option<
         "max",
         "min",
         "pivot_point_levels",
+        "dema",
+        "tema",
     ];
     if !NAMES.contains(&name) {
         return None;
@@ -256,6 +258,7 @@ pub fn ta_parameters(name: &str) -> Option<&'static [&'static str]> {
         "atr" | "wpr" | "mfi" | "cmf" => &["length"],
         "ao" | "accdist" | "iii" | "nvi" | "pvi" | "pvt" | "wad" => &[],
         "trix" => &["source", "length"],
+        "dema" | "tema" => &["source", "length"],
         "pivot_point_levels" => &["type", "anchor", "developing"],
         "barssince" => &["condition"],
         "valuewhen" => &["condition", "source", "occurrence"],
@@ -1287,6 +1290,23 @@ fn ta_known(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Optio
                 }
                 _ => na(),
             }
+        }
+        "dema" | "tema" => {
+            let src = args.first().and_then(number)?;
+            let len = length(args.get(1), 1);
+            let Some(first) = state.basis.ema(src, len) else {
+                return na();
+            };
+            let Some(second) = state.range.ema(first, len) else {
+                return na();
+            };
+            if name == "dema" {
+                return num(2.0 * first - second);
+            }
+            let Some(third) = state.up.ema(second, len) else {
+                return na();
+            };
+            num(3.0 * first - 3.0 * second + third)
         }
         "pivot_point_levels" => {
             let kind = args.first().and_then(Value::text).unwrap_or("Traditional");

@@ -1607,9 +1607,23 @@ impl<'a> Evaluator<'a> {
         if let Some(rest) = name.strip_prefix("timeframe.") {
             return match rest {
                 "in_seconds" => Value::Num((self.context.timeframe.duration_ms() / 1000) as f64),
-                // `timeframe.change` compares the chart interval with the bar's own, which a
-                // series of one interval cannot show.
-                "change" => Value::Bool(false),
+                // True on the first bar of a new `period`, as `timeframe.change` documents.
+                "change" => {
+                    let period = args
+                        .first()
+                        .map(|arg| self.eval(&arg.value))
+                        .and_then(|value| value.text().map(str::to_owned));
+                    let changed = period
+                        .as_deref()
+                        .and_then(Bucket::parse)
+                        .zip(self.bar.checked_sub(1))
+                        .map_or(self.bar == 0, |(bucket, previous)| {
+                            let now = self.bars[self.bar].time.timestamp_millis();
+                            let before = self.bars[previous].time.timestamp_millis();
+                            bucket.key(now) != bucket.key(before)
+                        });
+                    Value::Bool(changed)
+                }
                 _ => Value::Na,
             };
         }
@@ -1618,6 +1632,11 @@ impl<'a> Evaluator<'a> {
         }
         if name == "request.security_lower_tf" {
             return self.security_lower_tf(args);
+        }
+        if name.starts_with("request.") {
+            // The terminal holds no fundamentals or corporate actions, which Pine also answers
+            // `na` for when the data is not there.
+            return Value::Na;
         }
         if name.starts_with("table.") {
             return self.table_call(&name["table.".len()..], args);
@@ -3856,6 +3875,41 @@ plot(display=display.none)
 "#;
         let output = run(script, &[1.0, 2.0]);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    }
+
+    #[test]
+    fn timeframe_change_and_smoothed_averages_answer() {
+        let output = run(
+            "indicator(\"T\")\nplot(timeframe.change(\"D\") ? 1 : 0)\nplot(ta.dema(close, 2))\nplot(ta.tema(close, 2))\nplot(ta.percentile_linear_interpolation(close, 3, 50))\nplot(ta.percentile_nearest_rank(close, 3, 100))\n",
+            &[5.0, 5.0, 5.0, 5.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.plots[0].values, [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(output.plots[1].values[3], 5.0);
+        assert_eq!(output.plots[2].values[3], 5.0);
+        assert_eq!(output.plots[3].values[3], 5.0);
+        assert_eq!(output.plots[4].values[3], 5.0);
+    }
+
+    #[test]
+    fn session_and_time_helpers_run_without_diagnostics() {
+        let script = r#"indicator("Time", overlay=true)
+inSession = not na(time(timeframe.period, "0930-1600"))
+plot(inSession ? 1 : 0)
+plot(dayofweek(time) == dayofweek.monday ? 1 : 0)
+plot(year(time) >= 2024 ? 1 : 0)
+plot(hour(time) < 24 ? 1 : 0)
+plot(timestamp("2024-01-01T00:00:00") > 0 ? 1 : 0)
+plot(str.length(str.format_time(time, "HH:mm", "UTC")) > 0 ? 1 : 0)
+plot(dayofweek.monday == 2 ? 1 : 0)
+"#;
+        let output = run(script, &[1.0, 2.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        // The bars are outside the 0930-1600 session, and start on a Monday.
+        assert_eq!(output.plots[0].values[1], 0.0);
+        assert_eq!(output.plots[1].values[1], 1.0);
+        assert_eq!(output.plots[2].values[1], 1.0);
+        assert_eq!(output.plots[6].values[1], 1.0);
     }
 
     #[test]

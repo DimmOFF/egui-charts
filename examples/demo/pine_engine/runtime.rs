@@ -4543,6 +4543,21 @@ alertcondition(bull, "Bull", "Bull signal")
     }
 
     #[test]
+    fn a_strategy_call_is_not_a_second_header() {
+        // `strategy.entry(...)` starts with a header word but is a call, not a declaration.
+        let output = run("strategy.entry(\"X\", true)\nplot(close)\n", &[1.0, 2.0]);
+        assert_eq!(output.plots.len(), 1);
+        assert!(
+            output
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("strategy.entry")),
+            "{:?}",
+            output.diagnostics
+        );
+    }
+
+    #[test]
     fn a_v4_script_calls_its_builtins_without_a_namespace() {
         let script = r#"indicator("Legacy")
 fast = sma(close, 2)

@@ -141,8 +141,13 @@ impl Parser {
                         *overlay = new_overlay;
                         continue;
                     }
+                    let before = self.at;
                     let statement = self.parse_stmt()?;
                     body.push(statement);
+                    // A statement that reads no token would repeat forever, so refuse it.
+                    if self.at == before {
+                        return Err(format!("line {}: cannot read this statement", self.line()));
+                    }
                 }
             }
         }
@@ -183,6 +188,10 @@ impl Parser {
 
     fn parses_declaration(&self) -> bool {
         matches!(self.peek(), Token::Ident(name) if matches!(name.as_str(), "indicator" | "study" | "strategy"))
+            && self
+                .tokens
+                .get(self.at + 1)
+                .is_some_and(|next| next.is_op("("))
     }
 
     fn end_line(&mut self) -> Result<(), String> {

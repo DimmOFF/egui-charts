@@ -55,13 +55,25 @@ fn continues(line: &str, depth: i32) -> bool {
         || code.ends_with("(")
 }
 
+/// Whether a line starts with a binary operator, so it continues the statement above it.
+fn begins_with_operator(content: &str) -> bool {
+    const OPERATORS: &[&str] = &[
+        "+", "-", "*", "/", "%", "==", "!=", "<=", ">=", "<", ">", "and ", "or ", "? ", ": ",
+    ];
+    OPERATORS
+        .iter()
+        .any(|operator| content.starts_with(operator))
+}
+
 /// Splits `source` into tokens, or describes the first lexical error.
 pub fn lex(source: &str) -> Result<Vec<Spanned>, String> {
-    let mut tokens = Vec::new();
+    let mut tokens: Vec<Spanned> = Vec::new();
     // Leading-space widths of the open blocks.
     let mut indents: Vec<usize> = vec![0];
     let mut depth = 0i32;
     let mut continuing = false;
+    // The indentation of the line the current statement started on.
+    let mut statement_indent = 0usize;
 
     for (at, raw) in source.lines().enumerate() {
         let line = at + 1;
@@ -70,14 +82,35 @@ pub fn lex(source: &str) -> Result<Vec<Spanned>, String> {
         if content.is_empty() || content.starts_with("//") {
             continue;
         }
+        // A tab is one level like four spaces, as TradingView reads mixed indentation.
+        let width: usize = trimmed
+            .chars()
+            .take_while(|character| character.is_whitespace())
+            .map(|character| if character == '\t' { 4 } else { 1 })
+            .sum();
+        // `labelText =` then `"a"` then `+ "b"`: a deeper line that starts with an operator
+        // continues the statement above it, as Pine reads it.
+        let merged = !continuing
+            && width > statement_indent
+            && begins_with_operator(content)
+            && matches!(
+                tokens.last().map(|spanned| &spanned.token),
+                Some(Token::Newline)
+            );
+        if merged {
+            tokens.pop();
+        }
+        if !continuing
+            && !merged
+            && matches!(
+                tokens.last().map(|spanned| &spanned.token),
+                None | Some(Token::Newline) | Some(Token::Indent) | Some(Token::Dedent)
+            )
+        {
+            statement_indent = width;
+        }
 
-        if !continuing {
-            // A tab is one level like four spaces, as TradingView reads mixed indentation.
-            let width: usize = trimmed
-                .chars()
-                .take_while(|character| character.is_whitespace())
-                .map(|character| if character == '\t' { 4 } else { 1 })
-                .sum();
+        if !continuing && !merged {
             if width > *indents.last().unwrap_or(&0) {
                 indents.push(width);
                 tokens.push(Spanned {
@@ -97,7 +130,7 @@ pub fn lex(source: &str) -> Result<Vec<Spanned>, String> {
 
         lex_line(content, line, &mut tokens, &mut depth)?;
 
-        continuing = continues(trimmed, depth);
+        continuing = merged || continues(trimmed, depth);
         if !continuing {
             tokens.push(Spanned {
                 token: Token::Newline,

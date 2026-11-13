@@ -913,7 +913,10 @@ impl<'a> Evaluator<'a> {
             "month" => self.clock(|time| time.month() as f64),
             "year" => self.clock(|time| time.year() as f64),
             "dayofweek" => self.clock(|time| time.weekday().num_days_from_sunday() as f64 + 1.0),
-            _ => Value::Na,
+            // v4 scripts spell a colour without the namespace: `plot(close, color=red)`.
+            _ => builtins::color_constant(name)
+                .map(Value::Color)
+                .unwrap_or(Value::Na),
         }
     }
 
@@ -1076,7 +1079,10 @@ impl<'a> Evaluator<'a> {
             // `shape.*`, `location.*`, `plot.*` and the like: the names the plot and input
             // calls read back as strings.
             _ if !namespace.is_empty() => Value::Str(name.to_owned()),
-            _ => Value::Na,
+            // v4 scripts spell a colour without the namespace: `color=red`.
+            _ => builtins::color_constant(path)
+                .map(Value::Color)
+                .unwrap_or(Value::Na),
         }
     }
 
@@ -1496,6 +1502,8 @@ impl<'a> Evaluator<'a> {
         line: usize,
     ) -> Value {
         let name = callee.join(".");
+        // A v3/v4 script calls its builtins without a namespace: `sma(...)`, `abs(...)`, `red`.
+        let name = legacy_name(&name).unwrap_or(name);
         match name.as_str() {
             "plot" => return self.plot(id, args),
             "plotcandle" | "plotbar" => {
@@ -1509,6 +1517,19 @@ impl<'a> Evaluator<'a> {
             "barcolor" => return self.colour_plot(id, args, PlotType::BarColor),
             "bgcolor" => return self.colour_plot(id, args, PlotType::BackgroundColor),
             "alertcondition" | "alert" => return Value::Na,
+            // v4's `iff(condition, iftrue, iffalse)` is a function, so both branches evaluate.
+            "iff" => {
+                let condition = args
+                    .first()
+                    .map(|arg| self.eval(&arg.value))
+                    .and_then(|value| value.flag())
+                    .unwrap_or(false);
+                let at = if condition { 1 } else { 2 };
+                return args
+                    .get(at)
+                    .map(|arg| self.eval(&arg.value))
+                    .unwrap_or(Value::Na);
+            }
             _ => {}
         }
         if name == "input" || name.starts_with("input.") {
@@ -3100,6 +3121,30 @@ fn mintick_text(value: f64, mintick: f64) -> String {
     format!("{value:.decimals$}")
 }
 
+/// The namespaced name a v3/v4 script's bare builtin call means: `sma` is `ta.sma`, `abs` is
+/// `math.abs`, `color(...)` is `color.new` and `security(...)` is `request.security`.
+fn legacy_name(name: &str) -> Option<String> {
+    match name {
+        "color" => return Some("color.new".to_owned()),
+        "security" => return Some("request.security".to_owned()),
+        "tostring" => return Some("str.tostring".to_owned()),
+        "tonumber" => return Some("str.tonumber".to_owned()),
+        // v4's `sum(source, length)` is the rolling sum; `max`, `min` and `avg` are variadic.
+        "sum" => return Some("ta.sum".to_owned()),
+        _ => {}
+    }
+    if name.contains('.') {
+        return None;
+    }
+    if builtins::is_math(name) {
+        return Some(format!("math.{name}"));
+    }
+    if builtins::is_ta(name) {
+        return Some(format!("ta.{name}"));
+    }
+    None
+}
+
 /// The chart interval as Pine spells it: `1`, `15`, `60`, `240`, `D`, `W`, `M`, with a leading
 /// count only when it is more than one.
 fn pine_period(timeframe: egui_charts::model::Timeframe) -> String {
@@ -4495,6 +4540,42 @@ alertcondition(bull, "Bull", "Bull signal")
         assert_eq!(output.plots[0].values[3], 3.0);
         assert_eq!(output.plots[1].values[3], 2.0);
         assert_eq!(output.plots[2].values[3], 6.0);
+    }
+
+    #[test]
+    fn a_v4_script_calls_its_builtins_without_a_namespace() {
+        let script = r#"indicator("Legacy")
+fast = sma(close, 2)
+plot(fast, "sma")
+plot(abs(close - 5), "abs")
+plot(color.red == color(red, 0) ? 1 : 0, "colour")
+plot(red == color.red ? 1 : 0, "red")
+plot(cum(1), "cum")
+plot(iff(close > 2, 1, 0), "iff")
+plot(tostring(7) == "7" ? 1 : 0, "tostring")
+text = "a"
+    + "b"
+    + "c"
+plot(str.length(text), "joined")
+"#;
+        let output = run(script, &[1.0, 2.0, 3.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let at = |title: &str| {
+            output
+                .plots
+                .iter()
+                .find(|plot| plot.title == title)
+                .unwrap()
+                .values[2]
+        };
+        assert_eq!(at("sma"), 2.5);
+        assert_eq!(at("abs"), 2.0);
+        assert_eq!(at("colour"), 1.0);
+        assert_eq!(at("red"), 1.0);
+        assert_eq!(at("cum"), 3.0);
+        assert_eq!(at("iff"), 1.0);
+        assert_eq!(at("tostring"), 1.0);
+        assert_eq!(at("joined"), 3.0);
     }
 
     #[test]

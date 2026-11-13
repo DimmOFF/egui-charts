@@ -32,6 +32,8 @@ pub struct Parser {
 impl Parser {
     /// Parses `source`, or fails on syntax this parser cannot read at all.
     pub fn parse(source: &str) -> Result<Program, String> {
+        // A script saved by Windows may start with a byte-order mark, which is not Pine source.
+        let source = source.trim_start_matches('\u{feff}');
         let tokens = lex(source)?;
         let mut parser = Self {
             tokens,

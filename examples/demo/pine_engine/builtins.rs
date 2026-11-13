@@ -162,10 +162,8 @@ fn num(value: f64) -> Option<Value> {
     })
 }
 
-/// Calls `ta.*`; `None` for a name this subset does not run. A known name whose arguments are
-/// missing answers `na` rather than reading as unsupported.
-pub fn ta(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Option<Value> {
-    const NAMES: &[&str] = &[
+/// Every `ta.*` name this engine reads.
+pub const TA_NAMES: &[&str] = &[
         "sma",
         "sum",
         "ema",
@@ -240,7 +238,16 @@ pub fn ta(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Option<
         "dema",
         "tema",
     ];
-    if !NAMES.contains(&name) {
+
+/// Whether `name` is a `ta.*` function, so a v3/v4 script's bare call can find it.
+pub fn is_ta(name: &str) -> bool {
+    TA_NAMES.contains(&name)
+}
+
+/// Calls `ta.*`; `None` for a name this subset does not run. A known name whose arguments are
+/// missing answers `na` rather than reading as unsupported.
+pub fn ta(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Option<Value> {
+    if !TA_NAMES.contains(&name) {
         return None;
     }
     Some(ta_known(name, state, args, bar).unwrap_or(Value::Na))
@@ -1501,9 +1508,8 @@ fn true_range(state: &TaState, bar: &Bar) -> f64 {
     }
 }
 
-/// Calls `math.*`; `None` for an unknown name.
-pub fn math(name: &str, args: &[Value]) -> Option<Value> {
-    const NAMES: &[&str] = &[
+/// Every `math.*` name this engine reads.
+pub const MATH_NAMES: &[&str] = &[
         "pi",
         "abs",
         "round",
@@ -1531,7 +1537,15 @@ pub fn math(name: &str, args: &[Value]) -> Option<Value> {
         "clamp",
         "random",
     ];
-    if !NAMES.contains(&name) {
+
+/// Whether `name` is a `math.*` function, so a v3/v4 script's bare call can find it.
+pub fn is_math(name: &str) -> bool {
+    MATH_NAMES.contains(&name)
+}
+
+/// Calls `math.*`; `None` for an unknown name.
+pub fn math(name: &str, args: &[Value]) -> Option<Value> {
+    if !MATH_NAMES.contains(&name) {
         return None;
     }
     Some(math_known(name, args).unwrap_or(Value::Na))

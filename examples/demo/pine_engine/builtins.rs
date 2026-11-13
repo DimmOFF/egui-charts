@@ -1641,7 +1641,7 @@ fn random_unit(seed: Option<u64>) -> f64 {
 
 /// Calls `color.*`; `None` for an unknown name.
 pub fn color(name: &str, args: &[Value]) -> Option<Value> {
-    const NAMES: &[&str] = &["new", "rgb", "r", "g", "b", "a", "from_gradient"];
+    const NAMES: &[&str] = &["new", "rgb", "r", "g", "b", "a", "t", "from_gradient"];
     if !NAMES.contains(&name) {
         return None;
     }
@@ -1688,6 +1688,10 @@ fn color_known(name: &str, args: &[Value]) -> Option<Value> {
         "g" => Value::Num(base(0).g() as f64),
         "b" => Value::Num(base(0).b() as f64),
         "a" => Value::Num(base(0).a() as f64),
+        // `color.t` is the transparency in percent that `color.new` takes.
+        "t" => Value::Num(
+            ((255.0 - f64::from(base(0).a())) / 255.0 * 100.0).round(),
+        ),
         "from_gradient" => {
             let value = args.first().and_then(number)?;
             let bottom = args.get(1).and_then(number)?;

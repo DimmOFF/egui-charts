@@ -624,14 +624,25 @@ impl<'a> Evaluator<'a> {
                 iterable,
                 body,
             } => {
-                let Some(items) = self.eval(iterable).array() else {
+                // A snapshot of the entries, so the body may push to the same array or map.
+                let evaluated = self.eval(iterable);
+                let from_map = evaluated.map().is_some();
+                let rows: Vec<(Value, Value)> = if let Some(entries) = evaluated.map() {
+                    // `for [key, value] in someMap` walks the entries in insertion order.
+                    value::lock_map(&entries).entries.clone()
+                } else if let Some(items) = evaluated.array() {
+                    value::lock(&items)
+                        .iter()
+                        .cloned()
+                        .enumerate()
+                        .map(|(index, item)| (Value::Num(index as f64), item))
+                        .collect()
+                } else {
                     return Value::Na;
                 };
-                // A snapshot, so the body may push to the same array.
-                let items = value::lock(&items).clone();
                 let mut value = Value::Na;
                 let mut iterations = 0;
-                for (index, item) in items.into_iter().enumerate() {
+                for (key, item) in rows {
                     if iterations >= MAX_LOOP_ITERATIONS {
                         self.loop_limit(*line);
                         break;
@@ -644,11 +655,15 @@ impl<'a> Evaluator<'a> {
                     match vars.as_slice() {
                         [] => {}
                         [var] => {
-                            scope.insert(var.clone(), item);
+                            // A map yields its keys when the loop names one variable.
+                            scope.insert(
+                                var.clone(),
+                                if from_map { key } else { item },
+                            );
                         }
                         // `for [index, value] in array`: the position and the element.
-                        [index_var, item_var, ..] => {
-                            scope.insert(index_var.clone(), Value::Num(index as f64));
+                        [key_var, item_var, ..] => {
+                            scope.insert(key_var.clone(), key);
                             scope.insert(item_var.clone(), item);
                             for name in vars.iter().skip(2) {
                                 scope.insert(name.clone(), Value::Na);
@@ -4447,6 +4462,55 @@ alertcondition(bull, "Bull", "Bull signal")
         assert_eq!(output.plots[0].values[3], 3.0);
         assert_eq!(output.plots[1].values[3], 2.0);
         assert_eq!(output.plots[2].values[3], 6.0);
+    }
+
+    #[test]
+    fn array_and_map_iteration_and_colour_channels_run_without_diagnostics() {
+        let script = r#"indicator("Odds3")
+values = array.from(10, 20, 30)
+total = 0.0
+for [index, value] in values
+    total += value * (index + 1)
+plot(total, "indexed")
+entries = map.new<string, float>()
+map.put(entries, "a", 1)
+map.put(entries, "b", 2)
+sum = 0.0
+for [key, value] in entries
+    sum += value
+plot(sum, "summed")
+plot(array.size(map.keys(entries)), "keys")
+plot(array.size(map.values(entries)), "values")
+base = color.new(color.red, 20)
+plot(color.r(base), "r")
+plot(color.g(base), "g")
+plot(color.b(base), "b")
+plot(color.a(base), "a")
+tone = color.from_gradient(0.5, 0, 1, color.black, color.white)
+plot(color.t(color.new(tone, 50)), "t")
+plot(array.range(values), "range")
+plot(array.max(values), "max")
+plot(math.max(1, 2, 3, 4), "mmath")
+plot(ta.change(close) != 0 or bar_index == 0 ? 1 : 0, "change")
+p1 = plot(close, "fast")
+p2 = plot(open, "slow")
+fill(p1, p2, color=color.new(color.blue, 90), title="between")
+"#;
+        let output = run(script, &[10.0, 11.0, 12.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let at = |title: &str| {
+            output
+                .plots
+                .iter()
+                .find(|plot| plot.title == title)
+                .unwrap()
+                .values[2]
+        };
+        assert_eq!(at("indexed"), 140.0);
+        assert_eq!(at("summed"), 3.0);
+        assert_eq!(at("range"), 20.0);
+        assert_eq!(at("t"), 50.0);
+        assert_eq!(output.fills.len(), 1);
     }
 
     #[test]

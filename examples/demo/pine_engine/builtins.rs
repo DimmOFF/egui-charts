@@ -167,6 +167,7 @@ fn num(value: f64) -> Option<Value> {
 pub fn ta(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Option<Value> {
     const NAMES: &[&str] = &[
         "sma",
+        "sum",
         "ema",
         "rma",
         "wma",
@@ -249,7 +250,7 @@ pub fn ta(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Option<
 /// put named arguments where they belong. `None` for a call that takes none.
 pub fn ta_parameters(name: &str) -> Option<&'static [&'static str]> {
     Some(match name {
-        "sma" | "ema" | "rma" | "wma" | "rsi" | "stdev" | "highest" | "lowest" | "change"
+        "sma" | "sum" | "ema" | "rma" | "wma" | "rsi" | "stdev" | "highest" | "lowest" | "change"
         | "rising" | "falling" | "mom" | "roc" | "median" | "variance" | "dev" | "highestbars"
         | "lowestbars" | "vwma" | "cci" | "cmo" | "range" | "cog" | "hma" | "mode"
         | "percentrank" | "max" | "min" => &["source", "length"],
@@ -291,6 +292,15 @@ fn ta_known(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Optio
                 return na();
             }
             num(state.window.iter().sum::<f64>() / len as f64)
+        }
+        "sum" => {
+            let src = args.first().and_then(number)?;
+            let len = length(args.get(1), 1);
+            state.push(src, len);
+            if state.window.len() < len {
+                return na();
+            }
+            num(state.window.iter().sum())
         }
         "ema" | "rma" => {
             let src = args.first().and_then(number)?;

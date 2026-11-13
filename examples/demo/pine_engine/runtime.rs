@@ -885,6 +885,7 @@ impl<'a> Evaluator<'a> {
             "minute" => self.clock(|time| time.minute() as f64),
             "second" => self.clock(|time| time.second() as f64),
             "dayofmonth" => self.clock(|time| time.day() as f64),
+            "weekofyear" => self.clock(|time| time.iso_week().week() as f64),
             "month" => self.clock(|time| time.month() as f64),
             "year" => self.clock(|time| time.year() as f64),
             "dayofweek" => self.clock(|time| time.weekday().num_days_from_sunday() as f64 + 1.0),
@@ -981,6 +982,31 @@ impl<'a> Evaluator<'a> {
             "timeframe.multiplier" => return Value::Num(pine_multiplier(self.context.timeframe)),
             "timeframe.in_seconds" | "timeframe.in_seconds()" => {
                 return Value::Num((self.context.timeframe.duration_ms() / 1000) as f64);
+            }
+            "timeframe.isseconds" => {
+                return Value::Bool(self.context.timeframe.duration_ms() < 60_000);
+            }
+            "timeframe.isminutes" => {
+                let duration = self.context.timeframe.duration_ms();
+                return Value::Bool((60_000..3_600_000).contains(&duration));
+            }
+            "timeframe.isintraday" => {
+                return Value::Bool(self.context.timeframe.duration_ms() < 86_400_000);
+            }
+            "timeframe.isdaily" => {
+                return Value::Bool(self.context.timeframe.duration_ms() == 86_400_000);
+            }
+            "timeframe.isweekly" => {
+                return Value::Bool(self.context.timeframe.duration_ms() == 604_800_000);
+            }
+            "timeframe.ismonthly" => {
+                return Value::Bool(self.context.timeframe.duration_ms() >= 2_419_200_000);
+            }
+            "timeframe.isdwm" => {
+                let duration = self.context.timeframe.duration_ms();
+                return Value::Bool(
+                    duration == 86_400_000 || duration == 604_800_000 || duration >= 2_419_200_000,
+                );
             }
             _ => {}
         }
@@ -1477,7 +1503,7 @@ impl<'a> Evaluator<'a> {
         if matches!(
             name.as_str(),
             "int" | "float" | "bool" | "hour" | "minute" | "second" | "year" | "month"
-                | "dayofmonth" | "dayofweek" | "time" | "time_close" | "timestamp"
+                | "dayofmonth" | "dayofweek" | "weekofyear" | "time" | "time_close" | "timestamp"
         ) {
             return self.time_call(&name, args);
         }
@@ -1505,6 +1531,14 @@ impl<'a> Evaluator<'a> {
         }
         if let Some(rest) = name.strip_prefix("math.") {
             let values: Vec<Value> = args.iter().map(|arg| self.eval(&arg.value)).collect();
+            // `math.sum(source, length)` sums the last `length` values, so it needs the bar
+            // history the `ta` state keeps.
+            if rest == "sum" {
+                let bar = self.bars[self.bar].clone();
+                let values = ta_arguments(rest, args, values);
+                let state = self.ta.entry(id).or_default();
+                return builtins::ta(rest, state, &values, &bar).unwrap_or(Value::Na);
+            }
             return match builtins::math(rest, &values) {
                 Some(value) => value,
                 None => self.unsupported(line, &name),
@@ -1981,7 +2015,14 @@ impl<'a> Evaluator<'a> {
             .filter(|_| {
                 matches!(
                     name,
-                    "year" | "month" | "dayofmonth" | "dayofweek" | "hour" | "minute" | "second"
+                    "year"
+                        | "month"
+                        | "dayofmonth"
+                        | "dayofweek"
+                        | "weekofyear"
+                        | "hour"
+                        | "minute"
+                        | "second"
                 )
             })
             .map(|arg| self.eval(&arg.value))
@@ -2082,6 +2123,7 @@ impl<'a> Evaluator<'a> {
                     "hour" => Value::Num(time.hour() as f64),
                     "minute" => Value::Num(time.minute() as f64),
                     "second" => Value::Num(time.second() as f64),
+                    "weekofyear" => Value::Num(time.iso_week().week() as f64),
                     _ => Value::Na,
                 }
             }
@@ -4375,6 +4417,30 @@ alertcondition(bull, "Bull", "Bull signal")
     }
 
     #[test]
+    fn a_statement_may_continue_on_an_indented_line() {
+        let output = run(
+            "indicator(\"T\")\nx = 1 +\n    2\nplot(x)\nplot(math.max(close,\n    open))\n",
+            &[1.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.plots[0].values[0], 3.0);
+        assert_eq!(output.plots[1].values[0], 1.0);
+    }
+
+    #[test]
+    fn math_sum_sums_the_window_and_avg_averages_its_arguments() {
+        let output = run(
+            "indicator(\"T\")\nplot(math.sum(close, 3))\nplot(math.avg(1, 2, 3, 6))\n",
+            &[1.0, 2.0, 3.0, 4.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        // `math.sum` is a rolling sum, not a sum of its arguments.
+        assert!(output.plots[0].values[1].is_nan());
+        assert_eq!(output.plots[0].values[3], 9.0);
+        assert_eq!(output.plots[1].values[3], 3.0);
+    }
+
+    #[test]
     fn tables_and_drawing_setters_run_without_diagnostics() {
         let script = r#"indicator("Misc", overlay=true)
 t = table.new(position.top_right, 3, 2, bgcolor=color.new(color.black, 50), border_width=1, border_color=color.gray, frame_color=color.red, frame_width=2)
@@ -4564,6 +4630,29 @@ plot(close)
         let context = Context::default();
         let output = Evaluator::new(&program, &bars, &context, &HashMap::new(), &[]).run();
         assert_eq!(output.plots[0].values[0], 0.0);
+    }
+
+    #[test]
+    fn the_timeframe_flags_answer_from_the_interval() {
+        let check = |timeframe: egui_charts::model::Timeframe, expected: [f64; 4]| {
+            let program = Parser::parse(
+                "indicator(\"T\")\nplot(timeframe.isintraday ? 1 : 0)\nplot(timeframe.isdaily ? 1 : 0)\nplot(timeframe.isdwm ? 1 : 0)\nplot(weekofyear(time))\n",
+            )
+            .unwrap();
+            let bars = bars(&[1.0]);
+            let context = Context {
+                timeframe,
+                ..Context::default()
+            };
+            let output = Evaluator::new(&program, &bars, &context, &HashMap::new(), &[]).run();
+            assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+            for (at, value) in expected.iter().enumerate() {
+                assert_eq!(output.plots[at].values[0], *value, "{timeframe:?}");
+            }
+        };
+        // Both bars fall on 2024-01-01, ISO week 1.
+        check(egui_charts::model::Timeframe::Min5, [1.0, 0.0, 0.0, 1.0]);
+        check(egui_charts::model::Timeframe::Day1, [0.0, 1.0, 1.0, 1.0]);
     }
 
     #[test]

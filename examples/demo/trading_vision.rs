@@ -151,14 +151,13 @@ fn build_terminal(
     factory: egui_charts::studies::IndicatorFactory,
 ) -> Terminal {
     let binance_symbols = catalog.binance();
-    let mt5_symbols = catalog.mt5();
-    let mt5 = catalog.connection();
+    let deriv_symbols = catalog.deriv();
+    let mt5 = catalog.mt5();
     let mut terminal = Terminal::new(Arc::new(CombinedFeed::new(
         SYMBOL,
-        catalog.deriv(),
+        deriv_symbols.clone(),
         binance_symbols.clone(),
-        mt5_symbols.clone(),
-        mt5.clone(),
+        Arc::clone(&mt5),
     )))
     .with_symbol(SYMBOL)
     .with_timeframe(Timeframe::Min1)
@@ -166,7 +165,7 @@ fn build_terminal(
     .with_symbol_recents(false)
     .with_quotes(Arc::new(CombinedQuotes::new(
         binance_symbols,
-        mt5_symbols,
+        deriv_symbols,
         mt5,
     )))
     .with_alerts(Arc::new(AlertEngine::new()))

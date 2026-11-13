@@ -13,7 +13,7 @@ use serde::Deserialize;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use super::deriv_feed::DERIV_PUBLIC_WS;
-use super::mt5_feed::Connection;
+use super::mt5_feed::{Connection, Mt5Link};
 
 const BINANCE_EXCHANGE_INFO: &str = "https://api.binance.com/api/v3/exchangeInfo";
 const BINANCE_FUTURES_INFO: &str = "https://fapi.binance.com/fapi/v1/exchangeInfo";
@@ -26,7 +26,7 @@ pub const FUTURES_SUFFIX: &str = ".P";
 pub struct Symbols(Arc<RwLock<HashMap<String, Instrument>>>);
 
 impl Symbols {
-    fn insert(&self, instruments: Vec<Instrument>) {
+    pub(crate) fn insert(&self, instruments: Vec<Instrument>) {
         let mut map = self.0.write().unwrap_or_else(|error| error.into_inner());
         for instrument in instruments {
             map.insert(instrument.symbol.to_uppercase(), instrument);
@@ -49,21 +49,38 @@ impl Symbols {
             .unwrap_or_else(|error| error.into_inner())
             .contains_key(&symbol.to_uppercase())
     }
+
+    /// Whether nothing has been loaded yet, so a missing symbol says nothing about the venue.
+    pub fn is_empty(&self) -> bool {
+        self.0
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
+    }
+
+    /// Every instrument the catalogue holds.
+    pub fn all(&self) -> Vec<Instrument> {
+        self.0
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .cloned()
+            .collect()
+    }
 }
 
 struct Ready {
-    /// Every instrument of both venues, once loaded.
-    list: Mutex<Option<Vec<Instrument>>>,
-    loaded: Condvar,
+    /// Set once every catalogue has finished loading.
+    loaded: Mutex<bool>,
+    signalled: Condvar,
 }
 
-/// The symbol search over every catalogue, fetching them on a worker thread at startup.
+/// The symbol search over every catalogue, fetching them on worker threads at startup.
 pub struct Catalog {
     ready: Arc<Ready>,
     deriv: Symbols,
     binance: Symbols,
-    mt5: Symbols,
-    connection: Option<Connection>,
+    mt5: Arc<Mt5Link>,
 }
 
 impl Catalog {
@@ -71,58 +88,64 @@ impl Catalog {
     pub fn load() -> Self {
         let deriv = Symbols::default();
         let binance = Symbols::default();
-        let mt5 = Symbols::default();
-        let connection = Connection::open();
         // Local and quick, and the chart's first symbol may be an MT5 one, so it is ready before
         // the window opens rather than when the network fetches finish.
-        let mt5_pairs = connection
-            .as_ref()
-            .map(Connection::instruments)
-            .unwrap_or_default();
-        let mt5_count = mt5_pairs.len();
-        mt5.insert(mt5_pairs.clone());
+        let mt5 = Arc::new(Mt5Link::new(Symbols::default(), Connection::open()));
         let ready = Arc::new(Ready {
-            list: Mutex::new(None),
-            loaded: Condvar::new(),
+            loaded: Mutex::new(false),
+            signalled: Condvar::new(),
         });
         let catalog = Self {
-            ready: ready.clone(),
+            ready: Arc::clone(&ready),
             deriv: deriv.clone(),
             binance: binance.clone(),
-            mt5,
-            connection: connection.clone(),
+            mt5: Arc::clone(&mt5),
         };
         let spawn = std::thread::Builder::new()
             .name("symbol-catalogue".into())
             .spawn(move || {
-                let mut instruments = deriv_instruments();
-                let deriv_count = instruments.len();
-                deriv.insert(instruments.clone());
+                // Concurrent, because a slow venue must not hold up the others: a symbol from the
+                // finished catalogue is routed to its venue without waiting.
+                let (deriv_pairs, spot, futures) = std::thread::scope(|scope| {
+                    let deriv = scope.spawn(deriv_instruments);
+                    let spot = scope.spawn(binance_instruments);
+                    let futures = scope.spawn(binance_futures_instruments);
+                    (
+                        deriv.join().unwrap_or_default(),
+                        spot.join().unwrap_or_else(|_| Err("catalogue panicked".into())),
+                        futures
+                            .join()
+                            .unwrap_or_else(|_| Err("catalogue panicked".into())),
+                    )
+                });
+                let deriv_count = deriv_pairs.len();
+                deriv.insert(deriv_pairs);
                 let mut spot_count = 0;
-                match binance_instruments() {
+                match spot {
                     Ok(pairs) => {
                         spot_count = pairs.len();
-                        binance.insert(pairs.clone());
-                        instruments.extend(pairs);
+                        binance.insert(pairs);
                     }
                     Err(error) => eprintln!("Binance spot catalogue error: {error}"),
                 }
                 let mut futures_count = 0;
-                match binance_futures_instruments() {
+                match futures {
                     Ok(pairs) => {
                         futures_count = pairs.len();
-                        binance.insert(pairs.clone());
-                        instruments.extend(pairs);
+                        binance.insert(pairs);
                     }
                     Err(error) => eprintln!("Binance futures catalogue error: {error}"),
                 }
-                instruments.extend(mt5_pairs);
+                let mt5_count = mt5.symbols().all().len();
                 eprintln!(
                     "Symbol catalogue: {deriv_count} Deriv + {spot_count} Binance spot + \
                      {futures_count} Binance futures + {mt5_count} MT5 symbols"
                 );
-                *ready.list.lock().unwrap_or_else(|error| error.into_inner()) = Some(instruments);
-                ready.loaded.notify_all();
+                *ready
+                    .loaded
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = true;
+                ready.signalled.notify_all();
             });
         if let Err(error) = spawn {
             eprintln!("Could not start the symbol catalogue loader: {error}");
@@ -140,51 +163,54 @@ impl Catalog {
         self.binance.clone()
     }
 
-    /// The MetaTrader 5 catalogue, empty when no terminal is running.
-    pub fn mt5(&self) -> Symbols {
-        self.mt5.clone()
-    }
-
-    /// The terminal this machine runs, shared by the feeds that read from it.
-    pub fn connection(&self) -> Option<Connection> {
-        self.connection.clone()
+    /// The terminal this machine runs, shared by the feeds and quotes that read from it.
+    pub fn mt5(&self) -> Arc<Mt5Link> {
+        Arc::clone(&self.mt5)
     }
 
     /// Whether every catalogue has finished loading, including the network ones.
     pub fn is_ready(&self) -> bool {
-        self.ready
-            .list
+        *self
+            .ready
+            .loaded
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .is_some()
+    }
+
+    /// Every instrument loaded so far, the MT5 ones included.
+    fn catalogue(&self) -> Vec<Instrument> {
+        let mut instruments = self.deriv.all();
+        instruments.extend(self.binance.all());
+        instruments.extend(self.mt5.symbols().all());
+        instruments
     }
 }
 
 impl SymbolSearch for Catalog {
     fn search(&self, query: SymbolQuery, reply: Reply<Vec<Instrument>>) {
-        {
-            let list = self
-                .ready
-                .list
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if let Some(instruments) = &*list {
-                instruments.search(query, reply);
-                return;
-            }
+        if self.is_ready() {
+            self.catalogue().search(query, reply);
+            return;
         }
         // The dialog searches off the UI thread, so waiting for the catalogue costs no frame.
-        let ready = self.ready.clone();
+        let ready = Arc::clone(&self.ready);
+        let deriv = self.deriv.clone();
+        let binance = self.binance.clone();
+        let mt5 = Arc::clone(&self.mt5);
         std::thread::spawn(move || {
-            let list = ready.list.lock().unwrap_or_else(|error| error.into_inner());
-            let (list, _) = ready
+            let loaded = ready
                 .loaded
-                .wait_timeout_while(list, Duration::from_secs(60), |list| list.is_none())
+                .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            match &*list {
-                Some(instruments) => instruments.search(query, reply),
-                None => reply.send(Ok(Vec::new())),
-            }
+            let (loaded, _) = ready
+                .signalled
+                .wait_timeout_while(loaded, Duration::from_secs(30), |loaded| !*loaded)
+                .unwrap_or_else(|error| error.into_inner());
+            drop(loaded);
+            let mut instruments = deriv.all();
+            instruments.extend(binance.all());
+            instruments.extend(mt5.symbols().all());
+            instruments.search(query, reply);
         });
     }
 }
@@ -200,48 +226,59 @@ fn deriv_instruments() -> Vec<Instrument> {
             return Vec::new();
         }
     };
+    // A silent venue must not hold the catalogue, and with it the symbol search, open.
     runtime.block_on(async {
-        let (mut ws, _) = match connect_async(DERIV_PUBLIC_WS).await {
-            Ok(pair) => pair,
-            Err(error) => {
-                eprintln!("Deriv catalogue connection error: {error}");
-                return Vec::new();
+        match tokio::time::timeout(Duration::from_secs(10), deriv_symbols()).await {
+            Ok(instruments) => instruments,
+            Err(_) => {
+                eprintln!("Deriv catalogue timed out");
+                Vec::new()
             }
-        };
-        let request = serde_json::json!({ "active_symbols": "brief" });
-        if ws
-            .send(Message::Text(request.to_string().into()))
-            .await
-            .is_err()
-        {
+        }
+    })
+}
+
+async fn deriv_symbols() -> Vec<Instrument> {
+    let (mut ws, _) = match connect_async(DERIV_PUBLIC_WS).await {
+        Ok(pair) => pair,
+        Err(error) => {
+            eprintln!("Deriv catalogue connection error: {error}");
             return Vec::new();
         }
-        while let Some(frame) = ws.next().await {
-            match frame {
-                Ok(Message::Text(text)) => {
-                    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-                        continue;
-                    };
-                    if let Some(error) = value.get("error") {
-                        eprintln!("Deriv catalogue error: {error}");
-                        return Vec::new();
-                    }
-                    let Some(rows) = value.get("active_symbols").and_then(|v| v.as_array()) else {
-                        continue;
-                    };
-                    return rows.iter().filter_map(deriv_instrument).collect();
+    };
+    let request = serde_json::json!({ "active_symbols": "brief" });
+    if ws
+        .send(Message::Text(request.to_string().into()))
+        .await
+        .is_err()
+    {
+        return Vec::new();
+    }
+    while let Some(frame) = ws.next().await {
+        match frame {
+            Ok(Message::Text(text)) => {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    continue;
+                };
+                if let Some(error) = value.get("error") {
+                    eprintln!("Deriv catalogue error: {error}");
+                    return Vec::new();
                 }
-                Ok(Message::Ping(payload)) => {
-                    if ws.send(Message::Pong(payload)).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(Message::Close(_)) | Err(_) => break,
-                Ok(_) => {}
+                let Some(rows) = value.get("active_symbols").and_then(|v| v.as_array()) else {
+                    continue;
+                };
+                return rows.iter().filter_map(deriv_instrument).collect();
             }
+            Ok(Message::Ping(payload)) => {
+                if ws.send(Message::Pong(payload)).await.is_err() {
+                    break;
+                }
+            }
+            Ok(Message::Close(_)) | Err(_) => break,
+            Ok(_) => {}
         }
-        Vec::new()
-    })
+    }
+    Vec::new()
 }
 
 fn deriv_instrument(row: &serde_json::Value) -> Option<Instrument> {
@@ -285,7 +322,7 @@ struct AssetPair {
 
 fn binance_instruments() -> Result<Vec<Instrument>, String> {
     let response = ureq::get(BINANCE_EXCHANGE_INFO)
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(20))
         .call()
         .map_err(|error| error.to_string())?;
     let info: ExchangeInfo =
@@ -323,7 +360,7 @@ struct Contract {
 
 fn binance_futures_instruments() -> Result<Vec<Instrument>, String> {
     let response = ureq::get(BINANCE_FUTURES_INFO)
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(20))
         .call()
         .map_err(|error| error.to_string())?;
     let info: FuturesInfo =

@@ -14,7 +14,7 @@ use egui_charts::model::{Bar, Instrument, Quote, SymbolType, Tick, Timeframe};
 use egui_charts::services::{Events, Quotes};
 use mt5_rs::Mt5Client;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::catalog::Symbols;
@@ -88,6 +88,10 @@ pub struct Connection {
 impl Connection {
     /// The terminal running on this machine, or `None` when none answers.
     pub fn open() -> Option<Self> {
+        // A diagnostic switch: `TV_NO_MT5=1` runs the app as if no terminal were open.
+        if std::env::var_os("TV_NO_MT5").is_some() {
+            return None;
+        }
         let pipe = discover()?;
         let offset = clock_offset(&pipe);
         if offset == 0 {
@@ -169,30 +173,84 @@ fn clock_offset(pipe: &str) -> i64 {
     ((newest - now) as f64 / 900.0).round() as i64 * 900
 }
 
-/// History and live ticks of the terminal's symbols.
-pub struct Mt5Feed {
+/// The terminal this session talks to. A terminal started after the app is used from the next
+/// request on, so starting MetaTrader 5 does not need a restart.
+pub struct Mt5Link {
+    connection: Mutex<Option<Connection>>,
+    /// The symbols the terminal lists, filled whenever a connection is made.
     symbols: Symbols,
-    connection: Option<Connection>,
+    /// When the terminal was last looked for, so a missing one is looked for now and then
+    /// rather than on every request.
+    attempt: Mutex<Option<Instant>>,
 }
 
-impl Mt5Feed {
-    /// A feed whose symbols resolve through `symbols`, fed by `connection` when a terminal runs.
+/// How often a missing terminal is looked for again.
+const RECONNECT: Duration = Duration::from_secs(5);
+
+impl Mt5Link {
+    /// A link over `symbols` that uses `connection` when one was found at startup.
     pub fn new(symbols: Symbols, connection: Option<Connection>) -> Self {
+        // The chart's first symbol may be an MT5 one, so its catalogue is ready at once.
+        if let Some(connection) = &connection {
+            symbols.insert(connection.instruments());
+        }
         Self {
+            connection: Mutex::new(connection),
             symbols,
-            connection,
+            attempt: Mutex::new(None),
         }
     }
 
-    fn connection(&self) -> Result<&Connection, FeedError> {
-        self.connection
-            .as_ref()
-            .ok_or_else(|| FeedError::Network("no MetaTrader 5 terminal is running".into()))
+    /// The terminal, looking for one that started since the last look.
+    pub fn connection(&self) -> Option<Connection> {
+        let mut held = self
+            .connection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if held.is_none() {
+            let mut attempt = self
+                .attempt
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if attempt.is_some_and(|at: Instant| at.elapsed() < RECONNECT) {
+                return None;
+            }
+            *attempt = Some(Instant::now());
+            let connection = Connection::open()?;
+            self.symbols.insert(connection.instruments());
+            *held = Some(connection);
+        }
+        held.clone()
     }
 
-    /// Whether `symbol` is one of the terminal's.
+    /// The terminal's symbols, after a look for a terminal that started meanwhile.
     pub fn holds(&self, symbol: &str) -> bool {
+        self.connection();
         self.symbols.contains(symbol)
+    }
+
+    /// The symbols this link has seen.
+    pub fn symbols(&self) -> Symbols {
+        self.symbols.clone()
+    }
+}
+
+/// History and live ticks of the terminal's symbols.
+pub struct Mt5Feed {
+    mt5: Arc<Mt5Link>,
+}
+
+impl Mt5Feed {
+    /// A feed of the terminal behind `mt5`.
+    pub fn new(mt5: Arc<Mt5Link>) -> Self {
+        Self { mt5 }
+    }
+
+    /// The terminal, or the reason there is none.
+    fn connection(&self) -> Result<Connection, FeedError> {
+        self.mt5.connection().ok_or_else(|| {
+            FeedError::Network("MetaTrader 5 is not running on this machine".into())
+        })
     }
 
     fn bars(rows: &[mt5_rs::Rate], connection: &Connection) -> Vec<Bar> {
@@ -224,7 +282,7 @@ impl Datafeed for Mt5Feed {
     }
 
     fn resolve(&self, symbol: &str, reply: Reply<Instrument>) {
-        let instrument = self.symbols.get(symbol).unwrap_or_else(|| {
+        let instrument = self.mt5.symbols().get(symbol).unwrap_or_else(|| {
             Instrument::new(symbol)
                 .with_exchange("MT5")
                 .with_symbol_type(SymbolType::Forex)
@@ -233,11 +291,14 @@ impl Datafeed for Mt5Feed {
     }
 
     fn history(&self, request: HistoryRequest, reply: Reply<HistoryPage>) {
-        let Ok(connection) = self.connection() else {
-            let _ = reply.send(Err(FeedError::Network("no MT5 terminal".into())));
-            return;
+        let connection = match self.connection() {
+            Ok(connection) => connection,
+            Err(error) => {
+                eprintln!("MT5 history error: {error}");
+                let _ = reply.send(Err(error));
+                return;
+            }
         };
-        let connection = connection.clone();
         let symbol = request.symbol;
         let timeframe = request.timeframe;
         let code = timeframe_code(timeframe);
@@ -284,76 +345,74 @@ impl Datafeed for Mt5Feed {
     }
 
     fn subscribe(&self, subscription: Subscription) {
-        let Ok(connection) = self.connection() else {
-            subscription.sink.set_status(FeedStatus::Disconnected);
-            return;
-        };
-        let connection = connection.clone();
+        let mt5 = Arc::clone(&self.mt5);
         let symbol = subscription.symbol;
         let sink = subscription.sink;
         let spawn = std::thread::Builder::new()
             .name(format!("mt5-stream-{symbol}"))
             .spawn(move || {
-                sink.set_status(FeedStatus::Connecting);
-                let client = match connection.client() {
-                    Ok(client) => client,
-                    Err(error) => {
-                        eprintln!("MT5 live connection error: {error}");
-                        sink.set_status(FeedStatus::Disconnected);
-                        return;
-                    }
-                };
-                eprintln!("MT5 live tick stream subscribed: {symbol}");
-                sink.set_status(FeedStatus::Live);
                 // The chart builds the current bar from ticks, so a minute of them is plenty.
                 let mut since = Utc::now().timestamp_millis() - 60_000;
-                let mut failures = 0;
                 while sink.is_active() {
-                    let server_since = since + connection.offset * 1000;
-                    match client.copy_ticks_from(&symbol, server_since, TICK_BATCH, TICKS_ALL) {
-                        Ok(ticks) => {
-                            failures = 0;
-                            for tick in ticks {
-                                let price = if tick.last > 0.0 {
-                                    tick.last
-                                } else {
-                                    (tick.bid + tick.ask) / 2.0
-                                };
-                                let time = connection.utc_ms(if tick.time_msc > 0 {
-                                    tick.time_msc
-                                } else {
-                                    tick.time * 1000
-                                });
-                                let Some(time) = Utc.timestamp_millis_opt(time).single() else {
-                                    continue;
-                                };
-                                if !price.is_finite()
-                                    || price <= 0.0
-                                    || time.timestamp_millis() <= since
-                                {
-                                    continue;
+                    // A terminal started after the chart subscribed is picked up here.
+                    let Some(connection) = mt5.connection() else {
+                        sink.set_status(FeedStatus::Disconnected);
+                        std::thread::sleep(RECONNECT);
+                        continue;
+                    };
+                    sink.set_status(FeedStatus::Connecting);
+                    let Ok(client) = connection.client() else {
+                        sink.set_status(FeedStatus::Disconnected);
+                        std::thread::sleep(RECONNECT);
+                        continue;
+                    };
+                    eprintln!("MT5 live tick stream subscribed: {symbol}");
+                    sink.set_status(FeedStatus::Live);
+                    let mut failures = 0;
+                    while sink.is_active() && failures < 3 {
+                        let server_since = since + connection.offset * 1000;
+                        match client.copy_ticks_from(&symbol, server_since, TICK_BATCH, TICKS_ALL) {
+                            Ok(ticks) => {
+                                failures = 0;
+                                for tick in ticks {
+                                    let price = if tick.last > 0.0 {
+                                        tick.last
+                                    } else {
+                                        (tick.bid + tick.ask) / 2.0
+                                    };
+                                    let time = connection.utc_ms(if tick.time_msc > 0 {
+                                        tick.time_msc
+                                    } else {
+                                        tick.time * 1000
+                                    });
+                                    let Some(time) = Utc.timestamp_millis_opt(time).single() else {
+                                        continue;
+                                    };
+                                    if !price.is_finite()
+                                        || price <= 0.0
+                                        || time.timestamp_millis() <= since
+                                    {
+                                        continue;
+                                    }
+                                    since = time.timestamp_millis();
+                                    let size = if tick.volume_real > 0.0 {
+                                        tick.volume_real
+                                    } else {
+                                        tick.volume as f64
+                                    };
+                                    sink.push_tick(Tick::new(time, price, size, None));
                                 }
-                                since = time.timestamp_millis();
-                                let size = if tick.volume_real > 0.0 {
-                                    tick.volume_real
-                                } else {
-                                    tick.volume as f64
-                                };
-                                sink.push_tick(Tick::new(time, price, size, None));
+                            }
+                            Err(error) => {
+                                failures += 1;
+                                eprintln!("MT5 live tick error: {error}");
                             }
                         }
-                        Err(error) => {
-                            failures += 1;
-                            eprintln!("MT5 live tick error: {error}");
-                            if failures >= 3 {
-                                break;
-                            }
-                        }
+                        std::thread::sleep(TICK_POLL);
                     }
-                    std::thread::sleep(TICK_POLL);
+                    sink.set_status(FeedStatus::Disconnected);
+                    eprintln!("MT5 live tick stream ended: {symbol}");
                 }
-                sink.set_status(FeedStatus::Disconnected);
-                eprintln!("MT5 live tick stream ended: {symbol}");
             });
         if let Err(error) = spawn {
             eprintln!("Could not start MT5 stream worker: {error}");
@@ -364,80 +423,78 @@ impl Datafeed for Mt5Feed {
 /// Watchlist quotes of the terminal's symbols. The change is measured from the previous session's
 /// close, which is what the terminal's own watchlist shows.
 pub struct Mt5Quotes {
-    connection: Option<Connection>,
+    mt5: Arc<Mt5Link>,
 }
 
 impl Mt5Quotes {
-    pub fn new(connection: Option<Connection>) -> Self {
-        Self { connection }
+    pub fn new(mt5: Arc<Mt5Link>) -> Self {
+        Self { mt5 }
     }
 }
 
 impl Quotes for Mt5Quotes {
     fn subscribe(&self, symbols: &[String], events: Events<(String, Quote)>) {
-        let Some(connection) = self.connection.clone() else {
-            return;
-        };
+        let mt5 = Arc::clone(&self.mt5);
         let symbols = symbols.to_vec();
         std::thread::spawn(move || {
-            let client = match connection.client() {
-                Ok(client) => client,
-                Err(error) => {
-                    eprintln!("MT5 quotes connection error: {error}");
-                    return;
-                }
-            };
-            eprintln!("MT5 quotes subscribed: {} symbols", symbols.len());
             let mut closes: HashMap<String, (f64, Instant)> = HashMap::new();
-            let mut failures = 0;
             while events.is_active() {
-                for symbol in &symbols {
-                    let tick = match client.symbol_info_tick(symbol) {
-                        Ok(Some(tick)) => tick,
-                        Ok(None) => continue,
-                        Err(error) => {
-                            failures += 1;
-                            eprintln!("MT5 quote error: {error}");
-                            break;
+                // A terminal started after this subscription is picked up on the next look.
+                let Some(connection) = mt5.connection() else {
+                    std::thread::sleep(RECONNECT);
+                    continue;
+                };
+                let Ok(client) = connection.client() else {
+                    std::thread::sleep(RECONNECT);
+                    continue;
+                };
+                eprintln!("MT5 quotes subscribed: {} symbols", symbols.len());
+                let mut failures = 0;
+                while events.is_active() && failures < 3 {
+                    for symbol in &symbols {
+                        let tick = match client.symbol_info_tick(symbol) {
+                            Ok(Some(tick)) => tick,
+                            Ok(None) => continue,
+                            Err(error) => {
+                                failures += 1;
+                                eprintln!("MT5 quote error: {error}");
+                                break;
+                            }
+                        };
+                        let price = if tick.last > 0.0 {
+                            tick.last
+                        } else {
+                            (tick.bid + tick.ask) / 2.0
+                        };
+                        if !price.is_finite() || price <= 0.0 {
+                            continue;
                         }
-                    };
-                    let price = if tick.last > 0.0 {
-                        tick.last
-                    } else {
-                        (tick.bid + tick.ask) / 2.0
-                    };
-                    if !price.is_finite() || price <= 0.0 {
-                        continue;
+                        let reference = match closes.get(symbol) {
+                            Some((close, at)) if at.elapsed() < CLOSE_TTL => *close,
+                            _ => {
+                                let close = client
+                                    .copy_rates_from_pos(symbol, TIMEFRAME_D1, 0, 2)
+                                    .ok()
+                                    .and_then(|rows| match rows.len() {
+                                        0 => None,
+                                        1 => Some(rows[0].open),
+                                        _ => Some(rows[rows.len() - 2].close),
+                                    })
+                                    .unwrap_or(price);
+                                closes.insert(symbol.clone(), (close, Instant::now()));
+                                close
+                            }
+                        };
+                        let time = connection.utc_ms(if tick.time_msc > 0 {
+                            tick.time_msc
+                        } else {
+                            tick.time * 1000
+                        });
+                        let time = Utc.timestamp_millis_opt(time).single().unwrap_or_default();
+                        events.push((symbol.clone(), Quote::new(price, reference, time)));
                     }
-                    let reference = match closes.get(symbol) {
-                        Some((close, at)) if at.elapsed() < CLOSE_TTL => *close,
-                        _ => {
-                            let close = client
-                                .copy_rates_from_pos(symbol, TIMEFRAME_D1, 0, 2)
-                                .ok()
-                                .and_then(|rows| match rows.len() {
-                                    0 => None,
-                                    1 => Some(rows[0].open),
-                                    _ => Some(rows[rows.len() - 2].close),
-                                })
-                                .unwrap_or(price);
-                            closes.insert(symbol.clone(), (close, Instant::now()));
-                            close
-                        }
-                    };
-                    let time = connection.utc_ms(if tick.time_msc > 0 {
-                        tick.time_msc
-                    } else {
-                        tick.time * 1000
-                    });
-                    let time = Utc.timestamp_millis_opt(time).single().unwrap_or_default();
-                    events.push((symbol.clone(), Quote::new(price, reference, time)));
+                    std::thread::sleep(QUOTE_POLL);
                 }
-                if failures >= 3 {
-                    eprintln!("MT5 quotes stream ended");
-                    return;
-                }
-                std::thread::sleep(QUOTE_POLL);
             }
             eprintln!("MT5 quotes stream ended");
         });

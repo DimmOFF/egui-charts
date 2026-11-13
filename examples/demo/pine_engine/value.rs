@@ -36,6 +36,30 @@ pub fn lock_matrix(matrix: &MatrixRef) -> MutexGuard<'_, Matrix> {
     matrix.lock().unwrap_or_else(|error| error.into_inner())
 }
 
+/// A Pine map: its entries in insertion order, shared by every variable that refers to it.
+///
+/// shortcut: keys are looked up by linear scan, which is fine for the small maps scripts keep;
+/// switch to a hash index if a script ever builds thousands of entries.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Map {
+    pub entries: Vec<(Value, Value)>,
+}
+
+impl Map {
+    /// The position of `key` among the entries, when the map holds it.
+    pub fn find(&self, key: &Value) -> Option<usize> {
+        self.entries.iter().position(|(entry, _)| entry == key)
+    }
+}
+
+/// A map shared between the variables that refer to it.
+pub type MapRef = Arc<Mutex<Map>>;
+
+/// The contents of a map, whichever thread last wrote them.
+pub fn lock_map(map: &MapRef) -> MutexGuard<'_, Map> {
+    map.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 /// A Pine array, shared by every variable that refers to it, as Pine arrays are references.
 /// The chart runs a script off the UI thread, so the shared cell is a `Mutex`.
 pub type ArrayRef = Arc<Mutex<Vec<Value>>>;
@@ -70,6 +94,8 @@ pub enum Value {
     Lambda(Arc<Lambda>),
     /// A Pine matrix.
     Matrix(MatrixRef),
+    /// A Pine map.
+    Map(MapRef),
     /// The plot a `plot()` call declared, for `fill()`.
     Plot(usize),
 }
@@ -86,6 +112,7 @@ impl PartialEq for Value {
             (Value::Object(first), Value::Object(second)) => Arc::ptr_eq(first, second),
             (Value::Lambda(first), Value::Lambda(second)) => Arc::ptr_eq(first, second),
             (Value::Matrix(first), Value::Matrix(second)) => Arc::ptr_eq(first, second),
+            (Value::Map(first), Value::Map(second)) => Arc::ptr_eq(first, second),
             (Value::Plot(first), Value::Plot(second)) => first == second,
             (Value::Na, Value::Na) => true,
             _ => false,
@@ -158,6 +185,14 @@ impl Value {
     pub fn matrix(&self) -> Option<MatrixRef> {
         match self {
             Value::Matrix(matrix) => Some(matrix.clone()),
+            _ => None,
+        }
+    }
+
+    /// The map this value is, when it is one.
+    pub fn map(&self) -> Option<MapRef> {
+        match self {
+            Value::Map(map) => Some(map.clone()),
             _ => None,
         }
     }

@@ -2015,7 +2015,7 @@ pub fn display(value: &Value) -> String {
         Value::Bool(flag) => flag.to_string(),
         Value::Str(text) => text.clone(),
         Value::Color(color) => format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b()),
-        Value::Num(_) | Value::Na | Value::Array(_) | Value::Object(_) | Value::Lambda(_) | Value::Matrix(_) | Value::Plot(_) => {
+        Value::Num(_) | Value::Na | Value::Array(_) | Value::Object(_) | Value::Lambda(_) | Value::Matrix(_) | Value::Map(_) | Value::Plot(_) => {
             "NaN".to_owned()
         }
     }
@@ -3048,6 +3048,87 @@ fn matrix_known(name: &str, args: &[Value]) -> Option<Value> {
                         .all(|column| fixed.values[row * fixed.columns + column] == 0.0)
                 }))
         }),
+        _ => return None,
+    })
+}
+
+/// Calls `map.*`; `None` for a name this subset does not run.
+pub fn map(name: &str, args: &[Value]) -> Option<Value> {
+    const NAMES: &[&str] = &[
+        "new", "put", "get", "contains", "remove", "size", "keys", "values", "clear", "copy",
+    ];
+    if !NAMES.contains(&name) {
+        return None;
+    }
+    let handle = || args.first().and_then(Value::map);
+    Some(match name {
+        "new" => Value::Map(std::sync::Arc::new(std::sync::Mutex::new(
+            value::Map::default(),
+        ))),
+        "put" => {
+            let handle = handle()?;
+            let key = args.get(1)?.clone();
+            let entry = args.get(2).cloned().unwrap_or(Value::Na);
+            let mut fixed = value::lock_map(&handle);
+            match fixed.find(&key) {
+                Some(at) => fixed.entries[at].1 = entry,
+                None => fixed.entries.push((key, entry)),
+            }
+            Value::Na
+        }
+        "get" => {
+            let handle = handle()?;
+            let key = args.get(1)?;
+            let fixed = value::lock_map(&handle);
+            fixed
+                .find(key)
+                .map_or(Value::Na, |at| fixed.entries[at].1.clone())
+        }
+        "contains" => {
+            let handle = handle()?;
+            let key = args.get(1)?;
+            Value::Bool(value::lock_map(&handle).find(key).is_some())
+        }
+        "remove" => {
+            let handle = handle()?;
+            let key = args.get(1)?;
+            let mut fixed = value::lock_map(&handle);
+            if let Some(at) = fixed.find(key) {
+                fixed.entries.remove(at);
+            }
+            Value::Na
+        }
+        "size" => {
+            let handle = handle()?;
+            Value::Num(value::lock_map(&handle).entries.len() as f64)
+        }
+        "keys" | "values" => {
+            let handle = handle()?;
+            let fixed = value::lock_map(&handle);
+            Value::array_of(
+                fixed
+                    .entries
+                    .iter()
+                    .map(|(key, entry)| {
+                        if name == "keys" {
+                            key.clone()
+                        } else {
+                            entry.clone()
+                        }
+                    })
+                    .collect(),
+            )
+        }
+        "clear" => {
+            let handle = handle()?;
+            value::lock_map(&handle).entries.clear();
+            Value::Na
+        }
+        "copy" => {
+            let handle = handle()?;
+            let copied = value::lock_map(&handle).clone();
+            Value::Map(std::sync::Arc::new(std::sync::Mutex::new(copied)))
+        }
         _ => return None,
     })
 }

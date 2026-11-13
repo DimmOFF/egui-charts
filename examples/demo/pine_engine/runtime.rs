@@ -1501,6 +1501,13 @@ impl<'a> Evaluator<'a> {
                 None => self.unsupported(line, &name),
             };
         }
+        if let Some(rest) = name.strip_prefix("map.") {
+            let values: Vec<Value> = args.iter().map(|arg| self.eval(&arg.value)).collect();
+            return match builtins::map(rest, &values) {
+                Some(value) => value,
+                None => self.unsupported(line, &name),
+            };
+        }
         // `line.new(x1, y1, x2, y2)`, `box.get_left(box)` and the rest of the drawing API.
         if callee.len() == 2
             && let Some(kind) = drawing_kind(&callee[0])
@@ -1569,6 +1576,14 @@ impl<'a> Evaluator<'a> {
                 let mut values = vec![Value::Matrix(items)];
                 values.extend(args.iter().map(|arg| self.eval(&arg.value)));
                 if let Some(result) = builtins::matrix(method, &values) {
+                    return result;
+                }
+            }
+            // `m.get("key")` reads a map through its method form.
+            if let Some(entries) = value.map() {
+                let mut values = vec![Value::Map(entries)];
+                values.extend(args.iter().map(|arg| self.eval(&arg.value)));
+                if let Some(result) = builtins::map(method, &values) {
                     return result;
                 }
             }
@@ -3757,6 +3772,36 @@ plot(close)
         assert_eq!(output.plots[2].values[2], 3.0);
         assert_eq!(output.plots[3].values[2], 3.0);
         assert_eq!(output.plots[4].values[2], 3.0);
+    }
+
+    #[test]
+    fn maps_and_chart_times_run_without_diagnostics() {
+        let script = r#"indicator("Maps", overlay=true)
+m = map.new<string, float>()
+map.put(m, "a", close)
+map.put(m, "b", high)
+map.put(m, "a", low)
+plot(map.get(m, "a"))
+plot(map.size(m))
+plot(map.contains(m, "b") ? 1 : 0)
+keys = map.keys(m)
+plot(array.size(keys))
+map.remove(m, "a")
+plot(map.size(m))
+plot(chart.left_visible_bar_time > 0 ? 1 : 0)
+plot(chart.right_visible_bar_time > 0 ? 1 : 0)
+plot(str.length(str.format_time(time, "yyyy-MM-dd")))
+"#;
+        let output = run(script, &[1.0, 2.0, 3.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let at = |index: usize| output.plots[index].values[2];
+        // `map.put` replaces an existing key, and `remove` drops it.
+        assert_eq!(at(0), 2.0);
+        assert_eq!(at(1), 2.0);
+        assert_eq!(at(2), 1.0);
+        assert_eq!(at(3), 2.0);
+        assert_eq!(at(4), 1.0);
+        assert_eq!(at(7), 10.0);
     }
 
     #[test]

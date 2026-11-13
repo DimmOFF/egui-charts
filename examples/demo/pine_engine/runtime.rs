@@ -1243,6 +1243,20 @@ impl<'a> Evaluator<'a> {
         method: &str,
         args: &[Arg],
     ) -> Option<Value> {
+        // Every drawing and user-type instance has a `copy()` that starts a new object from the
+        // same fields; a copied drawing is drawn too.
+        if method == "copy" {
+            let fields = value::lock_object(object);
+            let is_drawing = fields.contains_key("__kind");
+            let copy = Value::object_of(fields.clone());
+            drop(fields);
+            if is_drawing
+                && let Some(inner) = copy.object()
+            {
+                self.drawings.push(inner);
+            }
+            return Some(copy);
+        }
         let is_time = {
             let fields = value::lock_object(object);
             if !fields.contains_key("__kind") {
@@ -4433,6 +4447,67 @@ alertcondition(bull, "Bull", "Bull signal")
         assert_eq!(output.plots[0].values[3], 3.0);
         assert_eq!(output.plots[1].values[3], 2.0);
         assert_eq!(output.plots[2].values[3], 6.0);
+    }
+
+    #[test]
+    fn user_types_maps_and_method_calls_run_without_diagnostics() {
+        let script = r#"indicator("Odds2", overlay=true)
+type Point
+    float x
+    float y
+    string label = "p"
+p = Point.new(1, 2)
+p2 = p.copy()
+p2.x := 5
+plot(p.x, "x")
+plot(p2.x, "x2")
+plot(p.label == "p" ? 1 : 0, "label")
+m = matrix.new<float>(2, 2, 0)
+m.set(0, 0, 3)
+m.set(1, 1, 4)
+plot(m.get(0, 0), "m00")
+plot(m.det(), "det")
+arr = array.from(3, 1, 2)
+arr.push(4)
+plot(arr.size(), "size")
+plot(arr.get(1), "get")
+arr.sort()
+plot(arr.get(0), "sorted")
+vals = map.new<string, float>()
+map.put(vals, "a", 1)
+plot(map.get(vals, "a"), "map")
+plot(map.contains(vals, "a") ? 1 : 0, "has")
+sum = 0.0
+for i = 0 to 2
+    sum += close[i]
+plot(sum, "sum")
+n = 0
+while n < 3
+    n += 1
+plot(n, "while")
+l = label.new(bar_index, high, "hi", color=color.red)
+plot(label.get_text(l) == "hi" ? 1 : 0, "text")
+ln = line.new(0, low, 0, high, extend=extend.both)
+plot(line.get_price(ln, 0) > 0 ? 1 : 0, "price")
+plot(str.split("a,b", ",").size(), "split")
+plot(array.from(1, 2).avg(), "avg")
+"#;
+        let output = run(script, &[10.0, 11.0, 12.0, 13.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let at = |title: &str| {
+            output
+                .plots
+                .iter()
+                .find(|plot| plot.title == title)
+                .unwrap()
+                .values[3]
+        };
+        assert_eq!(at("x"), 1.0);
+        assert_eq!(at("x2"), 5.0);
+        assert_eq!(at("det"), 12.0);
+        assert_eq!(at("sum"), 36.0);
+        assert_eq!(at("while"), 3.0);
+        assert_eq!(at("split"), 2.0);
     }
 
     #[test]

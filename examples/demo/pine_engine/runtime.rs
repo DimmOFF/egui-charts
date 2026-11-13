@@ -937,7 +937,9 @@ impl<'a> Evaluator<'a> {
             "math.pi" => return Value::Num(std::f64::consts::PI),
             "math.e" => return Value::Num(std::f64::consts::E),
             "barstate.isfirst" => return Value::Bool(self.bar == 0),
-            "barstate.islast" => return Value::Bool(self.bar + 1 == self.bars.len()),
+            "barstate.islast" | "barstate.islastconfirmedhistory" => {
+                return Value::Bool(self.bar + 1 == self.bars.len());
+            }
             "barstate.isconfirmed" | "barstate.isnew" => return Value::Bool(true),
             "barstate.isrealtime" => return Value::Bool(false),
             "barstate.ishistory" => return Value::Bool(true),
@@ -947,6 +949,9 @@ impl<'a> Evaluator<'a> {
             "syminfo.prefix" => return Value::Str(self.context.exchange.clone()),
             "syminfo.root" => return Value::Str(self.context.root.clone()),
             "syminfo.type" => return Value::Str(self.context.symbol_type.clone()),
+            // The instrument has no separate long name here, and the chart runs the regular session.
+            "syminfo.description" => return Value::Str(self.context.symbol.clone()),
+            "syminfo.session" => return Value::Str("regular".to_owned()),
             "syminfo.mintick" => return Value::Num(self.context.mintick),
             // A contract's point value is unknown to the engine; one is the unit contract.
             "syminfo.pointvalue" => return Value::Num(1.0),
@@ -4414,6 +4419,46 @@ alertcondition(bull, "Bull", "Bull signal")
             .find(|drawing| drawing.kind == DrawingKind::Line && drawing.first.0 == 2.0)
             .unwrap();
         assert_eq!(timed.second.0, 2.0);
+    }
+
+    #[test]
+    fn rarer_script_idioms_run_without_diagnostics() {
+        let script = r#"indicator("Idioms", overlay=true)
+grade = input.string("A", "Grade", options=["A", "B"])
+tf = input.timeframe("60")
+since = input.time(timestamp("2024-01-01T00:00:00"))
+src = switch grade
+    "A" => close
+    "B" => open
+    => hl2
+[otherOpen, otherHigh] = request.security(syminfo.tickerid, tf, [open, high], lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+ts = timestamp(2024, 1, 1, 0, 0)
+var array<label> olds = array.new<label>()
+array.push(olds, label.new(bar_index, high, "x"))
+if barstate.islastconfirmedhistory and array.size(olds) > 0
+    for old in olds
+        old.delete()
+    array.clear(olds)
+b = box.new(0, high, 1, low)
+plot(b.get_top())
+plot(str.length(str.format("{0,date,yyyy-MM-dd}", ts)))
+plot(ts > 0 ? 1 : 0)
+plot(time(since) >= 0 ? 1 : 0)
+plot(math.random(0, 1, 42) >= 0 ? 1 : 0)
+plot(src == close ? 1 : 0)
+plot(barstate.islastconfirmedhistory ? 1 : 0)
+"#;
+        let output = run(script, &[10.0, 11.0, 12.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.plots[1].values[2], 10.0);
+        assert_eq!(output.plots[6].values[2], 1.0);
+        // Every label the loop deleted is gone from the drawings.
+        assert!(
+            output
+                .drawings
+                .iter()
+                .all(|drawing| drawing.kind != DrawingKind::Label)
+        );
     }
 
     #[test]

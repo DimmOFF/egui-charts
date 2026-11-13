@@ -955,6 +955,26 @@ impl<'a> Evaluator<'a> {
             // theme ever needs them.
             "chart.bg_color" => return Value::Color(Color32::TRANSPARENT),
             "chart.fg_color" => return Value::Color(Color32::from_rgb(209, 212, 220)),
+            // A study is computed over the whole series it holds, so all of it counts as visible.
+            "chart.left_visible_bar_time" => {
+                return Value::Num(
+                    self.bars
+                        .first()
+                        .map_or(0.0, |bar| bar.time.timestamp_millis() as f64),
+                );
+            }
+            "chart.right_visible_bar_time" => {
+                return Value::Num(self.bars.last().map_or(0.0, |bar| {
+                    (bar.time.timestamp_millis() + self.context.timeframe.duration_ms()) as f64
+                }));
+            }
+            "chart.is_standard" => return Value::Bool(true),
+            "chart.is_heikinashi"
+            | "chart.is_kagi"
+            | "chart.is_linebreak"
+            | "chart.is_pnf"
+            | "chart.is_range"
+            | "chart.is_renko" => return Value::Bool(false),
     // shortcut: the chart's timezone is not passed to studies yet, so Pine sees UTC.
     "syminfo.timezone" => return Value::Str("UTC".to_owned()),
             "timeframe.period" => return Value::Str(pine_period(self.context.timeframe)),
@@ -3820,6 +3840,8 @@ plot(str.length(str.format_time(time, "yyyy-MM-dd")))
         assert_eq!(at(2), 1.0);
         assert_eq!(at(3), 2.0);
         assert_eq!(at(4), 1.0);
+        assert_eq!(at(5), 1.0);
+        assert_eq!(at(6), 1.0);
         assert_eq!(at(7), 10.0);
     }
 
@@ -3875,6 +3897,24 @@ plot(display=display.none)
 "#;
         let output = run(script, &[1.0, 2.0]);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    }
+
+    #[test]
+    fn numeric_edges_answer_as_pine_documents() {
+        let output = run(
+            "indicator(\"Edge\")\nplot(array.size(array.slice(array.from(1, 2, 3, 4), 1, 3)))\nplot(math.round(1.2345, 2))\nplot(math.round(2.5))\nplot(str.tonumber(\"5.5\"))\nplot(array.get(array.slice(array.from(1, 2, 3, 4), 1, 3), 1))\nplot(str.length(str.substring(\"abcdef\", 2)))\nplot(math.sign(-3))\nplot(str.tonumber(\"abc\"))\n",
+            &[1.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let at = |index: usize| output.plots[index].values[0];
+        assert_eq!(at(0), 2.0);
+        assert_eq!(at(1), 1.23);
+        assert_eq!(at(2), 3.0);
+        assert_eq!(at(3), 5.5);
+        assert_eq!(at(4), 3.0);
+        assert_eq!(at(5), 4.0);
+        assert_eq!(at(6), -1.0);
+        assert!(at(7).is_nan());
     }
 
     #[test]

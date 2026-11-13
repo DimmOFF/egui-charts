@@ -1303,6 +1303,11 @@ impl<'a> Evaluator<'a> {
                 );
             }
             "set_xloc" => set_field(object, "xloc", argument(0)),
+            "set_extend" => set_field(object, "extend", argument(0)),
+            // The chart has no tooltip or per-drawing text alignment, so this is accepted and
+            // ignored rather than reported as missing.
+            "set_tooltip" | "set_textalign" | "set_text_halign" | "set_text_valign"
+            | "set_text_wrap" | "set_text_font_family" => {}
             "delete" => set_field(object, "__deleted", Value::Bool(true)),
             "copy" => {
                 let fields = value::lock_object(object).clone();
@@ -4367,6 +4372,62 @@ alertcondition(bull, "Bull", "Bull signal")
             .find(|drawing| drawing.kind == DrawingKind::Line && drawing.first.0 == 2.0)
             .unwrap();
         assert_eq!(timed.second.0, 2.0);
+    }
+
+    #[test]
+    fn tables_and_drawing_setters_run_without_diagnostics() {
+        let script = r#"indicator("Misc", overlay=true)
+t = table.new(position.top_right, 3, 2, bgcolor=color.new(color.black, 50), border_width=1, border_color=color.gray, frame_color=color.red, frame_width=2)
+if barstate.islast
+    table.cell(t, 0, 0, "A", bgcolor=color.blue, text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 0, str.format("{0} {1,number,#.##}", "x", 1.234))
+    table.merge_cells(t, 0, 1, 2, 1)
+    table.set_position(t, position.bottom_left)
+    table.set_bgcolor(t, color.new(color.navy, 80))
+    table.set_border_color(t, color.gray)
+    table.set_border_width(t, 2)
+    table.cell_set_text_color(t, 0, 0, color.yellow)
+    table.cell_set_bgcolor(t, 0, 0, color.olive)
+    table.cell_set_text(t, 1, 1, "upd")
+    table.cell_set_text_size(t, 1, 1, size.large)
+l = label.new(bar_index, high, "x")
+label.set_style(l, label.style_label_left)
+label.set_textcolor(l, color.red)
+label.set_size(l, size.huge)
+label.set_textalign(l, text.align_center)
+label.set_tooltip(l, "tip")
+ln = line.new(0, low, 1, high)
+line.set_color(ln, color.red)
+line.set_width(ln, 2)
+line.set_style(ln, line.style_dashed)
+line.set_extend(ln, extend.both)
+bx = box.new(0, high, 1, low)
+box.set_bgcolor(bx, color.blue)
+box.set_border_color(bx, color.red)
+box.set_border_width(bx, 2)
+box.set_border_style(bx, line.style_dotted)
+box.set_text(bx, "t")
+box.set_text_color(bx, color.white)
+box.set_text_size(bx, size.small)
+box.set_text_halign(bx, text.align_left)
+plot(close)
+"#;
+        let output = run(script, &[10.0, 11.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let line = output
+            .drawings
+            .iter()
+            .find(|drawing| drawing.kind == DrawingKind::Line)
+            .unwrap();
+        assert_eq!(line.color, Color32::RED);
+        assert_eq!(line.style, egui_charts::model::LineStyle::Dashed);
+        let rectangle = output
+            .drawings
+            .iter()
+            .find(|drawing| drawing.kind == DrawingKind::Box)
+            .unwrap();
+        assert_eq!(rectangle.fill_color, Some(Color32::BLUE));
+        assert_eq!(rectangle.text, "t");
     }
 
     #[test]

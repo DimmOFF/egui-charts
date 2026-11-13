@@ -3721,6 +3721,141 @@ mod tests {
     }
 
     #[test]
+    fn rarer_calls_run_without_diagnostics() {
+        let script = r#"indicator("Rare", overlay=true)
+sess = input.session("0930-1600", "Session")
+tf = input.timeframe("60", "TF")
+sym = input.symbol("BINANCE:BTCUSDT", "Symbol")
+col = input.color(color.red, "Colour")
+txt = input.text_area("hello", "Text")
+prc = input.price(100.5, "Price")
+levels = ta.pivot_point_levels("Traditional", timeframe.change("D"))
+plot(array.size(levels))
+m = matrix.new<float>(2, 2, 1)
+matrix.set(m, 0, 0, 4)
+matrix.set(m, 1, 1, 7)
+matrix.swap_rows(m, 0, 1)
+plot(matrix.get(m, 0, 1))
+matrix.add_row(m, 1, array.from(2, 3))
+plot(matrix.rows(m))
+removed = matrix.remove_col(m, 0)
+plot(array.size(removed))
+plot(matrix.rank(matrix.identity(3)))
+var table t = table.new(position.bottom_left, 2, 1)
+if barstate.islast
+    table.cell(t, 0, 0, str.tostring(prc) + txt + sess + tf + sym)
+    table.merge_cells(t, 0, 0, 1, 0)
+    lb = label.new(bar_index, high, "hi")
+    label.set_xy(lb, bar_index - 1, low)
+plot(close)
+"#;
+        let output = run(script, &[1.0, 2.0, 3.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        // Pine's eleven pivot slots, even while the levels themselves are `na`.
+        assert_eq!(output.plots[0].values[2], 11.0);
+        assert_eq!(output.plots[1].values[2], 7.0);
+        assert_eq!(output.plots[2].values[2], 3.0);
+        assert_eq!(output.plots[3].values[2], 3.0);
+        assert_eq!(output.plots[4].values[2], 3.0);
+    }
+
+    #[test]
+    fn a_feature_heavy_script_runs_without_diagnostics() {
+        let script = r#"indicator("Sink", overlay=true)
+n = input.int(10, minval=1)
+src = input.source(close, "Source")
+ma = ta.sma(src, n)
+dev = ta.stdev(src, n)
+upper = ma + 2 * dev
+lower = ma - 2 * dev
+p = plot(upper)
+q = plot(lower)
+fill(p, q, color.new(color.blue, 90))
+hline(50, "lvl", color=color.gray, linestyle=hline.style_dashed)
+plotchar(ta.crossover(src, ma), "Up", "^", location.belowbar, color=color.green)
+barcolor(src > ma ? color.green : color.red)
+rsiVal = ta.rsi(src, 14)
+zone = switch
+    rsiVal > 70 => "over"
+    rsiVal < 30 => "under"
+    => "mid"
+var string lastText = ""
+if barstate.islast
+    lastText := str.format("RSI {0,number,#.##} in {1}", rsiVal, zone)
+    label.new(bar_index, high, lastText, style=label.style_label_down, color=color.new(color.blue, 20))
+ln = line.new(bar_index - 1, low, bar_index, high, extend=extend.right, style=line.style_dotted)
+line.set_extend(ln, extend.none)
+m = matrix.new<float>(2, 3)
+matrix.set(m, 0, 0, 1.5)
+matrix.fill(m, 9)
+parts = str.split("a,b,c", ",")
+plot(array.size(parts))
+plot(str.tonumber(array.get(parts, 1)))
+plot(matrix.get(m, 0, 0))
+"#;
+        let output = run(script, &[1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.plots.last().unwrap().values[4], 9.0);
+    }
+
+    #[test]
+    fn pivot_levels_answer_in_pine_slot_order() {
+        // One bar: open 10, high 11, low 9, close 10.
+        let output = run(
+            "indicator(\"T\")\nlevels = ta.pivot_point_levels(\"Traditional\", false, true)\nplot(array.get(levels, 0))\nplot(array.get(levels, 1))\nplot(array.get(levels, 2))\nplot(array.get(levels, 10))\nfib = ta.pivot_point_levels(\"Fibonacci\", false, true)\nplot(array.get(fib, 1))\nwoodie = ta.pivot_point_levels(\"Woodie\", false, true)\nplot(array.get(woodie, 0))\n",
+            &[10.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.plots[0].values[0], 10.0);
+        assert_eq!(output.plots[1].values[0], 11.0);
+        assert_eq!(output.plots[2].values[0], 9.0);
+        assert_eq!(output.plots[3].values[0], 5.0);
+        assert!((output.plots[4].values[0] - 10.764).abs() < 1e-9);
+        // Woodie has no developing levels.
+        assert!(output.plots[5].values[0].is_nan());
+    }
+
+    #[test]
+    fn a_typical_script_runs_without_diagnostics() {
+        // Written flush left: a `\`-continued literal would drop the indentation Pine needs.
+        let script = r#"indicator("T", overlay=true)
+len = input.int(20, "Length", minval=1)
+showTable = input.bool(true, "Table")
+emaFast = ta.ema(close, len)
+emaSlow = ta.ema(close, len * 2)
+[macdLine, signalLine, hist] = ta.macd(close, 12, 26, 9)
+[st, dir] = ta.supertrend(3.0, 10)
+bull = ta.crossover(emaFast, emaSlow)
+bear = ta.crossunder(emaFast, emaSlow)
+plot(emaFast, "Fast", color=color.new(color.teal, 0), linewidth=2)
+plot(emaSlow, "Slow", color=color.orange)
+plot(hist, "Hist", style=plot.style_columns, color=hist >= 0 ? color.green : color.red)
+plotshape(bull, "Bull", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(bear, "Bear", shape.triangledown, location.abovebar, color.red)
+bgcolor(dir > 0 ? color.new(color.green, 90) : color.new(color.red, 90))
+type Setup
+    float price
+    int bars
+var setups = array.new<Setup>()
+if bull
+    array.push(setups, Setup.new(close, bar_index))
+total = 0.0
+for setup in setups
+    total += setup.price
+if showTable and barstate.islast
+    t = table.new(position.top_right, 2, 2, border_width=1)
+    table.cell(t, 0, 0, "Total", bgcolor=color.gray, text_color=color.white)
+    table.cell(t, 1, 0, str.tostring(total, format.mintick))
+alertcondition(bull, "Bull", "Bull signal")
+"#;
+        let output = run(script, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        // `ta.ema` needs `len` bars, so only the first bars are still warming up.
+        assert!(!output.plots.is_empty());
+        assert!(output.candles.is_empty());
+    }
+
+    #[test]
     fn tuple_assignment_takes_the_values_a_function_answers_with() {
         let output = run(
             "indicator(\"T\")\npair() =>\n    [close, close * 2]\n[a, b] = pair()\nplot(a + b)\n",

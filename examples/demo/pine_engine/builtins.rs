@@ -59,6 +59,10 @@ pub struct TaState {
     half: VecDeque<f64>,
     full: VecDeque<f64>,
     smooth: VecDeque<f64>,
+    /// The anchored period of `ta.pivot_point_levels`: its open, high, low and close.
+    pivot_period: Option<(f64, f64, f64, f64)>,
+    /// The levels the last closed period held, in Pine's eleven slots.
+    pivot_held: Option<[f64; 11]>,
 }
 
 /// One series' running average between bars, for the calls that need more than one.
@@ -231,6 +235,7 @@ pub fn ta(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Option<
         "trix",
         "max",
         "min",
+        "pivot_point_levels",
     ];
     if !NAMES.contains(&name) {
         return None;
@@ -251,6 +256,7 @@ pub fn ta_parameters(name: &str) -> Option<&'static [&'static str]> {
         "atr" | "wpr" | "mfi" | "cmf" => &["length"],
         "ao" | "accdist" | "iii" | "nvi" | "pvi" | "pvt" | "wad" => &[],
         "trix" => &["source", "length"],
+        "pivot_point_levels" => &["type", "anchor", "developing"],
         "barssince" => &["condition"],
         "valuewhen" => &["condition", "source", "occurrence"],
         "pivothigh" | "pivotlow" => &["source", "leftbars", "rightbars"],
@@ -1282,8 +1288,131 @@ fn ta_known(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Optio
                 _ => na(),
             }
         }
-        _ => None,
+        "pivot_point_levels" => {
+            let kind = args.first().and_then(Value::text).unwrap_or("Traditional");
+            let anchor = args.get(1).and_then(Value::flag).unwrap_or(false);
+            let developing = args.get(2).and_then(Value::flag).unwrap_or(false);
+            // The anchor closes the period that just ended and opens the next one; its levels
+            // are the ones this bar and the bars after it read.
+            if anchor {
+                if let Some((open, high, low, close)) = state.pivot_period {
+                    state.pivot_held = Some(pivot_levels(kind, open, high, low, close, bar.open));
+                }
+                state.pivot_period = Some((bar.open, bar.high, bar.low, bar.close));
+            } else {
+                state.pivot_period = Some(match state.pivot_period {
+                    Some((open, high, low, _close)) => {
+                        (open, high.max(bar.high), low.min(bar.low), bar.close)
+                    }
+                    None => (bar.open, bar.high, bar.low, bar.close),
+                });
+            }
+            // Woodie needs the next period's open, so it has no developing levels.
+            let levels = if developing && kind != "Woodie" {
+                let (open, high, low, close) = state.pivot_period.unwrap_or_default();
+                pivot_levels(kind, open, high, low, close, f64::NAN)
+            } else {
+                state.pivot_held.unwrap_or([f64::NAN; 11])
+            };
+            Some(Value::array_of(levels.into_iter().map(number_value).collect()))
+        }        _ => None,
     }
+}
+
+/// Pine's eleven pivot slots `[P, R1, S1, R2, S2, R3, S3, R4, S4, R5, S5]` for one period;
+/// the levels a type does not compute stay `na`.
+fn pivot_levels(
+    kind: &str,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+    next_open: f64,
+) -> [f64; 11] {
+    let mut levels = [f64::NAN; 11];
+    if !high.is_finite() || !low.is_finite() || !close.is_finite() {
+        return levels;
+    }
+    let range = high - low;
+    match kind {
+        "Woodie" | "Classic" => {
+            let pivot = if kind == "Classic" {
+                (high + low + close) / 3.0
+            } else {
+                // `next_open` is the open of the period the levels are for.
+                let opening = if next_open.is_finite() { next_open } else { close };
+                (high + low + 2.0 * opening) / 4.0
+            };
+            levels[0] = pivot;
+            levels[1] = 2.0 * pivot - low;
+            levels[2] = 2.0 * pivot - high;
+            levels[3] = pivot + range;
+            levels[4] = pivot - range;
+            if kind == "Woodie" {
+                levels[5] = high + 2.0 * (pivot - low);
+                levels[6] = low - 2.0 * (high - pivot);
+                levels[7] = levels[5] + range;
+                levels[8] = levels[6] - range;
+            } else {
+                levels[5] = pivot + 2.0 * range;
+                levels[6] = pivot - 2.0 * range;
+                levels[7] = pivot + 3.0 * range;
+                levels[8] = pivot - 3.0 * range;
+            }
+        }
+        "Camarilla" => {
+            levels[1] = close + 1.1 * range / 12.0;
+            levels[2] = close - 1.1 * range / 12.0;
+            levels[3] = close + 1.1 * range / 6.0;
+            levels[4] = close - 1.1 * range / 6.0;
+            levels[5] = close + 1.1 * range / 4.0;
+            levels[6] = close - 1.1 * range / 4.0;
+            levels[7] = close + 1.1 * range / 2.0;
+            levels[8] = close - 1.1 * range / 2.0;
+            if low != 0.0 {
+                levels[9] = high / low * close;
+                levels[10] = close - (levels[9] - close);
+            }
+        }
+        "DM" => {
+            let total = if open == close {
+                high + low + 2.0 * close
+            } else if close > open {
+                2.0 * high + low + close
+            } else {
+                2.0 * low + high + close
+            };
+            levels[0] = total / 4.0;
+            levels[1] = total / 2.0 - low;
+            levels[2] = total / 2.0 - high;
+        }
+        "Fibonacci" => {
+            let pivot = (high + low + close) / 3.0;
+            levels[0] = pivot;
+            levels[1] = pivot + 0.382 * range;
+            levels[2] = pivot - 0.382 * range;
+            levels[3] = pivot + 0.618 * range;
+            levels[4] = pivot - 0.618 * range;
+            levels[5] = pivot + range;
+            levels[6] = pivot - range;
+        }
+        // `Traditional`, and any name this engine does not know.
+        _ => {
+            let pivot = (high + low + close) / 3.0;
+            levels[0] = pivot;
+            levels[1] = 2.0 * pivot - low;
+            levels[2] = 2.0 * pivot - high;
+            levels[3] = pivot + range;
+            levels[4] = pivot - range;
+            levels[5] = 2.0 * pivot + (high - 2.0 * low);
+            levels[6] = 2.0 * pivot - (2.0 * high - low);
+            levels[7] = 3.0 * pivot + (high - 3.0 * low);
+            levels[8] = 3.0 * pivot - (3.0 * high - low);
+            levels[9] = 4.0 * pivot + (high - 4.0 * low);
+            levels[10] = 4.0 * pivot - (4.0 * high - low);
+        }
+    }
+    levels
 }
 
 /// The mean of a full window, or `None` while it warms up.
@@ -2321,6 +2450,23 @@ pub fn matrix(name: &str, args: &[Value]) -> Option<Value> {
         "inv",
         "sort",
         "reverse",
+        "add_row",
+        "add_col",
+        "remove_row",
+        "remove_col",
+        "swap_rows",
+        "swap_columns",
+        "pow",
+        "mod",
+        "kron",
+        "rank",
+        "min_index",
+        "max_index",
+        "is_antidiagonal",
+        "is_antisymmetric",
+        "is_binary",
+        "is_stochastic",
+        "is_triangular",
     ];
     if !NAMES.contains(&name) {
         return None;
@@ -2665,6 +2811,243 @@ fn matrix_known(name: &str, args: &[Value]) -> Option<Value> {
             fixed.values = rows.concat();
             Value::Na
         }
+        "add_row" | "add_col" => {
+            let handle = matrix()?;
+            let at = count(1)?;
+            // Without an array the new line is `na`, as Pine documents.
+            let mut values: Vec<f64> = match args.get(2).and_then(Value::array) {
+                Some(items) => value::lock(&items).iter().filter_map(number).collect(),
+                None => Vec::new(),
+            };
+            let mut fixed = value::lock_matrix(&handle);
+            let columns = fixed.columns;
+            if name == "add_row" {
+                if at > fixed.rows {
+                    return Some(Value::Na);
+                }
+                values.resize(columns, f64::NAN);
+                let mut rows: Vec<Vec<f64>> = fixed
+                    .values
+                    .chunks(columns)
+                    .map(<[f64]>::to_vec)
+                    .collect();
+                rows.insert(at, values);
+                fixed.rows += 1;
+                fixed.values = rows.concat();
+            } else {
+                if at > columns {
+                    return Some(Value::Na);
+                }
+                values.resize(fixed.rows, f64::NAN);
+                for row in 0..fixed.rows {
+                    let start = row * columns;
+                    fixed.values.splice(start + at..start + at, [values[row]]);
+                }
+                fixed.columns += 1;
+            }
+            Value::Na
+        }
+        "remove_row" | "remove_col" => {
+            let handle = matrix()?;
+            let at = count(1)?;
+            let mut fixed = value::lock_matrix(&handle);
+            let columns = fixed.columns;
+            let removed: Vec<f64> = if name == "remove_row" {
+                if at >= fixed.rows {
+                    return Some(Value::Na);
+                }
+                fixed.rows -= 1;
+                fixed.values.drain(at * columns..(at + 1) * columns).collect()
+            } else {
+                if at >= columns {
+                    return Some(Value::Na);
+                }
+                let mut removed = Vec::with_capacity(fixed.rows);
+                for row in (0..fixed.rows).rev() {
+                    removed.push(fixed.values.remove(row * columns + at));
+                }
+                removed.reverse();
+                fixed.columns -= 1;
+                removed
+            };
+            Value::array_of(removed.into_iter().map(Value::Num).collect())
+        }
+        "swap_rows" | "swap_columns" => {
+            let handle = matrix()?;
+            let first = count(1)?;
+            let second = count(2)?;
+            let mut fixed = value::lock_matrix(&handle);
+            let columns = fixed.columns;
+            let rows = if name == "swap_rows" { fixed.rows } else { columns };
+            if first >= rows || second >= rows {
+                return Some(Value::Na);
+            }
+            for at in 0..if name == "swap_rows" { columns } else { fixed.rows } {
+                let (first, second) = if name == "swap_rows" {
+                    (first * columns + at, second * columns + at)
+                } else {
+                    (at * columns + first, at * columns + second)
+                };
+                fixed.values.swap(first, second);
+            }
+            Value::Na
+        }
+        "pow" | "mod" => {
+            let first_handle = matrix()?;
+            let first = value::lock_matrix(&first_handle);
+            let second = match args.get(1)? {
+                Value::Matrix(second) => Some(value::lock_matrix(second)),
+                _ => None,
+            };
+            let scalar = number(args.get(1)?);
+            if second.as_ref().is_none_or(|second| {
+                second.rows != first.rows || second.columns != first.columns
+            }) {
+                if scalar.is_none() {
+                    return Some(Value::Na);
+                }
+            }
+            let value = make(first.rows, first.columns, f64::NAN)?;
+            if let Value::Matrix(fields) = &value {
+                let mut result = value::lock_matrix(fields);
+                for at in 0..first.values.len() {
+                    let other = second
+                        .as_ref()
+                        .map_or(scalar.unwrap_or(f64::NAN), |second| second.values[at]);
+                    result.values[at] = if name == "pow" {
+                        first.values[at].powf(other)
+                    } else {
+                        first.values[at] % other
+                    };
+                }
+            }
+            value
+        }
+        "kron" => {
+            let first_handle = matrix()?;
+            let first = value::lock_matrix(&first_handle);
+            let second_handle = args.get(1).and_then(Value::matrix)?;
+            let second = value::lock_matrix(&second_handle);
+            let value = make(first.rows * second.rows, first.columns * second.columns, f64::NAN)?;
+            if let Value::Matrix(fields) = &value {
+                let mut result = value::lock_matrix(fields);
+                let columns = first.columns * second.columns;
+                for row in 0..first.rows {
+                    for column in 0..first.columns {
+                        let scale = first.values[row * first.columns + column];
+                        for inner_row in 0..second.rows {
+                            for inner_column in 0..second.columns {
+                                result.values[(row * second.rows + inner_row) * columns
+                                    + column * second.columns
+                                    + inner_column] = scale
+                                    * second.values[inner_row * second.columns + inner_column];
+                            }
+                        }
+                    }
+                }
+            }
+            value
+        }
+        "rank" => {
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            if fixed.rows != fixed.columns {
+                return Some(Value::Na);
+            }
+            let size = fixed.rows;
+            let mut values = fixed.values.clone();
+            let mut rank = 0;
+            for column in 0..size {
+                let Some(pivot) = (rank..size).find(|row| values[row * size + column] != 0.0) else {
+                    continue;
+                };
+                for at in 0..size {
+                    values.swap(rank * size + at, pivot * size + at);
+                }
+                let pivot = values[rank * size + column];
+                for row in rank + 1..size {
+                    let factor = values[row * size + column] / pivot;
+                    for at in column..size {
+                        values[row * size + at] -= factor * values[rank * size + at];
+                    }
+                }
+                rank += 1;
+            }
+            Value::Num(rank as f64)
+        }
+        "min_index" | "max_index" => {
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            let wanted = |value: f64| value.is_finite();
+            let mut best: Option<(usize, f64)> = None;
+            for (at, value) in fixed.values.iter().copied().enumerate() {
+                if !wanted(value) {
+                    continue;
+                }
+                let better = match best {
+                    None => true,
+                    Some((_, current)) => {
+                        if name == "min_index" { value < current } else { value > current }
+                    }
+                };
+                if better {
+                    best = Some((at, value));
+                }
+            }
+            match best {
+                Some((at, _)) => Value::Num(at as f64),
+                None => Value::Na,
+            }
+        }
+        "is_antidiagonal" => Value::Bool({
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            fixed.rows == fixed.columns
+                && fixed.values.iter().enumerate().all(|(at, value)| {
+                    at / fixed.columns + at % fixed.columns == fixed.columns - 1 || *value == 0.0
+                })
+        }),
+        "is_antisymmetric" => Value::Bool({
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            fixed.rows == fixed.columns
+                && (0..fixed.rows).all(|row| {
+                    (0..fixed.columns).all(|column| {
+                        fixed.values[row * fixed.columns + column]
+                            == -fixed.values[column * fixed.columns + row]
+                    })
+                })
+        }),
+        "is_binary" => Value::Bool({
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            fixed.values.iter().all(|value| *value == 0.0 || *value == 1.0)
+        }),
+        "is_stochastic" => Value::Bool({
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            (0..fixed.rows).all(|row| {
+                let sum: f64 = (0..fixed.columns)
+                    .map(|column| fixed.values[row * fixed.columns + column])
+                    .sum();
+                (sum - 1.0).abs() <= 1e-10
+            }) && fixed
+                .values
+                .iter()
+                .all(|value| (0.0..=1.0).contains(value))
+        }),
+        "is_triangular" => Value::Bool({
+            let handle = matrix()?;
+            let fixed = value::lock_matrix(&handle);
+            fixed.rows == fixed.columns
+                && ((0..fixed.rows).all(|row| {
+                    (0..row)
+                        .all(|column| fixed.values[row * fixed.columns + column] == 0.0)
+                }) || (0..fixed.rows).all(|row| {
+                    (row + 1..fixed.columns)
+                        .all(|column| fixed.values[row * fixed.columns + column] == 0.0)
+                }))
+        }),
         _ => return None,
     })
 }

@@ -1040,6 +1040,17 @@ impl<'a> Evaluator<'a> {
                     duration == 86_400_000 || duration == 604_800_000 || duration >= 2_419_200_000,
                 );
             }
+            // `ta.tr` is the true range the series' own bars give, without a `ta.tr()` call.
+            "ta.tr" => {
+                let Some(bar) = self.bars.get(self.bar) else {
+                    return Value::Na;
+                };
+                let previous = self.bar.checked_sub(1).and_then(|at| self.bars.get(at));
+                let range = bar.high - bar.low;
+                let up = previous.map_or(0.0, |before| (bar.high - before.close).abs());
+                let down = previous.map_or(0.0, |before| (bar.low - before.close).abs());
+                return Value::Num(range.max(up).max(down));
+            }
             _ => {}
         }
         let (namespace, name) = path.split_once('.').unwrap_or(("", path));
@@ -3994,6 +4005,17 @@ mod tests {
         );
         assert_eq!(output.plots[0].values[0], 1.0);
         assert_eq!(output.plots[1].values[0], 1.0);
+    }
+
+    #[test]
+    fn the_true_range_is_a_property_and_a_call() {
+        let output = run(
+            "indicator(\"T\")\nplot(ta.tr)\nplot(ta.tr(true))\n",
+            &[1.0, 2.0, 10.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.plots[0].values, [2.0, 2.0, 9.0]);
+        assert_eq!(output.plots[1].values, [2.0, 2.0, 9.0]);
     }
 
     #[test]

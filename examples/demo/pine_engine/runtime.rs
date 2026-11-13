@@ -1047,14 +1047,27 @@ impl<'a> Evaluator<'a> {
         let argument = |index: usize, name: &str| -> Value {
             named_value(name).unwrap_or_else(|| positional(index))
         };
-        let style = |fallback: &str| -> Value {
+        let style = |index: usize, name: &str, fallback: &str| -> Value {
             Value::Str(
-                named_value("style")
-                    .and_then(|value| value.text().map(str::to_owned))
+                argument(index, name)
+                    .text()
+                    .map(str::to_owned)
                     .unwrap_or_else(|| fallback.to_owned()),
             )
         };
-        let xloc = named_value("xloc").unwrap_or_else(|| Value::Str("bar_index".to_owned()));
+        // `xloc` follows the corners in each drawing's own signature.
+        let xloc = match kind {
+            DrawingKind::Line => 4,
+            DrawingKind::Label => 3,
+            DrawingKind::Box => 8,
+            DrawingKind::Fill => usize::MAX,
+        };
+        let xloc = Value::Str(
+            argument(xloc, "xloc")
+                .text()
+                .unwrap_or("bar_index")
+                .to_owned(),
+        );
         let is_time = xloc.text() == Some("bar_time");
         let mut fields = HashMap::new();
         fields.insert("__kind".to_owned(), Value::Str(kind_name(kind).to_owned()));
@@ -1073,17 +1086,19 @@ impl<'a> Evaluator<'a> {
                 }
                 fields.insert(
                     "color".to_owned(),
-                    named_value("color").unwrap_or(Value::Color(Color32::from_rgb(33, 150, 243))),
+                    argument(6, "color")
+                        .color()
+                        .map_or(Value::Color(Color32::from_rgb(33, 150, 243)), Value::Color),
                 );
                 fields.insert(
                     "width".to_owned(),
                     Value::Num(
-                        named_value("width")
-                            .and_then(|value| value.number())
+                        argument(8, "width")
+                            .number()
                             .unwrap_or(1.0),
                     ),
                 );
-                fields.insert("style".to_owned(), style("style_solid"));
+                fields.insert("style".to_owned(), style(7, "style", "style_solid"));
             }
             DrawingKind::Label => {
                 let x = self.drawing_x_in(argument(0, "x"), is_time);
@@ -1098,24 +1113,22 @@ impl<'a> Evaluator<'a> {
                 );
                 fields.insert(
                     "color".to_owned(),
-                    named_value("color").unwrap_or(Value::Color(Color32::TRANSPARENT)),
+                    argument(5, "color")
+                        .color()
+                        .map_or(Value::Color(Color32::TRANSPARENT), Value::Color),
                 );
                 fields.insert(
                     "text_color".to_owned(),
                     named_value("textcolor")
                         .or_else(|| named_value("text_color"))
-                        .unwrap_or(Value::Color(Color32::WHITE)),
+                        .unwrap_or_else(|| positional(7))
+                        .color()
+                        .map_or(Value::Color(Color32::WHITE), Value::Color),
                 );
-                fields.insert("style".to_owned(), style("style_label_up"));
+                fields.insert("style".to_owned(), style(6, "style", "style_label_up"));
                 fields.insert(
                     "font_size".to_owned(),
-                    Value::Num(
-                        f64::from(
-                            named_value("size")
-                                .map(|value| font_size_of(&value))
-                                .unwrap_or(12.0),
-                        ),
-                    ),
+                    Value::Num(f64::from(font_size_of(&argument(8, "size")))),
                 );
             }
             DrawingKind::Box => {
@@ -1136,38 +1149,38 @@ impl<'a> Evaluator<'a> {
                 }
                 fields.insert(
                     "border_color".to_owned(),
-                    named_value("border_color").unwrap_or(Value::Color(Color32::GRAY)),
+                    argument(4, "border_color")
+                        .color()
+                        .or_else(|| named_value("color").and_then(|value| value.color()))
+                        .map_or(Value::Color(Color32::GRAY), Value::Color),
                 );
                 fields.insert(
                     "fill_color".to_owned(),
-                    named_value("bgcolor").unwrap_or(Value::Color(Color32::TRANSPARENT)),
+                    argument(9, "bgcolor")
+                        .color()
+                        .map_or(Value::Color(Color32::TRANSPARENT), Value::Color),
                 );
                 fields.insert(
                     "text".to_owned(),
-                    Value::Str(drawing_text(&named_value("text").unwrap_or(Value::Na))),
+                    Value::Str(drawing_text(&argument(10, "text"))),
                 );
                 fields.insert(
                     "text_color".to_owned(),
-                    named_value("text_color").unwrap_or(Value::Color(Color32::WHITE)),
+                    argument(12, "text_color")
+                        .color()
+                        .map_or(Value::Color(Color32::WHITE), Value::Color),
                 );
                 fields.insert(
                     "font_size".to_owned(),
-                    Value::Num(
-                        f64::from(
-                            named_value("text_size")
-                                .or_else(|| named_value("size"))
-                                .map(|value| font_size_of(&value))
-                                .unwrap_or(12.0),
-                        ),
-                    ),
+                    Value::Num(f64::from(font_size_of(&argument(11, "text_size")))),
                 );
                 fields.insert(
                     "border_width".to_owned(),
-                    Value::Num(
-                        named_value("border_width")
-                            .and_then(|value| value.number())
-                            .unwrap_or(1.0),
-                    ),
+                    Value::Num(argument(5, "border_width").number().unwrap_or(1.0)),
+                );
+                fields.insert(
+                    "style".to_owned(),
+                    style(6, "border_style", "style_solid"),
                 );
             }
             DrawingKind::Fill => {
@@ -4335,6 +4348,46 @@ alertcondition(bull, "Bull", "Bull signal")
             .find(|drawing| drawing.kind == DrawingKind::Line && drawing.first.0 == 2.0)
             .unwrap();
         assert_eq!(timed.second.0, 2.0);
+    }
+
+    #[test]
+    fn a_drawing_takes_its_style_from_the_documented_positions() {
+        let script = r#"indicator("T", overlay=true)
+if barstate.islast
+    line.new(0, low, 1, high, xloc.bar_index, extend.none, color.red, line.style_dotted, 3)
+    label.new(1, high, "p", xloc.bar_index, yloc.abovebar, color.blue, label.style_label_down, color.green, size.large)
+    box.new(0, high, 1, low, color.purple, 2, line.style_dashed, extend.none, xloc.bar_index, color.blue, "b", size.small, color.yellow)
+plot(close)
+"#;
+        let output = run(script, &[10.0, 11.0, 12.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let line = output
+            .drawings
+            .iter()
+            .find(|drawing| drawing.kind == DrawingKind::Line)
+            .unwrap();
+        assert_eq!(line.color, Color32::RED);
+        assert_eq!(line.width, 3.0);
+        assert_eq!(line.style, egui_charts::model::LineStyle::Dotted);
+        let label = output
+            .drawings
+            .iter()
+            .find(|drawing| drawing.kind == DrawingKind::Label)
+            .unwrap();
+        assert_eq!(label.color, Color32::GREEN);
+        assert_eq!(label.font_size, 16.0);
+        let rectangle = output
+            .drawings
+            .iter()
+            .find(|drawing| drawing.kind == DrawingKind::Box)
+            .unwrap();
+        assert_eq!(rectangle.color, Color32::from_rgb(156, 39, 176));
+        assert_eq!(rectangle.fill_color, Some(Color32::BLUE));
+        assert_eq!(rectangle.text_color, Some(Color32::YELLOW));
+        assert_eq!(rectangle.text, "b");
+        assert_eq!(rectangle.width, 2.0);
+        assert_eq!(rectangle.font_size, 10.0);
+        assert_eq!(rectangle.style, egui_charts::model::LineStyle::Dashed);
     }
 
     #[test]

@@ -479,7 +479,7 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn run_block(&mut self, block: &'a [Stmt]) -> Value {
+    fn run_block(&mut self, block: &[Stmt]) -> Value {
         let mut value = Value::Na;
         for statement in block {
             value = self.run_stmt(statement);
@@ -521,7 +521,7 @@ impl<'a> Evaluator<'a> {
         self.vars.contains_key(name) || self.locals.iter().any(|scope| scope.contains_key(name))
     }
 
-    fn run_stmt(&mut self, statement: &'a Stmt) -> Value {
+    fn run_stmt(&mut self, statement: &Stmt) -> Value {
         match statement {
             Stmt::Assign {
                 name,
@@ -732,7 +732,7 @@ impl<'a> Evaluator<'a> {
         self.out_of_budget
     }
 
-    fn eval(&mut self, expr: &'a Expr) -> Value {
+    fn eval(&mut self, expr: &Expr) -> Value {
         if self.out_of_budget {
             return Value::Na;
         }
@@ -746,6 +746,10 @@ impl<'a> Evaluator<'a> {
                 let values: Vec<Value> = items.iter().map(|item| self.eval(item)).collect();
                 Value::array_of(values)
             }
+            Expr::Lambda { params, body } => Value::Lambda(std::sync::Arc::new(value::Lambda {
+                params: params.clone(),
+                body: (**body).clone(),
+            })),
             Expr::Ident(name) => self.ident(name),
             Expr::Member { target, name } => {
                 let value = self.eval(target);
@@ -999,7 +1003,7 @@ impl<'a> Evaluator<'a> {
 
     /// `line.new`, `label.new` and `box.new`: one object whose fields hold the coordinates,
     /// style and text that the `get_`/`set_` calls later touch.
-    fn new_drawing(&mut self, kind: DrawingKind, args: &'a [Arg]) -> Value {
+    fn new_drawing(&mut self, kind: DrawingKind, args: &[Arg]) -> Value {
         let evaluated: Vec<(Option<String>, Value)> = args
             .iter()
             .map(|arg| (arg.name.clone(), self.eval(&arg.value)))
@@ -1171,7 +1175,7 @@ impl<'a> Evaluator<'a> {
         &mut self,
         object: &value::ObjectRef,
         method: &str,
-        args: &'a [Arg],
+        args: &[Arg],
     ) -> Option<Value> {
         let is_time = {
             let fields = value::lock_object(object);
@@ -1332,7 +1336,7 @@ impl<'a> Evaluator<'a> {
         self.bars[at].time.timestamp_millis() as f64
     }
 
-    fn index(&mut self, target: &'a Expr, index: &'a Expr) -> Value {
+    fn index(&mut self, target: &Expr, index: &Expr) -> Value {
         let offset = match self.eval(index).number() {
             Some(number) => number.round(),
             None => return Value::Na,
@@ -1376,8 +1380,8 @@ impl<'a> Evaluator<'a> {
         &mut self,
         id: NodeId,
         callee: &[String],
-        receiver: Option<&'a Expr>,
-        args: &'a [Arg],
+        receiver: Option<&Expr>,
+        args: &[Arg],
         line: usize,
     ) -> Value {
         let name = callee.join(".");
@@ -1452,6 +1456,17 @@ impl<'a> Evaluator<'a> {
         }
         if let Some(rest) = name.strip_prefix("str.") {
             let values: Vec<Value> = args.iter().map(|arg| self.eval(&arg.value)).collect();
+            // `str.match(regex)` reads the symbol, `str.match(text, regex)` the text it is given.
+            if rest == "match" {
+                return match values.as_slice() {
+                    [pattern] => Value::Bool(matches_regex(&self.context.symbol, pattern.text())),
+                    [subject, pattern] => Value::Bool(matches_regex(
+                        subject.text().unwrap_or_default(),
+                        pattern.text(),
+                    )),
+                    _ => Value::Na,
+                };
+            }
             // `str.tostring(price, format.mintick)` prints at the instrument's tick precision.
             if rest == "tostring" && values.get(1).and_then(Value::text) == Some("mintick") {
                 return match values.first().and_then(Value::number) {
@@ -1465,6 +1480,10 @@ impl<'a> Evaluator<'a> {
             };
         }
         if let Some(rest) = name.strip_prefix("array.") {
+            // `array.every` and `array.some` call their lambda, which needs the evaluator.
+            if matches!(rest, "every" | "some") {
+                return self.array_test(rest == "every", args);
+            }
             let values: Vec<Value> = args.iter().map(|arg| self.eval(&arg.value)).collect();
             return match builtins::array(rest, &values) {
                 Some(value) => value,
@@ -1581,7 +1600,7 @@ impl<'a> Evaluator<'a> {
     /// closed bar of `timeframe`, sampled from the bars on the chart. Another symbol reads the
     /// history the host supplied for it. With `lookahead=barmerge.lookahead_on` the higher bar is
     /// taken whole as soon as it opens, as Pine does when it repaints historical security values.
-    fn security(&mut self, id: NodeId, args: &'a [Arg]) -> Value {
+    fn security(&mut self, id: NodeId, args: &[Arg]) -> Value {
         let symbol = args
             .first()
             .map(|arg| self.eval(&arg.value))
@@ -1680,7 +1699,7 @@ impl<'a> Evaluator<'a> {
         id: NodeId,
         symbol: &str,
         bucket: Bucket,
-        expr: &'a Expr,
+        expr: &Expr,
         lookahead: bool,
     ) -> Value {
         let Some(timeframe) = bucket.timeframe() else {
@@ -1748,7 +1767,7 @@ impl<'a> Evaluator<'a> {
 
     /// Runs a `request.security` expression over the higher-timeframe series once per closed bar,
     /// keeping its `ta` state between those bars.
-    fn eval_security(&mut self, slot: &mut SecuritySlot, expr: &'a Expr, bar: usize) -> Value {
+    fn eval_security(&mut self, slot: &mut SecuritySlot, expr: &Expr, bar: usize) -> Value {
         let mut sub = Evaluator::new(self.program, &[], self.context, self.inputs, self.sources);
         sub.bars = Cow::Owned(std::mem::take(&mut slot.bars));
         sub.ta = std::mem::take(&mut slot.ta);
@@ -1789,7 +1808,7 @@ impl<'a> Evaluator<'a> {
 
     /// `request.security_lower_tf`: this engine only holds the chart's bars, so each element is a
     /// one-bar list of the value on the current bar.
-    fn security_lower_tf(&mut self, args: &'a [Arg]) -> Value {
+    fn security_lower_tf(&mut self, args: &[Arg]) -> Value {
         let Some(expr) = args.get(2).map(|arg| &arg.value) else {
             return Value::Na;
         };
@@ -1808,7 +1827,7 @@ impl<'a> Evaluator<'a> {
 
     /// `time("", session, timezone, bars_back = n)`: the bar's open time, or `na` when the bar
     /// is outside the session. `None` when this is the plain `time(timestamp)` form.
-    fn session_time(&mut self, name: &str, args: &'a [Arg]) -> Option<Value> {
+    fn session_time(&mut self, name: &str, args: &[Arg]) -> Option<Value> {
         let session = args
             .get(1)
             .map(|arg| self.eval(&arg.value))
@@ -1841,7 +1860,7 @@ impl<'a> Evaluator<'a> {
     }
 
     /// `hour`, `dayofweek`, `int` and the other bare calls Pine also offers as variables.
-    fn time_call(&mut self, name: &str, args: &'a [Arg]) -> Value {
+    fn time_call(&mut self, name: &str, args: &[Arg]) -> Value {
         let first = args.first().map(|arg| self.eval(&arg.value));
         let bar_time = self.bars[self.bar].time.timestamp_millis() as f64;
         // Calendar and clock calls take the zone as their last argument, e.g. `hour(time, tz)`.
@@ -1960,7 +1979,7 @@ impl<'a> Evaluator<'a> {
     fn call_function(
         &mut self,
         function: &'a Function,
-        args: &'a [Arg],
+        args: &[Arg],
         receiver: Option<Value>,
         line: usize,
     ) -> Value {
@@ -1986,7 +2005,7 @@ impl<'a> Evaluator<'a> {
         value
     }
 
-    fn plot(&mut self, id: NodeId, args: &'a [Arg]) -> Value {
+    fn plot(&mut self, id: NodeId, args: &[Arg]) -> Value {
         let Some(first) = args.first() else {
             return Value::Na;
         };
@@ -2049,7 +2068,7 @@ impl<'a> Evaluator<'a> {
         Value::Plot(slot)
     }
 
-    fn hline(&mut self, id: NodeId, args: &'a [Arg]) -> Value {
+    fn hline(&mut self, id: NodeId, args: &[Arg]) -> Value {
         let Some(first) = args.first() else {
             return Value::Na;
         };
@@ -2101,7 +2120,7 @@ impl<'a> Evaluator<'a> {
 
     /// `plotcandle(open, high, low, close)` and `plotbar(...)`: one OHLC candle per bar, styled by
     /// the plot their call site creates.
-    fn plot_candle(&mut self, id: NodeId, args: &'a [Arg]) -> Value {
+    fn plot_candle(&mut self, id: NodeId, args: &[Arg]) -> Value {
         let mut numbers = [None; 4];
         for (at, name) in ["open", "high", "low", "close"].into_iter().enumerate() {
             let arg = named(args, name).or_else(|| args.get(at).filter(|arg| arg.name.is_none()));
@@ -2164,9 +2183,46 @@ impl<'a> Evaluator<'a> {
         Value::Plot(slot)
     }
 
+    /// `array.every(id, function)` and `array.some(id, function)`.
+    fn array_test(&mut self, every: bool, args: &[Arg]) -> Value {
+        let Some(items) = args
+            .first()
+            .map(|arg| self.eval(&arg.value))
+            .and_then(|value| value.array())
+        else {
+            return Value::Na;
+        };
+        let Some(check) = args.get(1).map(|arg| self.eval(&arg.value)) else {
+            return Value::Na;
+        };
+        let items = value::lock(&items).clone();
+        for item in items {
+            let passed = self.call_lambda(&check, vec![item]).flag().unwrap_or(false);
+            if passed != every {
+                return Value::Bool(!every);
+            }
+        }
+        Value::Bool(every)
+    }
+
+    /// Calls `lambda` with `args` bound to its parameters, as one array element sees it.
+    fn call_lambda(&mut self, lambda: &Value, args: Vec<Value>) -> Value {
+        let Some(lambda) = lambda.lambda() else {
+            return Value::Na;
+        };
+        let mut scope = HashMap::new();
+        for (param, value) in lambda.params.iter().zip(args) {
+            scope.insert(param.clone(), value);
+        }
+        self.locals.push(scope);
+        let value = self.eval(&lambda.body);
+        self.locals.pop();
+        value
+    }
+
     /// `barcolor(color)` and `bgcolor(color)`: the chart paints these from a plot whose per-bar
     /// colour carries the tint and whose defined value marks the bar.
-    fn colour_plot(&mut self, id: NodeId, args: &'a [Arg], plot_type: PlotType) -> Value {
+    fn colour_plot(&mut self, id: NodeId, args: &[Arg], plot_type: PlotType) -> Value {
         let color = named(args, "color")
             .or_else(|| args.first())
             .map(|arg| self.eval(&arg.value))
@@ -2206,7 +2262,7 @@ impl<'a> Evaluator<'a> {
 
     /// `table.new`, `table.cell`, `table.clear` and `table.delete`. The library table holds text
     /// and cell colours, so spanning only shares its start cell's colours.
-    fn table_call(&mut self, method: &str, args: &'a [Arg]) -> Value {
+    fn table_call(&mut self, method: &str, args: &[Arg]) -> Value {
         let index = |value: Option<Value>| {
             value
                 .and_then(|value| value.number())
@@ -2355,7 +2411,7 @@ impl<'a> Evaluator<'a> {
         Value::Na
     }
 
-    fn fill(&mut self, id: NodeId, args: &'a [Arg]) -> Value {
+    fn fill(&mut self, id: NodeId, args: &[Arg]) -> Value {
         if self.fill_at.contains_key(&id) || args.len() < 2 {
             return Value::Na;
         }
@@ -2380,7 +2436,7 @@ impl<'a> Evaluator<'a> {
         Value::Na
     }
 
-    fn plotshape(&mut self, id: NodeId, args: &'a [Arg]) -> Value {
+    fn plotshape(&mut self, id: NodeId, args: &[Arg]) -> Value {
         let Some(first) = args.first() else {
             return Value::Na;
         };
@@ -2820,6 +2876,13 @@ fn shape_font_size(size: &str) -> f32 {
         "huge" => 24.0,
         _ => 12.0,
     }
+}
+
+/// Whether `text` matches a Pine regular expression; an invalid pattern matches nothing.
+fn matches_regex(text: &str, pattern: Option<&str>) -> bool {
+    pattern
+        .and_then(|pattern| regex::Regex::new(pattern).ok())
+        .is_some_and(|regex| regex.is_match(text))
 }
 
 /// The dash pattern a `plot.linestyle_*` constant names.
@@ -3947,6 +4010,32 @@ mod tests {
         assert!((output.plots[2].values[2] - 3.0).abs() < 1e-9);
         assert!((output.plots[3].values[2] - 2.0).abs() < 1e-9);
         assert!((output.plots[4].values[2] - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn array_every_and_some_call_a_lambda() {
+        let output = run(
+            "indicator(\"T\")\nvalues = array.from(1, 2, 3)\nlimit = 0\nplot(array.every(values, (x) => x > 0) ? 1 : 0)\nplot(array.some(values, x => x > 2) ? 1 : 0)\nplot(array.every(values, x => x > limit) ? 1 : 0)\n",
+            &[1.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.plots[0].values[0], 1.0);
+        assert_eq!(output.plots[1].values[0], 1.0);
+        assert_eq!(output.plots[2].values[0], 1.0);
+    }
+
+    #[test]
+    fn str_match_reads_a_regular_expression() {
+        let output = run(
+            "indicator(\"T\")\nplot(str.match(\"BINANCE:BTCUSDT\", \"^BINANCE:.*$\") ? 1 : 0)\nplot(str.match(\"BTCUSDT\", \"ETH\") ? 1 : 0)\nplot(str.match(\"NOPE\") ? 1 : 0)\nplot(str.match(\"x\", \"[\") ? 1 : 0)\n",
+            &[1.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.plots[0].values[0], 1.0);
+        assert_eq!(output.plots[1].values[0], 0.0);
+        // `str.match(regex)` reads the symbol, which is empty in this test context.
+        assert_eq!(output.plots[2].values[0], 0.0);
+        assert_eq!(output.plots[3].values[0], 0.0);
     }
 
     #[test]

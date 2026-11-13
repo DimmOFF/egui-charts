@@ -5,6 +5,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use egui::Color32;
 
+/// A Pine lambda: its parameters and the expression its body evaluates.
+#[derive(Clone, Debug)]
+pub struct Lambda {
+    pub params: Vec<String>,
+    pub body: crate::pine_engine::ast::Expr,
+}
+
 /// A Pine array, shared by every variable that refers to it, as Pine arrays are references.
 /// The chart runs a script off the UI thread, so the shared cell is a `Mutex`.
 pub type ArrayRef = Arc<Mutex<Vec<Value>>>;
@@ -35,6 +42,8 @@ pub enum Value {
     Array(ArrayRef),
     /// An instance of a user-defined `type`.
     Object(ObjectRef),
+    /// A lambda passed to `array.every`, `array.some` and their siblings.
+    Lambda(Arc<Lambda>),
     /// The plot a `plot()` call declared, for `fill()`.
     Plot(usize),
 }
@@ -49,6 +58,7 @@ impl PartialEq for Value {
             // Pine compares arrays by reference, which also keeps the comparison lock-free.
             (Value::Array(first), Value::Array(second)) => Arc::ptr_eq(first, second),
             (Value::Object(first), Value::Object(second)) => Arc::ptr_eq(first, second),
+            (Value::Lambda(first), Value::Lambda(second)) => Arc::ptr_eq(first, second),
             (Value::Plot(first), Value::Plot(second)) => first == second,
             (Value::Na, Value::Na) => true,
             _ => false,
@@ -105,6 +115,14 @@ impl Value {
     pub fn object(&self) -> Option<ObjectRef> {
         match self {
             Value::Object(fields) => Some(fields.clone()),
+            _ => None,
+        }
+    }
+
+    /// The lambda this value is, when it is one.
+    pub fn lambda(&self) -> Option<Arc<Lambda>> {
+        match self {
+            Value::Lambda(lambda) => Some(lambda.clone()),
             _ => None,
         }
     }

@@ -711,7 +711,52 @@ impl Parser {
     }
 
     pub fn parse_expr(&mut self) -> Result<Expr, String> {
+        if let Some(lambda) = self.try_lambda()? {
+            return Ok(lambda);
+        }
         self.parse_ternary()
+    }
+
+    /// Reads a lambda when the expression is one, and leaves the position alone otherwise.
+    fn try_lambda(&mut self) -> Result<Option<Expr>, String> {
+        let start = self.at;
+        let mut params = Vec::new();
+        match self.peek().clone() {
+            Token::Ident(name) => {
+                let arrow = self.tokens.get(self.at + 1).is_some_and(|next| next.is_op("=>"));
+                if !arrow {
+                    return Ok(None);
+                }
+                self.advance();
+                self.advance();
+                params.push(name);
+            }
+            Token::Op("(") => {
+                self.advance();
+                while !self.eat_op(")") {
+                    let Token::Ident(name) = self.peek().clone() else {
+                        self.at = start;
+                        return Ok(None);
+                    };
+                    self.advance();
+                    params.push(name);
+                    if !self.eat_op(",") && !self.at_op(")") {
+                        self.at = start;
+                        return Ok(None);
+                    }
+                }
+                if !self.eat_op("=>") {
+                    self.at = start;
+                    return Ok(None);
+                }
+            }
+            _ => return Ok(None),
+        }
+        let body = self.parse_expr()?;
+        Ok(Some(Expr::Lambda {
+            params,
+            body: Box::new(body),
+        }))
     }
 
     fn parse_ternary(&mut self) -> Result<Expr, String> {

@@ -91,6 +91,11 @@ pub enum Expr {
     },
     /// A literal list, as `input.string` options use.
     Array(Vec<Expr>),
+    /// A lambda: `(x) => x > 0`, passed to `array.every` and its siblings.
+    Lambda {
+        params: Vec<String>,
+        body: Box<Expr>,
+    },
     /// Pine's `switch`: the body of the first arm whose condition matches the subject.
     Switch {
         /// The value the arms compare against; absent for a plain boolean `switch`.

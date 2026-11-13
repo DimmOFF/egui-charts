@@ -1790,7 +1790,7 @@ pub fn display(value: &Value) -> String {
         Value::Bool(flag) => flag.to_string(),
         Value::Str(text) => text.clone(),
         Value::Color(color) => format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b()),
-        Value::Num(_) | Value::Na | Value::Array(_) | Value::Object(_) | Value::Plot(_) => {
+        Value::Num(_) | Value::Na | Value::Array(_) | Value::Object(_) | Value::Lambda(_) | Value::Plot(_) => {
             "NaN".to_owned()
         }
     }

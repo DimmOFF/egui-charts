@@ -3805,6 +3805,60 @@ plot(str.length(str.format_time(time, "yyyy-MM-dd")))
     }
 
     #[test]
+    fn drawing_details_and_loops_run_without_diagnostics() {
+        let script = r#"indicator("Draw", overlay=true)
+type Counter
+    int value
+method bump(Counter self, int step) =>
+    self.value += step
+    self.value
+c = Counter.new(0)
+bump(c, 2)
+plot(c.value)
+label.new(bar_index, high, "x", yloc=yloc.abovebar, textalign=text.align_left, size=size.normal, style=label.style_none)
+bx = box.new(bar_index, high, bar_index + 1, low, border_style=line.style_dashed, text="hi", text_size=size.small, text_halign=text.align_right)
+box.set_text_size(bx, size.tiny)
+[a, b] = request.security(syminfo.tickerid, "60", [close, open])
+plot(a + b)
+total = 0
+for i = 0 to 3 by 2
+    total += i
+plot(total)
+j = 0
+while j < 2
+    j += 1
+plot(j)
+plot(str.length(str.tostring(#ff0000)))
+"#;
+        let output = run(script, &[1.0, 2.0, 3.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.plots[0].values[2], 2.0);
+    }
+
+    #[test]
+    fn string_and_array_details_run_without_diagnostics() {
+        let script = r#"indicator("Str", overlay=true)
+opt = input.string("a", "Mode", options=["a", "b"])
+n = input.int(defval=3, title="N")
+plot(str.length(str.upper(str.trim("  ab  "))))
+plot(str.tonumber("-1.5e2"))
+arr = array.new_float(3, 1)
+array.set(arr, 1, 5)
+plot(array.sum(arr))
+plot(array.indexof(arr, 5))
+plot(array.slice(arr, 1, 3).size())
+plot(str.split("a,b,c", ",").size())
+plot(array.includes(arr, 5) ? 1 : 0)
+plot(str.length(str.replace_all("aaa", "a", "b")))
+plot(str.match("abc", "b") ? 1 : 0)
+plot(str.startswith("abc", "ab") ? 1 : 0)
+plot(display=display.none)
+"#;
+        let output = run(script, &[1.0, 2.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    }
+
+    #[test]
     fn a_feature_heavy_script_runs_without_diagnostics() {
         let script = r#"indicator("Sink", overlay=true)
 n = input.int(10, minval=1)

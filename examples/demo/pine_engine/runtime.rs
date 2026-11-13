@@ -584,7 +584,13 @@ impl<'a> Evaluator<'a> {
                 let step = match step {
                     Some(step) => self.eval(step).number(),
                     None => Some(1.0),
-                };
+                }
+                // Pine counts down when `from` is above `to`; `for i = 5 to 0` walks 5..0 and the
+                // step keeps its size.
+                .map(|step| match (from, to) {
+                    (Some(from), Some(to)) if from > to => -step.abs(),
+                    _ => step.abs(),
+                });
                 let (Some(from), Some(to), Some(step)) = (from, to, step) else {
                     return Value::Na;
                 };
@@ -4489,6 +4495,25 @@ alertcondition(bull, "Bull", "Bull signal")
         assert_eq!(output.plots[0].values[3], 3.0);
         assert_eq!(output.plots[1].values[3], 2.0);
         assert_eq!(output.plots[2].values[3], 6.0);
+    }
+
+    #[test]
+    fn a_for_loop_counts_down_when_from_is_above_to() {
+        let output = run(
+            "indicator(\"T\")\ntotal = 0\nfor i = 5 to 1\n    total += i\nplot(total, \"down\")\nsteps = 0\nfor i = 10 to 0 by 2\n    steps += 1\nplot(steps, \"steps\")\n",
+            &[1.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let at = |title: &str| {
+            output
+                .plots
+                .iter()
+                .find(|plot| plot.title == title)
+                .unwrap()
+                .values[0]
+        };
+        assert_eq!(at("down"), 15.0);
+        assert_eq!(at("steps"), 6.0);
     }
 
     #[test]

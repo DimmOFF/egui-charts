@@ -55,6 +55,10 @@ pub struct TaState {
     sar: Option<f64>,
     sar_af: f64,
     sar_ep: Option<f64>,
+    /// The three weighted windows of `ta.hma`.
+    half: VecDeque<f64>,
+    full: VecDeque<f64>,
+    smooth: VecDeque<f64>,
 }
 
 /// One series' running average between bars, for the calls that need more than one.
@@ -210,6 +214,13 @@ pub fn ta(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Option<
         "stoch",
         "supertrend",
         "sar",
+        "cross",
+        "cog",
+        "hma",
+        "macd",
+        "mode",
+        "percentrank",
+        "tsi",
     ];
     if !NAMES.contains(&name) {
         return None;
@@ -366,19 +377,25 @@ fn ta_known(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Optio
                 / (len as f64 - 1.0).max(1.0);
             num(variance.sqrt())
         }
-        "crossover" | "crossunder" => {
-            let first = args.first().and_then(number)?;
-            let second = args.get(1).and_then(number)?;
+        "crossover" | "crossunder" | "cross" => {
+            let first = args.first().and_then(number);
+            let second = args.get(1).and_then(number);
             let previous = state.prev.zip(state.prev_other);
-            state.prev = Some(first);
-            state.prev_other = Some(second);
-            let Some((previous_first, previous_second)) = previous else {
+            state.prev = first;
+            state.prev_other = second;
+            let (Some(first), Some(second), Some((previous_first, previous_second))) =
+                (first, second, previous)
+            else {
+                // Pine answers false while a series is missing or the pair is new.
                 return Some(Value::Bool(false));
             };
-            let crossed = if name == "crossover" {
-                first > second && previous_first <= previous_second
-            } else {
-                first < second && previous_first >= previous_second
+            let crossed = match name {
+                "crossover" => first > second && previous_first <= previous_second,
+                "crossunder" => first < second && previous_first >= previous_second,
+                _ => {
+                    (first > second && previous_first <= previous_second)
+                        || (first < second && previous_first >= previous_second)
+                }
             };
             Some(Value::Bool(crossed))
         }
@@ -1035,6 +1052,108 @@ fn ta_known(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Optio
             state.trend = Some(up);
             num(sar)
         }
+        "cog" => {
+            let src = args.first().and_then(number)?;
+            let len = length(args.get(1), 10);
+            state.push(src, len);
+            if state.window.len() < len {
+                return na();
+            }
+            let mut weighted = 0.0;
+            let mut total = 0.0;
+            for (at, value) in state.window.iter().enumerate() {
+                // The weight counts bars back from the current one, so the oldest counts most.
+                weighted += value * (len - at) as f64;
+                total += value;
+            }
+            if total == 0.0 {
+                return na();
+            }
+            num(-weighted / total)
+        }
+        "hma" => {
+            let src = args.first().and_then(number)?;
+            let len = length(args.get(1), 9);
+            let half_len = (len / 2).max(1);
+            let root = (len as f64).sqrt().round().max(1.0) as usize;
+            push_into(&mut state.half, src, half_len);
+            push_into(&mut state.full, src, len);
+            let (Some(half), Some(full)) = (wma(&state.half, half_len), wma(&state.full, len)) else {
+                return na();
+            };
+            push_into(&mut state.smooth, 2.0 * half - full, root);
+            num(wma(&state.smooth, root)?)
+        }
+        "macd" => {
+            let src = args.first().and_then(number)?;
+            let fast_len = length(args.get(1), 12);
+            let slow_len = length(args.get(2), 26);
+            let signal_len = length(args.get(3), 9);
+            let fast = state.basis.ema(src, fast_len);
+            let slow = state.range.ema(src, slow_len);
+            let (Some(fast), Some(slow)) = (fast, slow) else {
+                return pair(f64::NAN, f64::NAN, f64::NAN);
+            };
+            let macd = fast - slow;
+            match state.up.ema(macd, signal_len) {
+                Some(signal) => pair(macd, signal, macd - signal),
+                None => pair(macd, f64::NAN, f64::NAN),
+            }
+        }
+        "mode" => {
+            let src = args.first().and_then(number)?;
+            let len = length(args.get(1), 1);
+            state.push(src, len);
+            if state.window.len() < len {
+                return na();
+            }
+            // The value seen most often, as `array.mode` answers.
+            let mut counts: Vec<(f64, usize)> = Vec::new();
+            for value in &state.window {
+                match counts.iter_mut().find(|(seen, _)| seen == value) {
+                    Some((_, count)) => *count += 1,
+                    None => counts.push((*value, 1)),
+                }
+            }
+            counts
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .map_or_else(na, |(value, _)| num(value))
+        }
+        "percentrank" => {
+            let src = args.first().and_then(number)?;
+            let len = length(args.get(1), 1);
+            state.push(src, len);
+            if state.window.len() < len {
+                return na();
+            }
+            if len < 2 {
+                return num(0.0);
+            }
+            // The share of the other bars in the window that sit below the current one.
+            let below = state.window.iter().filter(|value| **value < src).count();
+            num(100.0 * below as f64 / (len - 1) as f64)
+        }
+        "tsi" => {
+            let src = args.first().and_then(number)?;
+            let short = length(args.get(1), 25);
+            let long = length(args.get(2), 13);
+            let change = src - state.prev.replace(src)?;
+            let trend = state.basis.ema(change, long);
+            let smoothed = state.up.ema(change.abs(), long);
+            let (Some(trend), Some(smoothed)) = (trend, smoothed) else {
+                return na();
+            };
+            let trend = state.range.ema(trend, short);
+            let smoothed = state.down.ema(smoothed, short);
+            let (Some(trend), Some(smoothed)) = (trend, smoothed) else {
+                return na();
+            };
+            if smoothed == 0.0 {
+                return na();
+            }
+            num(100.0 * trend / smoothed)
+        }
         _ => None,
     }
 }
@@ -1042,6 +1161,29 @@ fn ta_known(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Optio
 /// The mean of a full window, or `None` while it warms up.
 fn mean(window: &VecDeque<f64>, len: usize) -> Option<f64> {
     (window.len() >= len).then(|| window.iter().sum::<f64>() / len as f64)
+}
+
+/// The weighted mean of a full window, with the newest value weighing the most.
+fn wma(window: &VecDeque<f64>, len: usize) -> Option<f64> {
+    (len > 0 && window.len() >= len).then(|| {
+        let mut weighted = 0.0;
+        let mut weights = 0.0;
+        for (at, value) in window.iter().enumerate() {
+            let weight = (at + 1) as f64;
+            weighted += value * weight;
+            weights += weight;
+        }
+        weighted / weights
+    })
+}
+
+/// Appends `value` to a window that keeps its last `keep` values.
+fn push_into(window: &mut VecDeque<f64>, value: f64, keep: usize) {
+    window.push_back(value);
+    let keep = keep.max(1).min(MAX_WINDOW);
+    while window.len() > keep {
+        window.pop_front();
+    }
 }
 
 /// Pine's multi-value answer, which a tuple assignment reads value by value.
@@ -1303,6 +1445,7 @@ pub fn text(name: &str, args: &[Value]) -> Option<Value> {
         "pos",
         "trim",
         "repeat",
+        "replace",
     ];
     if !NAMES.contains(&name) {
         return None;
@@ -1313,14 +1456,19 @@ pub fn text(name: &str, args: &[Value]) -> Option<Value> {
 fn text_known(name: &str, args: &[Value]) -> Option<Value> {
     let render = display;
     Some(match name {
-        "tostring" => value_at(args, 0).map(|value| Value::Str(render(value)))?,
+        "tostring" => {
+            let value = value_at(args, 0)?;
+            match (args.get(1).and_then(Value::text), value.number()) {
+                // `str.tostring(price, "#.##")` prints under the pattern instead of in full.
+                (Some(pattern), Some(number)) if !pattern.is_empty() => {
+                    Value::Str(format_number(number, pattern))
+                }
+                _ => Value::Str(render(value)),
+            }
+        }
         "format" => {
             let template = args.first()?.text()?.to_owned();
-            let mut result = template;
-            for (at, value) in args.iter().skip(1).enumerate() {
-                result = result.replace(&format!("{{{at}}}"), &render(value));
-            }
-            Value::Str(result)
+            Value::Str(fill_format(&template, args))
         }
         "length" => Value::Num(args.first()?.text()?.chars().count() as f64),
         "upper" => Value::Str(args.first()?.text()?.to_uppercase()),
@@ -1387,6 +1535,18 @@ fn text_known(name: &str, args: &[Value]) -> Option<Value> {
             let to = args.get(2).and_then(Value::text).unwrap_or("");
             Value::Str(text.replace(from, to))
         }
+        "replace" => {
+            let text = args.first()?.text()?;
+            let from = args.get(1).and_then(Value::text)?;
+            let to = args.get(2).and_then(Value::text).unwrap_or("");
+            // Pine replaces every occurrence unless a one-based one is named.
+            let occurrence = arg(args, 3).unwrap_or(0.0).max(0.0) as usize;
+            Value::Str(if occurrence == 0 {
+                text.replace(from, to)
+            } else {
+                replace_nth(text, from, to, occurrence)
+            })
+        }
         "format_time" => {
             let millis = args.first().and_then(Value::number)?;
             let pattern = args.get(1).and_then(Value::text).unwrap_or("yyyy-MM-dd");
@@ -1406,6 +1566,137 @@ fn text_known(name: &str, args: &[Value]) -> Option<Value> {
         }
         _ => return None,
     })
+}
+
+/// Replaces only the `occurrence`th (one-based) match, leaving the others alone.
+fn replace_nth(text: &str, from: &str, to: &str, occurrence: usize) -> String {
+    if from.is_empty() {
+        return text.to_owned();
+    }
+    match text.match_indices(from).nth(occurrence - 1) {
+        Some((start, _)) => format!("{}{to}{}", &text[..start], &text[start + from.len()..]),
+        None => text.to_owned(),
+    }
+}
+
+/// Fills the `{index[,type[,pattern]]}` placeholders of `str.format`, leaving any it cannot
+/// read as written.
+fn fill_format(template: &str, args: &[Value]) -> String {
+    let characters: Vec<char> = template.chars().collect();
+    let mut result = String::with_capacity(template.len());
+    let mut at = 0;
+    while at < characters.len() {
+        match characters[at] {
+            '{' if characters.get(at + 1) == Some(&'{') => {
+                result.push('{');
+                at += 2;
+            }
+            '}' if characters.get(at + 1) == Some(&'}') => {
+                result.push('}');
+                at += 2;
+            }
+            '{' => {
+                let Some(offset) = characters[at..].iter().position(|character| *character == '}') else {
+                    result.push('{');
+                    at += 1;
+                    continue;
+                };
+                let end = at + offset;
+                let spec: String = characters[at + 1..end].iter().collect();
+                match format_placeholder(&spec, args) {
+                    Some(text) => result.push_str(&text),
+                    None => result.extend(&characters[at..=end]),
+                }
+                at = end + 1;
+            }
+            character => {
+                result.push(character);
+                at += 1;
+            }
+        }
+    }
+    result
+}
+
+/// One placeholder of `str.format`: `{index}`, `{index,number,pattern}` or
+/// `{index,date,pattern}`, where the index counts the arguments after the template.
+fn format_placeholder(spec: &str, args: &[Value]) -> Option<String> {
+    let mut parts = spec.split(',');
+    let index: usize = parts.next()?.trim().parse().ok()?;
+    let value = value_at(args, index + 1)?;
+    let kind = parts.next().unwrap_or_default().trim();
+    let pattern = parts.next().unwrap_or_default().trim();
+    match kind {
+        "" => Some(display(value)),
+        "number" => Some(match (value.number(), pattern.is_empty()) {
+            (Some(number), false) => format_number(number, pattern),
+            _ => display(value),
+        }),
+        "date" | "time" => {
+            let time = chrono::DateTime::from_timestamp_millis(value.number()? as i64)?;
+            Some(time.format(&pine_time_format(pattern)).to_string())
+        }
+        _ => None,
+    }
+}
+
+/// A number under Pine's pattern: `#.##` sets the decimals, `000.00` also pads the whole part,
+/// and `percent`, `currency` and `volume` are the named ones.
+fn format_number(value: f64, pattern: &str) -> String {
+    if !value.is_finite() {
+        return format!("{value}");
+    }
+    match pattern {
+        "percent" => return format!("{}%", trim_decimals(format!("{:.2}", value * 100.0), 0)),
+        "currency" => return format!("${}", trim_decimals(format!("{value:.2}"), 2)),
+        "volume" => {
+            let size = value.abs();
+            return if size >= 1e9 {
+                format!("{:.2}B", value / 1e9)
+            } else if size >= 1e6 {
+                format!("{:.2}M", value / 1e6)
+            } else if size >= 1e3 {
+                format!("{:.2}K", value / 1e3)
+            } else {
+                trim_decimals(format!("{value:.2}"), 2)
+            };
+        }
+        _ => {}
+    }
+    let (whole_pattern, fraction) = pattern.split_once('.').unwrap_or((pattern, ""));
+    let mandatory = fraction.chars().filter(|character| *character == '0').count();
+    let optional = fraction.chars().filter(|character| *character == '#').count();
+    let text = trim_decimals(format!("{value:.precision$}", precision = mandatory + optional), mandatory);
+    let (sign, number) = match text.strip_prefix('-') {
+        Some(number) => ("-", number),
+        None => ("", text.as_str()),
+    };
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    // The pattern's zeros set the fewest digits the whole part keeps.
+    let zeros = whole_pattern.chars().filter(|character| *character == '0').count();
+    let padding = zeros.saturating_sub(whole.len());
+    let whole = format!("{}{whole}", "0".repeat(padding));
+    if fraction.is_empty() {
+        format!("{sign}{whole}")
+    } else {
+        format!("{sign}{whole}.{fraction}")
+    }
+}
+
+/// Drops trailing decimals beyond `keep`, and the point once none are left.
+fn trim_decimals(text: String, keep: usize) -> String {
+    let Some((whole, fraction)) = text.split_once('.') else {
+        return text;
+    };
+    let mut fraction = fraction.to_owned();
+    while fraction.len() > keep && fraction.ends_with('0') {
+        fraction.pop();
+    }
+    if fraction.is_empty() {
+        whole.to_owned()
+    } else {
+        format!("{whole}.{fraction}")
+    }
 }
 
 /// Translates Pine's date tokens (`yyyy`, `MMM`, `HH`) into chrono's `strftime` ones.

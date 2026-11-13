@@ -3736,6 +3736,64 @@ mod tests {
     }
 
     #[test]
+    fn cross_cog_hma_macd_mode_percentrank_and_tsi_keep_drawing() {
+        let output = run(
+            "indicator(\"T\")\nplot(ta.cross(close, ta.sma(close, 2)) ? 1 : 0)\nplot(ta.cog(close, 3))\nplot(ta.hma(close, 4))\n[macd, signal, hist] = ta.macd(close, 2, 4, 2)\nplot(macd)\nplot(signal)\nplot(hist)\nplot(ta.mode(close, 3))\nplot(ta.percentrank(close, 3))\nplot(ta.tsi(close, 2, 4))\n",
+            &[1.0, 2.0, 3.0, 4.0, 3.0, 5.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        for (at, plot) in output.plots.iter().enumerate() {
+            assert!(plot.values[5].is_finite(), "plot {at} stopped drawing");
+        }
+        // The last three closes are 4, 3, 5, so two of the other bars sit below the current one.
+        assert_eq!(output.plots[7].values[5], 100.0);
+        // The middle of that window is the value seen twice nowhere, so the newest answer is `4`.
+        assert_eq!(output.plots[6].values[3], 4.0);
+        assert_eq!(
+            output.plots[0].values[3], 0.0,
+            "a pair that has not crossed answers 0"
+        );
+    }
+
+    #[test]
+    fn a_cross_answers_in_either_direction() {
+        let output = run(
+            "indicator(\"T\")\nplot(ta.cross(close, 2) ? 1 : 0)\nplot(ta.crossover(close, 2) ? 1 : 0)\n",
+            &[1.0, 3.0, 1.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.plots[0].values, [0.0, 1.0, 1.0]);
+        assert_eq!(output.plots[1].values, [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn str_replace_answers_the_named_occurrence() {
+        let output = run(
+            "indicator(\"T\")\nplot(0)\ns = str.replace(\"a-b-c\", \"-\", \"++\", 2)\nplot(str.length(s))\nplot(str.length(str.replace(\"a-b-c\", \"-\", \"++\")))\n",
+            &[1.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        // The second dash is the only one replaced, and the default replaces them all.
+        assert_eq!(output.plots[1].values[0], 6.0);
+        assert_eq!(output.plots[2].values[0], 7.0);
+    }
+
+    #[test]
+    fn str_format_reads_its_number_patterns() {
+        let output = run(
+            "indicator(\"T\")\nlabel.new(bar_index, close, str.format(\"{0,number,#.##}\", 123.456))\nlabel.new(bar_index, close, str.format(\"{0,number,000.00}\", 1.5))\nlabel.new(bar_index, close, str.format(\"{0,number,percent}\", 0.2))\nlabel.new(bar_index, close, str.format(\"{0}!\", \"ok\"))\nlabel.new(bar_index, close, str.tostring(1.23456, \"#.##\"))\n",
+            &[1.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let texts: Vec<&str> = output
+            .drawings
+            .iter()
+            .map(|drawing| drawing.text.as_str())
+            .collect();
+        assert_eq!(texts, ["123.46", "001.50", "20%", "ok!", "1.23"]);
+    }
+
+    #[test]
     fn array_mode_percentile_and_binary_search_answer() {
         let output = run(
             "indicator(\"T\")\na = array.from(3, 1, 2, 2)\nplot(array.mode(a))\nplot(array.percentile_linear_interpolation(a, 50))\nb = array.from(1, 2, 3)\nplot(array.binary_search(b, 2))\nplot(array.binary_search(b, 9))\nplot(array.binary_search_leftmost(b, 2))\nplot(array.binary_search_rightmost(b, 2))\n",

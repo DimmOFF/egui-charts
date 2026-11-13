@@ -175,7 +175,8 @@ mod tests {
     }
 
     #[test]
-    fn every_script_in_temp_pine_parses_and_runs() {        let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/../../temp/pine");
+    fn every_script_in_temp_pine_parses_and_runs() {
+        let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/../../temp/pine");
         let Ok(entries) = std::fs::read_dir(directory) else {
             // The user's scripts are not part of the repository checkout.
             return;

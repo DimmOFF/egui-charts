@@ -221,6 +221,16 @@ pub fn ta(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Option<
         "mode",
         "percentrank",
         "tsi",
+        "ao",
+        "accdist",
+        "iii",
+        "nvi",
+        "pvi",
+        "pvt",
+        "wad",
+        "trix",
+        "max",
+        "min",
     ];
     if !NAMES.contains(&name) {
         return None;
@@ -235,10 +245,12 @@ pub fn ta_parameters(name: &str) -> Option<&'static [&'static str]> {
         "sma" | "ema" | "rma" | "wma" | "rsi" | "stdev" | "highest" | "lowest" | "change"
         | "rising" | "falling" | "mom" | "roc" | "median" | "variance" | "dev" | "highestbars"
         | "lowestbars" | "vwma" | "cci" | "cmo" | "range" | "cog" | "hma" | "mode"
-        | "percentrank" => &["source", "length"],
+        | "percentrank" | "max" | "min" => &["source", "length"],
         "swma" | "vwap" | "cum" => &["source"],
         "tr" => &["handle_na"],
         "atr" | "wpr" | "mfi" | "cmf" => &["length"],
+        "ao" | "accdist" | "iii" | "nvi" | "pvi" | "pvt" | "wad" => &[],
+        "trix" => &["source", "length"],
         "barssince" => &["condition"],
         "valuewhen" => &["condition", "source", "occurrence"],
         "pivothigh" | "pivotlow" => &["source", "leftbars", "rightbars"],
@@ -375,14 +387,14 @@ fn ta_known(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Optio
             let past = state.window[state.window.len() - 1 - len];
             num(src - past)
         }
-        "highest" | "lowest" => {
+        "highest" | "lowest" | "max" | "min" => {
             let src = args.first().and_then(number)?;
             let len = length(args.get(1), 1);
             state.push(src, len);
             if state.window.len() < len {
                 return na();
             }
-            let picked = if name == "highest" {
+            let picked = if matches!(name, "highest" | "max") {
                 state
                     .window
                     .iter()
@@ -1185,6 +1197,90 @@ fn ta_known(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Optio
                 return na();
             }
             num(100.0 * trend / smoothed)
+        }
+        "ao" => {
+            // The 5-bar mean of the median price less its 34-bar mean.
+            let mid = (bar.high + bar.low) / 2.0;
+            push_into(&mut state.window, mid, 5);
+            push_into(&mut state.secondary, mid, 34);
+            let (Some(fast), Some(slow)) = (mean(&state.window, 5), mean(&state.secondary, 34))
+            else {
+                return na();
+            };
+            num(fast - slow)
+        }
+        "accdist" => {
+            let range = bar.high - bar.low;
+            if range != 0.0 {
+                state.total +=
+                    ((bar.close - bar.low) - (bar.high - bar.close)) / range * bar.volume;
+            }
+            num(state.total)
+        }
+        "iii" => {
+            let range = bar.high - bar.low;
+            if range != 0.0 {
+                state.total +=
+                    (2.0 * bar.close - bar.high - bar.low) / range * bar.volume;
+            }
+            num(state.total)
+        }
+        "nvi" | "pvi" => {
+            let volume = bar.volume;
+            if state.total == 0.0 {
+                state.total = 1000.0;
+            } else if let Some(previous) = state.prev_close {
+                // NVI moves on falling volume and PVI on rising volume.
+                let moves = match name {
+                    "nvi" => state.prev_other.is_some_and(|previous| volume < previous),
+                    _ => state.prev_other.is_some_and(|previous| volume > previous),
+                };
+                if moves && previous != 0.0 {
+                    state.total *= 1.0 + (bar.close - previous) / previous;
+                }
+            }
+            state.prev_other = Some(volume);
+            state.prev_close = Some(bar.close);
+            num(state.total)
+        }
+        "pvt" => {
+            if let Some(previous) = state.prev_close {
+                if previous != 0.0 {
+                    state.total += (bar.close - previous) / previous * bar.volume;
+                }
+            }
+            state.prev_close = Some(bar.close);
+            num(state.total)
+        }
+        "wad" => {
+            if let Some(previous) = state.prev_close {
+                if bar.close > previous {
+                    state.total += bar.close - bar.low.min(previous);
+                } else if bar.close < previous {
+                    state.total += bar.close - bar.high.max(previous);
+                }
+            }
+            state.prev_close = Some(bar.close);
+            num(state.total)
+        }
+        "trix" => {
+            let src = args.first().and_then(number)?;
+            let len = length(args.get(1), 9);
+            let Some(first) = state.basis.ema(src, len) else {
+                return na();
+            };
+            let Some(second) = state.range.ema(first, len) else {
+                return na();
+            };
+            let Some(third) = state.up.ema(second, len) else {
+                return na();
+            };
+            match state.prev.replace(third) {
+                Some(previous) if previous != 0.0 => {
+                    num(100.0 * (third - previous) / previous)
+                }
+                _ => na(),
+            }
         }
         _ => None,
     }

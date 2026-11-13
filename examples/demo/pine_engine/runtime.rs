@@ -4076,6 +4076,21 @@ mod tests {
     }
 
     #[test]
+    fn anniversary_oscillator_and_cumulative_series_answer() {
+        let closes: Vec<f64> = (1..=40).map(|value| value as f64).collect();
+        let output = run(
+            "indicator(\"T\")\nplot(ta.ao())\nplot(ta.accdist())\nplot(ta.iii())\nplot(ta.nvi())\nplot(ta.pvi())\nplot(ta.pvt())\nplot(ta.wad())\nplot(ta.trix(close, 2))\nplot(ta.max(close, 2))\nplot(ta.min(close, 2))\n",
+            &closes,
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.plots[8].values[39], 40.0);
+        assert_eq!(output.plots[9].values[39], 39.0);
+        for (at, plot) in output.plots.iter().enumerate() {
+            assert!(plot.values[39].is_finite(), "plot {at} stopped drawing");
+        }
+    }
+
+    #[test]
     fn array_mode_percentile_and_binary_search_answer() {
         let output = run(
             "indicator(\"T\")\na = array.from(3, 1, 2, 2)\nplot(array.mode(a))\nplot(array.percentile_linear_interpolation(a, 50))\nb = array.from(1, 2, 3)\nplot(array.binary_search(b, 2))\nplot(array.binary_search(b, 9))\nplot(array.binary_search_leftmost(b, 2))\nplot(array.binary_search_rightmost(b, 2))\n",

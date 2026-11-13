@@ -1049,7 +1049,9 @@ impl<'a> Evaluator<'a> {
                 _ => Value::Na,
             },
             "timeframe" => match name {
-                "isintraday" => Value::Bool(self.context.timeframe.duration_ms() < 86_400_000),
+                "isintraday" => {
+                    Value::Bool(self.context.timeframe.duration_ms() < 86_400_000)
+                }
                 "isminutes" => Value::Bool(self.context.timeframe.duration_ms() < 3_600_000),
                 "isseconds" => Value::Bool(self.context.timeframe.duration_ms() < 60_000),
                 "isdaily" => Value::Bool(self.context.timeframe.duration_ms() == 86_400_000),
@@ -3092,6 +3094,53 @@ fn mintick_text(value: f64, mintick: f64) -> String {
     format!("{value:.decimals$}")
 }
 
+/// The chart interval as Pine spells it: `1`, `15`, `60`, `240`, `D`, `W`, `M`, with a leading
+/// count only when it is more than one.
+fn pine_period(timeframe: egui_charts::model::Timeframe) -> String {
+    // A trade-based interval has no time period; its chart label is the closest answer.
+    if timeframe.duration_ms() == 0 {
+        return timeframe.as_str().into_owned();
+    }
+    let unit = |count: i64, letter: &str| {
+        if count == 1 {
+            letter.to_owned()
+        } else {
+            format!("{count}{letter}")
+        }
+    };
+    let ms = timeframe.duration_ms();
+    if ms > 0 && ms % 2_592_000_000 == 0 {
+        unit(ms / 2_592_000_000, "M")
+    } else if ms > 0 && ms % 604_800_000 == 0 {
+        unit(ms / 604_800_000, "W")
+    } else if ms > 0 && ms % 86_400_000 == 0 {
+        unit(ms / 86_400_000, "D")
+    } else if ms >= 60_000 {
+        (ms / 60_000).to_string()
+    } else {
+        (ms / 1_000).to_string() + "S"
+    }
+}
+
+/// The count `timeframe.period` carries: minutes for an intraday interval, days or more above.
+fn pine_multiplier(timeframe: egui_charts::model::Timeframe) -> f64 {
+    let ms = timeframe.duration_ms();
+    if ms == 0 {
+        return 1.0;
+    }
+    if ms > 0 && ms % 2_592_000_000 == 0 {
+        (ms / 2_592_000_000) as f64
+    } else if ms > 0 && ms % 604_800_000 == 0 {
+        (ms / 604_800_000) as f64
+    } else if ms > 0 && ms % 86_400_000 == 0 {
+        (ms / 86_400_000) as f64
+    } else if ms >= 60_000 {
+        (ms / 60_000) as f64
+    } else {
+        (ms / 1_000) as f64
+    }
+}
+
 /// The glyph a `shape.*` style draws: the chart paints study `plotshape` marks as text labels.
 fn shape_glyph(style: &str) -> String {
     match style {
@@ -3298,31 +3347,6 @@ fn closed_bars(bars: &[Bar], timeframe: egui_charts::model::Timeframe, now: i64)
             close <= now
         })
         .count()
-}
-
-/// Pine's `timeframe.period`, e.g. `"1"`, `"60"`, `"D"`.
-fn pine_period(timeframe: egui_charts::model::Timeframe) -> String {
-    let millis = timeframe.duration_ms();
-    match millis {
-        0 => timeframe.as_str().into_owned(),
-        86_400_000 => "D".to_owned(),
-        604_800_000 => "W".to_owned(),
-        2_592_000_000 => "M".to_owned(),
-        millis if millis % 3_600_000 == 0 => (millis / 3_600_000).to_string(),
-        millis if millis % 60_000 == 0 => (millis / 60_000).to_string(),
-        millis => format!("{}S", millis / 1000),
-    }
-}
-
-fn pine_multiplier(timeframe: egui_charts::model::Timeframe) -> f64 {
-    let millis = timeframe.duration_ms();
-    match millis {
-        0 => 1.0,
-        86_400_000 | 604_800_000 | 2_592_000_000 => 1.0,
-        millis if millis % 3_600_000 == 0 => (millis / 3_600_000) as f64,
-        millis if millis % 60_000 == 0 => (millis / 60_000) as f64,
-        millis => (millis / 1000) as f64,
-    }
 }
 
 #[cfg(test)]
@@ -4674,7 +4698,7 @@ plot(str.length(str.repeat("x", 3)), "repeated")
 plot(str.length(str.format_time(timenow, "{0,date,yyyy}", "UTC")))
 plot(str.length(str.tostring(3.14159, "#.##")))
 plot(str.length(str.format_number(1234.5, format.volume)))
-plot(str.tonumber(timeframe.period) >= 0 ? 1 : 0)
+plot(str.tonumber(timeframe.period), "period")
 plot(str.length(str.tostring(syminfo.ticker)))
 plot(request.financial("BINANCE:BTCUSDT", "total_revenue", barmerge.gaps_off, barmerge.lookahead_off) == 0 ? 0 : 1)
 "##;
@@ -4691,6 +4715,8 @@ plot(request.financial("BINANCE:BTCUSDT", "total_revenue", barmerge.gaps_off, ba
         assert_eq!(at("parts"), 3.0);
         assert_eq!(at("replaced"), 3.0);
         assert_eq!(at("repeated"), 3.0);
+        // The chart runs on one-minute bars, so `timeframe.period` is the number `1`.
+        assert_eq!(at("period"), 1.0);
     }
 
     #[test]
@@ -4951,9 +4977,9 @@ plot(close)
 
     #[test]
     fn the_timeframe_flags_answer_from_the_interval() {
-        let check = |timeframe: egui_charts::model::Timeframe, expected: [f64; 4]| {
+        let check = |timeframe: egui_charts::model::Timeframe, expected: [f64; 5]| {
             let program = Parser::parse(
-                "indicator(\"T\")\nplot(timeframe.isintraday ? 1 : 0)\nplot(timeframe.isdaily ? 1 : 0)\nplot(timeframe.isdwm ? 1 : 0)\nplot(weekofyear(time))\n",
+                "indicator(\"T\")\nplot(timeframe.isintraday ? 1 : 0)\nplot(timeframe.isdaily ? 1 : 0)\nplot(timeframe.isdwm ? 1 : 0)\nplot(weekofyear(time))\nplot(timeframe.multiplier)\n",
             )
             .unwrap();
             let bars = bars(&[1.0]);
@@ -4968,8 +4994,9 @@ plot(close)
             }
         };
         // Both bars fall on 2024-01-01, ISO week 1.
-        check(egui_charts::model::Timeframe::Min5, [1.0, 0.0, 0.0, 1.0]);
-        check(egui_charts::model::Timeframe::Day1, [0.0, 1.0, 1.0, 1.0]);
+        check(egui_charts::model::Timeframe::Min5, [1.0, 0.0, 0.0, 1.0, 5.0]);
+        check(egui_charts::model::Timeframe::Hour4, [1.0, 0.0, 0.0, 1.0, 240.0]);
+        check(egui_charts::model::Timeframe::Day1, [0.0, 1.0, 1.0, 1.0, 1.0]);
     }
 
     #[test]

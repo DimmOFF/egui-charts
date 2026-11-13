@@ -246,7 +246,7 @@ impl Chart {
             let merged = merge(&mut item.bars, &mut BTreeMap::new(), &clock, incoming);
             item.feed.rejected_bars += merged.rejected;
             if let Some(marks) = &mut item.change_marks {
-                marks.record(&item.bars, &clock, before);
+                marks.record(&item.bars, &clock, before, self.frame_clock.as_ref());
             }
             if merged.first_changed.is_some_and(|first| first + 1 < len) {
                 item.revision = crate::model::next_revision();
@@ -759,7 +759,12 @@ impl Chart {
             self.state.price_scale_mut().refit_manual();
         }
         if let (Some(marks), Some(closes)) = (&mut self.change_marks, closes) {
-            marks.record(&self.state.data().bars, clock, closes);
+            marks.record(
+                &self.state.data().bars,
+                clock,
+                closes,
+                self.frame_clock.as_ref(),
+            );
         }
         self.feed.rejected_bars += merged.rejected;
         #[cfg(feature = "drawings")]

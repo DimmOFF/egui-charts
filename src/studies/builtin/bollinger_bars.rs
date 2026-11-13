@@ -94,6 +94,7 @@ impl Indicator for BollingerBars {
                 },
                 plot: 0,
                 color: None,
+                bar_style: false,
             });
             self.candles.push(StudyCandle {
                 bars: i..i + 1,
@@ -104,6 +105,7 @@ impl Indicator for BollingerBars {
                 },
                 plot,
                 color: None,
+                bar_style: false,
             });
         }
     }

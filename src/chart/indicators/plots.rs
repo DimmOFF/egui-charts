@@ -217,13 +217,28 @@ pub(crate) fn paint_candles(
             let color = candle.color.unwrap_or(style.color);
             let stroke = egui::Stroke::new(style.width, color);
             painter.line_segment(wick, stroke);
-            painter.rect(
-                body,
-                0.0,
-                color.gamma_multiply_u8(77),
-                stroke,
-                egui::StrokeKind::Inside,
-            );
+            if candle.bar_style {
+                // `plotbar` marks the open on the left of the wick and the close on the right.
+                let open_y = price.price_to_y(candle.bar.open);
+                let close_y = price.price_to_y(candle.bar.close);
+                let middle = (body.left() + body.right()) * 0.5;
+                painter.line_segment(
+                    [egui::pos2(body.left(), open_y), egui::pos2(middle, open_y)],
+                    stroke,
+                );
+                painter.line_segment(
+                    [egui::pos2(middle, close_y), egui::pos2(body.right(), close_y)],
+                    stroke,
+                );
+            } else {
+                painter.rect(
+                    body,
+                    0.0,
+                    color.gamma_multiply_u8(77),
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
+            }
         }
     }
 }

@@ -125,6 +125,7 @@ impl HigherIntervalCandles {
                 bar,
                 plot,
                 color: None,
+                bar_style: false,
             });
         }
     }

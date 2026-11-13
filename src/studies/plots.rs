@@ -101,6 +101,8 @@ pub struct StudyCandle {
     pub plot: usize,
     /// A colour for just this candle, as Pine's `plotcandle` sets per bar.
     pub color: Option<Color32>,
+    /// Draw an OHLC bar (`plotbar`) instead of a candle body.
+    pub bar_style: bool,
 }
 
 /// A price band between two source bars, stored once instead of as a value on every bar.

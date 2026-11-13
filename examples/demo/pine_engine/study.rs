@@ -118,6 +118,7 @@ impl Indicator for PineStudy {
                 bar: candle.candle.clone(),
                 plot: candle.plot,
                 color: candle.color,
+                bar_style: candle.bar_style,
             })
             .collect();
         self.drawings = output.drawings.iter().map(study_drawing).collect();

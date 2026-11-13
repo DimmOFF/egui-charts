@@ -98,6 +98,8 @@ pub struct PlotCandle {
     pub plot: usize,
     /// A colour for just this bar, as `color=` sets.
     pub color: Option<Color32>,
+    /// Whether this is a `plotbar` OHLC bar rather than a candle.
+    pub bar_style: bool,
 }
 
 /// One `plotshape` mark on a bar.
@@ -1387,7 +1389,9 @@ impl<'a> Evaluator<'a> {
         let name = callee.join(".");
         match name.as_str() {
             "plot" => return self.plot(id, args),
-            "plotcandle" | "plotbar" => return self.plot_candle(id, args),
+            "plotcandle" | "plotbar" => {
+                return self.plot_candle(id, args, name == "plotbar");
+            }
             "plotshape" | "plotchar" | "plotarrow" => return self.plotshape(id, args),
             "fill" => return self.fill(id, args),
             "hline" => return self.hline(id, args),
@@ -2135,7 +2139,7 @@ impl<'a> Evaluator<'a> {
 
     /// `plotcandle(open, high, low, close)` and `plotbar(...)`: one OHLC candle per bar, styled by
     /// the plot their call site creates.
-    fn plot_candle(&mut self, id: NodeId, args: &[Arg]) -> Value {
+    fn plot_candle(&mut self, id: NodeId, args: &[Arg], bar_style: bool) -> Value {
         let mut numbers = [None; 4];
         for (at, name) in ["open", "high", "low", "close"].into_iter().enumerate() {
             let arg = named(args, name).or_else(|| args.get(at).filter(|arg| arg.name.is_none()));
@@ -2193,6 +2197,7 @@ impl<'a> Evaluator<'a> {
                 candle,
                 plot: slot,
                 color,
+                bar_style,
             });
         }
         Value::Plot(slot)
@@ -4011,6 +4016,17 @@ mod tests {
         assert_eq!(output.candles[1].color, Some(Color32::GREEN));
         assert_eq!(output.candles[0].color, Some(Color32::RED));
         assert_eq!(output.plots[0].title, "C");
+    }
+
+    #[test]
+    fn plotbar_marks_open_and_close_as_bars() {
+        let output = run(
+            "indicator(\"T\")\nplotbar(open, high, low, close)\n",
+            &[1.0, 2.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.candles.len(), 2);
+        assert!(output.candles.iter().all(|candle| candle.bar_style));
     }
 
     #[test]

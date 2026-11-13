@@ -4422,6 +4422,19 @@ alertcondition(bull, "Bull", "Bull signal")
     }
 
     #[test]
+    fn series_history_indexing_answers() {
+        let output = run(
+            "indicator(\"T\")\nplot(close[1])\nplot(close[bar_index > 0 ? 2 : 0])\nx = close * 2\nplot(x[1])\n",
+            &[1.0, 2.0, 3.0, 4.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert!(output.plots[0].values[0].is_nan());
+        assert_eq!(output.plots[0].values[3], 3.0);
+        assert_eq!(output.plots[1].values[3], 2.0);
+        assert_eq!(output.plots[2].values[3], 6.0);
+    }
+
+    #[test]
     fn rarer_script_idioms_run_without_diagnostics() {
         let script = r#"indicator("Idioms", overlay=true)
 grade = input.string("A", "Grade", options=["A", "B"])

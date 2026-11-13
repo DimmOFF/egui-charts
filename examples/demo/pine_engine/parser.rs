@@ -1147,12 +1147,16 @@ impl Parser {
                 }
                 _ => {}
             }
-            let cond = if self.eat_op("=>") {
-                None
+            // `switch` arms may list several values: `"A", "B" => 1`.
+            let conds = if self.eat_op("=>") {
+                Vec::new()
             } else {
-                let cond = self.parse_expr()?;
+                let mut conds = vec![self.parse_expr()?];
+                while self.eat_op(",") {
+                    conds.push(self.parse_expr()?);
+                }
                 self.expect_op("=>")?;
-                Some(cond)
+                conds
             };
             let body = if matches!(self.peek(), Token::Newline) {
                 self.advance();
@@ -1167,7 +1171,7 @@ impl Parser {
                 self.end_line()?;
                 vec![Stmt::Expr(value)]
             };
-            arms.push(SwitchArm { cond, body });
+            arms.push(SwitchArm { conds, body });
             self.eat_newlines();
         }
         Ok(Expr::Switch { subject, arms })

@@ -107,8 +107,8 @@ pub enum Expr {
 /// One branch of a `switch`.
 #[derive(Clone, Debug)]
 pub struct SwitchArm {
-    /// The value or condition to compare; `None` for the default `=> …` arm.
-    pub cond: Option<Expr>,
+    /// The values or conditions to compare; empty for the default `=> …` arm.
+    pub conds: Vec<Expr>,
     /// The statements whose last value the arm answers with.
     pub body: Block,
 }

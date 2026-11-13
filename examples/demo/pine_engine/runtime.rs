@@ -846,14 +846,17 @@ impl<'a> Evaluator<'a> {
             Expr::Switch { subject, arms } => {
                 let subject = subject.as_ref().map(|subject| self.eval(subject));
                 for arm in arms {
-                    let matched = match (&subject, &arm.cond) {
-                        (Some(subject), Some(cond)) => {
-                            let cond = self.eval(cond);
-                            binary("==", subject.clone(), cond).flag().unwrap_or(false)
-                        }
-                        (_, Some(cond)) => self.eval(cond).flag().unwrap_or(false),
-                        // A bare `=>` arm answers when no earlier arm did.
-                        (_, None) => true,
+                    // A bare `=>` arm answers when no earlier arm did; any listed value may match.
+                    let matched = if arm.conds.is_empty() {
+                        true
+                    } else {
+                        arm.conds.iter().any(|cond| match &subject {
+                            Some(subject) => {
+                                let cond = self.eval(cond);
+                                binary("==", subject.clone(), cond).flag().unwrap_or(false)
+                            }
+                            None => self.eval(cond).flag().unwrap_or(false),
+                        })
                     };
                     if matched {
                         return self.run_block(&arm.body);
@@ -4462,6 +4465,42 @@ alertcondition(bull, "Bull", "Bull signal")
         assert_eq!(output.plots[0].values[3], 3.0);
         assert_eq!(output.plots[1].values[3], 2.0);
         assert_eq!(output.plots[2].values[3], 6.0);
+    }
+
+    #[test]
+    fn tuple_returns_multi_value_switch_and_trailing_commas_run() {
+        let script = r#"indicator("Odds5")
+[macdLine, signalLine, histLine] = ta.macd(close, 12, 26, 9)
+plot(macdLine, "macd")
+[bbMiddle, bbUpper, bbLower] = ta.bb(close, 2, 2)
+plot(bbMiddle, "middle")
+[supertrend, direction] = ta.supertrend(3, 10)
+plot(direction, "dir")
+grade = "B"
+value = switch grade
+    "A", "B" => 1
+    "C" => 2
+    => 3
+plot(value, "switch")
+n = 1 +
+    2 +
+    3
+plot(n, "n")
+plot(close, "trailing", color=color.new(color.teal, 0), linewidth=2,)
+"#;
+        let output = run(script, &[10.0, 11.0, 12.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let at = |title: &str| {
+            output
+                .plots
+                .iter()
+                .find(|plot| plot.title == title)
+                .unwrap()
+                .values[2]
+        };
+        assert_eq!(at("switch"), 1.0);
+        assert_eq!(at("n"), 6.0);
+        assert!(at("middle").is_finite());
     }
 
     #[test]

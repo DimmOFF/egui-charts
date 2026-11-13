@@ -1717,6 +1717,7 @@ fn color_known(name: &str, args: &[Value]) -> Option<Value> {
 pub fn text(name: &str, args: &[Value]) -> Option<Value> {
     const NAMES: &[&str] = &[
         "tostring",
+        "format_number",
         "format",
         "length",
         "upper",
@@ -1751,6 +1752,13 @@ fn text_known(name: &str, args: &[Value]) -> Option<Value> {
                     Value::Str(format_number(number, pattern))
                 }
                 _ => Value::Str(render(value)),
+            }
+        }
+        "format_number" => {
+            let value = value_at(args, 0)?.number()?;
+            match args.get(1).and_then(Value::text) {
+                Some(pattern) => Value::Str(format_number(value, pattern)),
+                None => Value::Str(render(&Value::Num(value))),
             }
         }
         "format" => {

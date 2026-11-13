@@ -1530,8 +1530,9 @@ impl<'a> Evaluator<'a> {
                 .map(|number| Value::Num((number / tick).round() * tick))
                 .unwrap_or(Value::Na);
         }
-        // `log.info` and its siblings only write to the editor console, which has none here.
-        if name.starts_with("log.") {
+        // `log.info`, `runtime.log` and their siblings only write to the editor console, which has
+        // none here; a script that logs still runs.
+        if name.starts_with("log.") || name.starts_with("runtime.") {
             return Value::Na;
         }
         if let Some(rest) = name.strip_prefix("math.") {
@@ -4432,6 +4433,46 @@ alertcondition(bull, "Bull", "Bull signal")
         assert_eq!(output.plots[0].values[3], 3.0);
         assert_eq!(output.plots[1].values[3], 2.0);
         assert_eq!(output.plots[2].values[3], 6.0);
+    }
+
+    #[test]
+    fn the_text_helpers_and_alert_calls_run_without_diagnostics() {
+        let script = r##"indicator("Odds", overlay=true)
+alertcondition(ta.crossover(close, open), "Cross", "message")
+if ta.crossover(close, open)
+    alert("up", alert.freq_once_per_bar_close)
+runtime.log("x")
+plot(close, "c", color=color.new(color.red, 0), linewidth=2, style=plot.style_line, display=display.all, editable=true)
+hline(50, "lvl", color=color.gray, linestyle=hline.style_dotted, extend=extend.right, display=display.none)
+bgcolor(close > open ? color.new(color.green, 90) : na, title="bg")
+barcolor(color.blue, title="bar")
+plotshape(close > open, "S", shape.circle, location.belowbar, color.green, size=size.tiny, text="x", textcolor=color.white, editable=false)
+plotchar(close, "char", "A", location.top, color.green, size=size.tiny)
+plotcandle(open, high, low, close, "candles", color.green, color.red, wickcolor=color.gray, bordercolor=color.black)
+parts = str.split("a,b,c", ",")
+plot(array.size(parts), "parts")
+plot(str.length(str.replace_all("a-b", "-", "+")), "replaced")
+plot(str.length(str.repeat("x", 3)), "repeated")
+plot(str.length(str.format_time(timenow, "{0,date,yyyy}", "UTC")))
+plot(str.length(str.tostring(3.14159, "#.##")))
+plot(str.length(str.format_number(1234.5, format.volume)))
+plot(str.tonumber(timeframe.period) >= 0 ? 1 : 0)
+plot(str.length(str.tostring(syminfo.ticker)))
+plot(request.financial("BINANCE:BTCUSDT", "total_revenue", barmerge.gaps_off, barmerge.lookahead_off) == 0 ? 0 : 1)
+"##;
+        let output = run(script, &[10.0, 11.0, 12.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let at = |title: &str| {
+            output
+                .plots
+                .iter()
+                .find(|plot| plot.title == title)
+                .unwrap()
+                .values[2]
+        };
+        assert_eq!(at("parts"), 3.0);
+        assert_eq!(at("replaced"), 3.0);
+        assert_eq!(at("repeated"), 3.0);
     }
 
     #[test]

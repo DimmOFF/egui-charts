@@ -214,12 +214,13 @@ pub(crate) fn paint_candles(
         if let Some((body, wick)) =
             candle_geometry(candle, coords, bar_spacing, |p| price.price_to_y(p))
         {
-            let stroke = egui::Stroke::new(style.width, style.color);
+            let color = candle.color.unwrap_or(style.color);
+            let stroke = egui::Stroke::new(style.width, color);
             painter.line_segment(wick, stroke);
             painter.rect(
                 body,
                 0.0,
-                style.color.gamma_multiply_u8(77),
+                color.gamma_multiply_u8(77),
                 stroke,
                 egui::StrokeKind::Inside,
             );

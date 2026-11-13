@@ -99,6 +99,8 @@ pub struct StudyCandle {
     pub bar: crate::model::Bar,
     /// Output whose colour, stroke width and visibility apply to this candle.
     pub plot: usize,
+    /// A colour for just this candle, as Pine's `plotcandle` sets per bar.
+    pub color: Option<Color32>,
 }
 
 /// A price band between two source bars, stored once instead of as a value on every bar.

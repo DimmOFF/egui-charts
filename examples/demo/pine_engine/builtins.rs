@@ -228,6 +228,38 @@ pub fn ta(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Option<
     Some(ta_known(name, state, args, bar).unwrap_or(Value::Na))
 }
 
+/// The parameters of a `ta.*` call in the order the implementation reads them, so the runtime can
+/// put named arguments where they belong. `None` for a call that takes none.
+pub fn ta_parameters(name: &str) -> Option<&'static [&'static str]> {
+    Some(match name {
+        "sma" | "ema" | "rma" | "wma" | "rsi" | "stdev" | "highest" | "lowest" | "change"
+        | "rising" | "falling" | "mom" | "roc" | "median" | "variance" | "dev" | "highestbars"
+        | "lowestbars" | "vwma" | "cci" | "cmo" | "range" | "cog" | "hma" | "mode"
+        | "percentrank" => &["source", "length"],
+        "swma" | "vwap" | "cum" => &["source"],
+        "tr" => &["handle_na"],
+        "atr" | "wpr" | "mfi" | "cmf" => &["length"],
+        "barssince" => &["condition"],
+        "valuewhen" => &["condition", "source", "occurrence"],
+        "pivothigh" | "pivotlow" => &["source", "leftbars", "rightbars"],
+        "crossover" | "crossunder" | "cross" => &["source1", "source2"],
+        "linreg" => &["source", "length", "offset"],
+        "correlation" => &["source1", "source2", "length"],
+        "percentile_linear_interpolation" | "percentile_nearest_rank" => {
+            &["source", "length", "percentage"]
+        }
+        "alma" => &["source", "length", "offset", "sigma"],
+        "bb" | "bbw" | "kc" | "kcw" => &["series", "length", "mult", "useTrueRange"],
+        "dmi" | "adx" => &["diLength", "adxSmoothing"],
+        "stoch" => &["source", "high", "low", "length"],
+        "supertrend" => &["factor", "atrPeriod"],
+        "sar" => &["start", "inc", "max"],
+        "macd" => &["source", "fastlen", "slowlen", "siglen"],
+        "tsi" => &["source", "short_length", "long_length"],
+        _ => return None,
+    })
+}
+
 fn ta_known(name: &str, state: &mut TaState, args: &[Value], bar: &Bar) -> Option<Value> {
     match name {
         "sma" => {

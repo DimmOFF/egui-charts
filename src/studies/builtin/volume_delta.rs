@@ -163,6 +163,7 @@ impl DeltaCandles {
                 bars: i..i + 1,
                 bar: Bar::new(bar.time, open, high, low, close, flow.up - flow.down),
                 plot: 1 + usize::from(down),
+                color: None,
             });
             last = Some((key, close));
         }

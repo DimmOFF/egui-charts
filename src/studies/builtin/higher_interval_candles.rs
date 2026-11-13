@@ -124,6 +124,7 @@ impl HigherIntervalCandles {
                 bars: indices[range.start]..indices[range.end - 1] + 1,
                 bar,
                 plot,
+                color: None,
             });
         }
     }

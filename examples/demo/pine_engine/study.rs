@@ -6,7 +6,7 @@ use egui_charts::drawings::{ChartPoint, Drawing, DrawingToolType};
 use egui_charts::model::{Bar, Instrument, Timeframe};
 use egui_charts::studies::{
     CrossDirection, Indicator, IndicatorMarker, IndicatorValues, InputKind, InputValue, PlotType,
-    StudyData, StudyDataRequest, StudyError, StudyFill, StudyInput, StudyTable,
+    StudyData, StudyDataRequest, StudyError, StudyFill, StudyInput, StudyTable, StudyCandle,
 };
 
 use crate::pine_engine::Script;
@@ -30,6 +30,7 @@ pub struct PineStudy {
     widths: Vec<f32>,
     offsets: Vec<isize>,
     per_bar_colors: Vec<Vec<Option<Color32>>>,
+    candles: Vec<StudyCandle>,
     fills: Vec<StudyFill>,
     markers: Vec<IndicatorMarker>,
     drawings: Vec<Drawing>,
@@ -63,6 +64,7 @@ impl PineStudy {
             widths: Vec::new(),
             offsets: Vec::new(),
             per_bar_colors: Vec::new(),
+            candles: Vec::new(),
             fills: Vec::new(),
             markers: Vec::new(),
             drawings: Vec::new(),
@@ -108,6 +110,16 @@ impl Indicator for PineStudy {
             .map(|plot| plot.colors.clone())
             .collect();
         self.fills = output.fills;
+        self.candles = output
+            .candles
+            .iter()
+            .map(|candle| StudyCandle {
+                bars: candle.bar..candle.bar + 1,
+                bar: candle.candle.clone(),
+                plot: candle.plot,
+                color: candle.color,
+            })
+            .collect();
         self.drawings = output.drawings.iter().map(study_drawing).collect();
         // The chart paints no study markers, so each `plotshape` mark becomes a text label with
         // the shape's glyph or the script's `text=`.
@@ -225,6 +237,10 @@ impl Indicator for PineStudy {
 
     fn fills(&self) -> Vec<StudyFill> {
         self.fills.clone()
+    }
+
+    fn candles(&self) -> &[StudyCandle] {
+        &self.candles
     }
 
     fn table(&self) -> Option<&StudyTable> {
@@ -499,6 +515,23 @@ mod tests {
             PineStudy::new("indicator(\"T\")\nplot(close, display=display.none)\n").unwrap();
         study.calculate(&bars(&[1.0]));
         assert!(!study.plot_style(0).visible);
+    }
+
+    #[test]
+    fn plotcandle_reaches_the_chart_candles() {
+        let mut study = PineStudy::new(
+            "indicator(\"T\", overlay=true)\nplotcandle(open, high, low, close, color=color.green)\n",
+        )
+        .unwrap();
+        let chart = bars(&[1.0, 2.0]);
+        study.calculate(&chart);
+        let candles = study.candles();
+        assert_eq!(candles.len(), 2);
+        assert_eq!(candles[1].bars, 1..2);
+        assert_eq!(candles[1].bar.high, 3.0);
+        assert_eq!(candles[1].color, Some(Color32::GREEN));
+        assert_eq!(candles[1].plot, 0);
+        assert!(study.plot_style(0).visible);
     }
 
     #[test]

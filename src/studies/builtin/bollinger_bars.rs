@@ -93,6 +93,7 @@ impl Indicator for BollingerBars {
                     ..bar.clone()
                 },
                 plot: 0,
+                color: None,
             });
             self.candles.push(StudyCandle {
                 bars: i..i + 1,
@@ -102,6 +103,7 @@ impl Indicator for BollingerBars {
                     ..bar.clone()
                 },
                 plot,
+                color: None,
             });
         }
     }

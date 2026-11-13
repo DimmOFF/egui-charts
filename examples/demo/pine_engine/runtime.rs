@@ -87,6 +87,19 @@ pub struct PlotSeries {
     pub colors: Vec<Option<Color32>>,
 }
 
+/// One `plotcandle`/`plotbar` candle on a bar.
+#[derive(Clone, Debug)]
+pub struct PlotCandle {
+    /// The loaded bar it sits on.
+    pub bar: usize,
+    /// The candle's open, high, low, close and the source bar's time.
+    pub candle: Bar,
+    /// Output whose colour, width and visibility apply to this candle.
+    pub plot: usize,
+    /// A colour for just this bar, as `color=` sets.
+    pub color: Option<Color32>,
+}
+
 /// One `plotshape` mark on a bar.
 #[derive(Clone, Debug)]
 pub struct ShapeMark {
@@ -104,6 +117,7 @@ pub struct ShapeMark {
 #[derive(Clone, Debug, Default)]
 pub struct RunOutput {
     pub plots: Vec<PlotSeries>,
+    pub candles: Vec<PlotCandle>,
     pub shapes: Vec<ShapeMark>,
     pub fills: Vec<StudyFill>,
     pub drawings: Vec<DrawingOutput>,
@@ -197,6 +211,7 @@ pub struct Evaluator<'a> {
     ta: HashMap<NodeId, TaState>,
     plots: Vec<PlotSlot>,
     plot_at: HashMap<NodeId, usize>,
+    candles: Vec<PlotCandle>,
     fills: Vec<FillSlot>,
     fill_at: HashMap<NodeId, usize>,
     shapes: Vec<ShapeSlot>,
@@ -252,6 +267,7 @@ impl<'a> Evaluator<'a> {
             ta: HashMap::new(),
             plots: Vec::new(),
             plot_at: HashMap::new(),
+            candles: Vec::new(),
             fills: Vec::new(),
             fill_at: HashMap::new(),
             shapes: Vec::new(),
@@ -312,6 +328,7 @@ impl<'a> Evaluator<'a> {
         let tables = self.build_tables();
         RunOutput {
             plots: self.plots.into_iter().map(|slot| slot.series).collect(),
+            candles: self.candles,
             shapes,
             fills,
             drawings,
@@ -1366,6 +1383,7 @@ impl<'a> Evaluator<'a> {
         let name = callee.join(".");
         match name.as_str() {
             "plot" => return self.plot(id, args),
+            "plotcandle" | "plotbar" => return self.plot_candle(id, args),
             "plotshape" | "plotchar" | "plotarrow" => return self.plotshape(id, args),
             "fill" => return self.fill(id, args),
             "hline" => return self.hline(id, args),
@@ -1399,6 +1417,7 @@ impl<'a> Evaluator<'a> {
         if let Some(rest) = name.strip_prefix("ta.") {
             let bar = self.bars[self.bar].clone();
             let values: Vec<Value> = args.iter().map(|arg| self.eval(&arg.value)).collect();
+            let values = ta_arguments(rest, args, values);
             let state = self.ta.entry(id).or_default();
             return match builtins::ta(rest, state, &values, &bar) {
                 Some(value) => value,
@@ -2080,6 +2099,71 @@ impl<'a> Evaluator<'a> {
         Value::Plot(slot)
     }
 
+    /// `plotcandle(open, high, low, close)` and `plotbar(...)`: one OHLC candle per bar, styled by
+    /// the plot their call site creates.
+    fn plot_candle(&mut self, id: NodeId, args: &'a [Arg]) -> Value {
+        let mut numbers = [None; 4];
+        for (at, name) in ["open", "high", "low", "close"].into_iter().enumerate() {
+            let arg = named(args, name).or_else(|| args.get(at).filter(|arg| arg.name.is_none()));
+            if let Some(arg) = arg {
+                numbers[at] = self.eval(&arg.value).number();
+            }
+        }
+        let color = named(args, "color")
+            .map(|arg| self.eval(&arg.value))
+            .and_then(|value| value.color());
+        let slot = match self.plot_at.get(&id) {
+            Some(slot) => *slot,
+            None => {
+                let index = self.plots.len();
+                // `title_of` reads the second argument, which here is the high, so only `title=`.
+                let title = named(args, "title")
+                    .map(|arg| &arg.value)
+                    .and_then(literal)
+                    .and_then(|value| value.text().map(str::to_owned))
+                    .unwrap_or_else(|| format!("Plot {}", index + 1));
+                let width = named(args, "linewidth")
+                    .map(|arg| self.eval(&arg.value))
+                    .and_then(|value| value.number())
+                    .unwrap_or(1.0) as f32;
+                let visible = !matches!(
+                    named(args, "display")
+                        .map(|arg| self.eval(&arg.value))
+                        .and_then(|value| value.text().map(str::to_owned))
+                        .as_deref(),
+                    Some("none" | "data_window" | "status_line")
+                );
+                self.plots.push(PlotSlot {
+                    series: PlotSeries {
+                        title,
+                        color: color.unwrap_or_else(|| plot_color(index)),
+                        width: width.clamp(0.5, 8.0),
+                        // The candles draw the output; the line stays empty.
+                        plot_type: PlotType::Line,
+                        pattern: Default::default(),
+                        visible,
+                        offset: 0,
+                        values: vec![f64::NAN; self.bars.len()],
+                        colors: vec![None; self.bars.len()],
+                    },
+                });
+                self.plot_at.insert(id, index);
+                index
+            }
+        };
+        if let [Some(open), Some(high), Some(low), Some(close)] = numbers {
+            let source = &self.bars[self.bar];
+            let candle = Bar::new(source.time, open, high, low, close, source.volume);
+            self.candles.push(PlotCandle {
+                bar: self.bar,
+                candle,
+                plot: slot,
+                color,
+            });
+        }
+        Value::Plot(slot)
+    }
+
     /// `barcolor(color)` and `bgcolor(color)`: the chart paints these from a plot whose per-bar
     /// colour carries the tint and whose defined value marks the bar.
     fn colour_plot(&mut self, id: NodeId, args: &'a [Arg], plot_type: PlotType) -> Value {
@@ -2630,6 +2714,48 @@ fn drawing_output(object: &value::ObjectRef) -> Option<DrawingOutput> {
 
 fn named<'a>(args: &'a [Arg], name: &str) -> Option<&'a Arg> {
     args.iter().find(|arg| arg.name.as_deref() == Some(name))
+}
+
+/// Puts named `ta.*` arguments where the implementation reads them, so their written order does
+/// not matter.
+fn ta_arguments(name: &str, args: &[Arg], values: Vec<Value>) -> Vec<Value> {
+    if args.iter().all(|arg| arg.name.is_none()) {
+        return values;
+    }
+    let Some(order) = builtins::ta_parameters(name) else {
+        return values;
+    };
+    let mut slots: Vec<Option<Value>> = vec![None; order.len()];
+    let mut next = 0;
+    for (arg, value) in args.iter().zip(values) {
+        let named_at = arg
+            .name
+            .as_deref()
+            .and_then(|name| order.iter().position(|param| *param == name));
+        let at = match named_at {
+            Some(at) => at,
+            None => {
+                while next < slots.len() && slots[next].is_some() {
+                    next += 1;
+                }
+                if next >= slots.len() {
+                    continue;
+                }
+                next += 1;
+                next - 1
+            }
+        };
+        slots[at] = Some(value);
+    }
+    let mut values: Vec<Value> = slots.into_iter().map(|slot| slot.unwrap_or(Value::Na)).collect();
+    // `ta.pivothigh(leftbars=…, rightbars=…)` leaves out the source, which the two-argument form
+    // takes from the bar instead.
+    if matches!(name, "pivothigh" | "pivotlow") {
+        while values.len() > 2 && values.first().is_some_and(|value| matches!(value, Value::Na)) {
+            values.remove(0);
+        }
+    }
+    values
 }
 
 /// The caption of a plot: `title=` or the second positional argument.
@@ -3791,6 +3917,36 @@ mod tests {
             .map(|drawing| drawing.text.as_str())
             .collect();
         assert_eq!(texts, ["123.46", "001.50", "20%", "ok!", "1.23"]);
+    }
+
+    #[test]
+    fn plotcandle_draws_the_four_prices_on_every_bar() {
+        let output = run(
+            "indicator(\"T\")\nplotcandle(open, high, low, close, color = close > 1.5 ? color.green : color.red, title = \"C\")\n",
+            &[1.0, 2.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.candles.len(), 2);
+        assert_eq!(output.candles[1].candle.high, 3.0);
+        assert_eq!(output.candles[1].candle.low, 1.0);
+        assert_eq!(output.candles[1].plot, 0);
+        assert_eq!(output.candles[1].color, Some(Color32::GREEN));
+        assert_eq!(output.candles[0].color, Some(Color32::RED));
+        assert_eq!(output.plots[0].title, "C");
+    }
+
+    #[test]
+    fn named_ta_arguments_may_be_written_in_any_order() {
+        let output = run(
+            "indicator(\"T\")\nplot(ta.sma(length=2, source=close))\n[middle, upper, lower] = ta.bb(mult=1, series=close, length=2)\nplot(middle)\nplot(upper)\nplot(lower)\nplot(ta.atr(length=2))\n",
+            &[1.0, 2.0, 3.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert!((output.plots[0].values[2] - 2.5).abs() < 1e-9);
+        assert!((output.plots[1].values[2] - 2.5).abs() < 1e-9);
+        assert!((output.plots[2].values[2] - 3.0).abs() < 1e-9);
+        assert!((output.plots[3].values[2] - 2.0).abs() < 1e-9);
+        assert!((output.plots[4].values[2] - 2.0).abs() < 1e-9);
     }
 
     #[test]

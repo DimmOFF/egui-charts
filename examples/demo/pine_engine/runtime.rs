@@ -2658,6 +2658,50 @@ impl<'a> Evaluator<'a> {
                     }
                 }
             }
+            // `table.cell_set_text_color(table_id, column, row, color)` and its two siblings
+            // write the cell `table.cell` writes, without its width, height or alignment.
+            "cell_set_text" | "cell_set_text_color" | "cell_set_bgcolor" => {
+                let column = index(args.get(1).map(|arg| self.eval(&arg.value)));
+                let row = index(args.get(2).map(|arg| self.eval(&arg.value)));
+                let value = args
+                    .get(3)
+                    .map(|arg| self.eval(&arg.value))
+                    .unwrap_or(Value::Na);
+                let mut fields = value::lock_object(&shared);
+                if method == "cell_set_text" {
+                    let text = builtins::display(&value);
+                    match text.is_empty() {
+                        true => {
+                            fields.remove(&format!("c:{column}:{row}"));
+                        }
+                        false => {
+                            fields.insert(format!("c:{column}:{row}"), Value::Str(text));
+                        }
+                    }
+                    return Value::Na;
+                }
+                let key = format!(
+                    "{}:{column}:{row}",
+                    if method == "cell_set_bgcolor" { "b" } else { "t" }
+                );
+                match value.color() {
+                    Some(color) => {
+                        fields.insert(key, Value::Color(color));
+                    }
+                    None => {
+                        fields.remove(&key);
+                    }
+                }
+            }
+            "set_position" => {
+                let position = args
+                    .get(1)
+                    .map(|arg| self.eval(&arg.value))
+                    .and_then(|value| value.text().map(str::to_owned))
+                    .or_else(|| args.get(1).and_then(|arg| dotted(&arg.value)))
+                    .unwrap_or_else(|| "position.bottom_right".into());
+                value::lock_object(&shared).insert("__position".into(), Value::Str(position));
+            }
             "clear" => {
                 let mut bound = |at: usize, fallback: usize| {
                     args.get(at)
@@ -5043,13 +5087,14 @@ t = table.new(position.top_right, 3, 2, bgcolor=color.new(color.black, 50), bord
 if barstate.islast
     table.cell(t, 0, 0, "A", bgcolor=color.blue, text_color=color.white, text_size=size.small)
     table.cell(t, 1, 0, str.format("{0} {1,number,#.##}", "x", 1.234))
+    table.cell(t, 0, 1, "B", bgcolor=color.blue, text_color=color.white)
     table.merge_cells(t, 0, 1, 2, 1)
     table.set_position(t, position.bottom_left)
     table.set_bgcolor(t, color.new(color.navy, 80))
     table.set_border_color(t, color.gray)
     table.set_border_width(t, 2)
-    table.cell_set_text_color(t, 0, 0, color.yellow)
-    table.cell_set_bgcolor(t, 0, 0, color.olive)
+    table.cell_set_text_color(t, 0, 1, color.yellow)
+    table.cell_set_bgcolor(t, 0, 1, color.olive)
     table.cell_set_text(t, 1, 1, "upd")
     table.cell_set_text_size(t, 1, 1, size.large)
 l = label.new(bar_index, high, "x")
@@ -5076,6 +5121,19 @@ plot(close)
 "#;
         let output = run(script, &[10.0, 11.0]);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let table = output.tables.first().expect("the table has cells");
+        assert_eq!(table.position, StudyTablePosition::BottomLeft);
+        assert_eq!(
+            table.rows,
+            [vec![
+                StudyCell::Text("B".into()),
+                StudyCell::Text("upd".into()),
+                StudyCell::Text(String::new())
+            ]]
+        );
+        let olive = Some(Color32::from_rgb(128, 128, 0));
+        assert_eq!(table.cell_bg, [vec![olive; 3]]);
+        assert_eq!(table.cell_text, [vec![Some(Color32::YELLOW); 3]]);
         let line = output
             .drawings
             .iter()

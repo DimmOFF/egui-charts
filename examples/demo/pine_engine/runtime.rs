@@ -155,6 +155,9 @@ pub struct DrawingOutput {
     pub fill_color: Option<Color32>,
     pub width: f32,
     pub style: egui_charts::model::LineStyle,
+    /// Where a label's box sits around its point, as its Pine `style` places it; other drawings
+    /// use the overlay placement.
+    pub text_anchor: egui_charts::drawings::TextAnchor,
     pub font_size: f32,
 }
 
@@ -3247,13 +3250,13 @@ fn drawing_output(object: &value::ObjectRef) -> Option<DrawingOutput> {
             .unwrap_or_default()
             .to_owned()
     };
-    let style = fields
+    let style_text = fields
         .get("style")
         .and_then(Value::text)
         .unwrap_or("style_solid");
-    let style = if style.contains("dashed") {
+    let style = if style_text.contains("dashed") {
         egui_charts::model::LineStyle::Dashed
-    } else if style.contains("dotted") {
+    } else if style_text.contains("dotted") {
         egui_charts::model::LineStyle::Dotted
     } else {
         egui_charts::model::LineStyle::Solid
@@ -3273,6 +3276,7 @@ fn drawing_output(object: &value::ObjectRef) -> Option<DrawingOutput> {
             fill_color: None,
             width: number("width") as f32,
             style,
+            text_anchor: egui_charts::drawings::TextAnchor::Overlay,
             font_size,
         },
         DrawingKind::Label => DrawingOutput {
@@ -3286,6 +3290,7 @@ fn drawing_output(object: &value::ObjectRef) -> Option<DrawingOutput> {
             fill_color: colour("color"),
             width: 1.0,
             style,
+            text_anchor: label_anchor(style_text),
             font_size,
         },
         DrawingKind::Box => DrawingOutput {
@@ -3299,6 +3304,7 @@ fn drawing_output(object: &value::ObjectRef) -> Option<DrawingOutput> {
             fill_color: colour("fill_color"),
             width: number("border_width") as f32,
             style,
+            text_anchor: egui_charts::drawings::TextAnchor::Overlay,
             font_size,
         },
         DrawingKind::Fill => {
@@ -3327,10 +3333,29 @@ fn drawing_output(object: &value::ObjectRef) -> Option<DrawingOutput> {
                 fill_color: colour("color"),
                 width: 0.0,
                 style,
+                text_anchor: egui_charts::drawings::TextAnchor::Overlay,
                 font_size,
             }
         }
     })
+}
+
+/// Where a Pine label's `style` puts its box around the point: the label sits opposite the arrow
+/// its style names, so `style_label_down` keeps it above the point and `style_label_up` below.
+/// `style_none` centres it on the point.
+fn label_anchor(style: &str) -> egui_charts::drawings::TextAnchor {
+    use egui_charts::drawings::TextAnchor;
+    match style {
+        "style_label_up" => TextAnchor::Below,
+        "style_label_down" => TextAnchor::Above,
+        "style_label_left" => TextAnchor::Right,
+        "style_label_right" => TextAnchor::Left,
+        "style_label_upper_left" => TextAnchor::BelowRight,
+        "style_label_upper_right" => TextAnchor::BelowLeft,
+        "style_label_lower_left" => TextAnchor::AboveRight,
+        "style_label_lower_right" => TextAnchor::AboveLeft,
+        _ => TextAnchor::Centered,
+    }
 }
 
 fn named<'a>(args: &'a [Arg], name: &str) -> Option<&'a Arg> {
@@ -4846,6 +4871,23 @@ plot(dayofweek.monday == 2 ? 1 : 0)
             &[1.0, 3.0, 4.0],
         );
         assert_eq!(late.plots[0].values, [0.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn a_label_keeps_its_line_breaks_and_placement() {
+        use egui_charts::drawings::TextAnchor;
+        let output = run(
+            "indicator(\"T\")\nlabel.new(bar_index, high, \"4H\\n(1:02)\", style = label.style_label_down)\nlabel.new(bar_index, low, \"●\", style = label.style_label_up)\n",
+            &[1.0, 2.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let [.., above, below] = &output.drawings[..] else {
+            panic!("two labels, got {:?}", output.drawings);
+        };
+        assert_eq!(above.text, "4H\n(1:02)");
+        assert_eq!(above.text_anchor, TextAnchor::Above);
+        assert_eq!(below.text, "●");
+        assert_eq!(below.text_anchor, TextAnchor::Below);
     }
 
     #[test]

@@ -354,6 +354,7 @@ fn study_drawing(output: &DrawingOutput) -> Drawing {
     drawing.text_color = output
         .text_color
         .map(|color| color.to_srgba_unmultiplied());
+    drawing.text_anchor = output.text_anchor;
     if !output.text.is_empty() {
         drawing.text = Some(output.text.clone());
     }

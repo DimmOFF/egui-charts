@@ -12,7 +12,7 @@ use egui_charts::studies::{
 };
 
 use crate::pine_engine::ast::{
-    Arg, Diagnostic, Expr, Function, NodeId, Program, Stmt, TypeDecl,
+    Arg, Block, Diagnostic, Expr, Function, NodeId, Program, Stmt, TypeDecl,
 };
 use crate::pine_engine::builtins::{self, TaState};
 use crate::pine_engine::parser::literal;
@@ -163,6 +163,9 @@ pub struct DrawingOutput {
 struct Var {
     value: Value,
     history: Vec<Value>,
+    /// Whether a `var` already ran its initializer, including one in a function that a script
+    /// first reached on a later bar.
+    initialized: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -228,6 +231,11 @@ pub struct Evaluator<'a> {
     shapes: Vec<ShapeSlot>,
     shape_at: HashMap<NodeId, usize>,
     security: HashMap<NodeId, SecuritySlot>,
+    /// The value a call site answered on each bar, kept only for call sites a script indexes
+    /// with `[n]`, so `time(tf)[1]` and `ta.sma(...)[1]` read what the earlier bars saw.
+    call_history: HashMap<NodeId, Vec<Value>>,
+    /// The call sites whose value `call_history` keeps.
+    indexed: HashSet<NodeId>,
     /// The values one lower-timeframe `request.security` read from the series the host supplied.
     lower: HashMap<(NodeId, egui_charts::model::Timeframe), LowerSeries>,
     /// Whether this run evaluates the script on a lower-timeframe series for `request.security`,
@@ -291,6 +299,8 @@ impl<'a> Evaluator<'a> {
             shapes: Vec::new(),
             shape_at: HashMap::new(),
             security: HashMap::new(),
+            call_history: HashMap::new(),
+            indexed: indexed_calls(program),
             lower: HashMap::new(),
             nested: false,
             sampling: None,
@@ -530,8 +540,10 @@ impl<'a> Evaluator<'a> {
             let var = self.vars.entry(name.to_owned()).or_insert_with(|| Var {
                 value: Value::Na,
                 history: Vec::new(),
+                initialized: true,
             });
             var.value = value;
+            var.initialized = true;
         } else if let Some(scope) = self.locals.last_mut() {
             scope.insert(name.to_owned(), value);
         }
@@ -551,8 +563,25 @@ impl<'a> Evaluator<'a> {
                 reassign,
             } => {
                 // `var x = …` runs on the first bar only; a missing one is `na` until assigned.
-                if *sticky && self.bar > 0 {
-                    return self.ident(name);
+                // A `var` in a function keeps its value between bars too, so it lives with the
+                // script's own variables.
+                // shortcut: it lives under its bare name, so two functions cannot each declare the
+                // same `var`; namespace it by function if a script ever needs that.
+                if *sticky {
+                    if let Some(var) = self.vars.get(name)
+                        && var.initialized
+                    {
+                        return var.value.clone();
+                    }
+                    let value = self.eval(value);
+                    let var = self.vars.entry(name.to_owned()).or_insert_with(|| Var {
+                        value: Value::Na,
+                        history: Vec::new(),
+                        initialized: false,
+                    });
+                    var.value = value.clone();
+                    var.initialized = true;
+                    return value;
                 }
                 let value = self.eval(value);
                 self.store(name, value.clone(), *reassign);
@@ -810,7 +839,17 @@ impl<'a> Evaluator<'a> {
                 receiver,
                 args,
                 line,
-            } => self.call(*id, callee, receiver.as_deref(), args, *line),
+            } => {
+                let value = self.call(*id, callee, receiver.as_deref(), args, *line);
+                if self.indexed.contains(id) {
+                    let history = self.call_history.entry(*id).or_default();
+                    if history.len() <= self.bar {
+                        history.resize(self.bar + 1, Value::Na);
+                    }
+                    history[self.bar] = value.clone();
+                }
+                value
+            }
             Expr::Index { target, index } => self.index(target, index),
             Expr::Unary { op, value } => {
                 let value = self.eval(value);
@@ -1531,6 +1570,21 @@ impl<'a> Evaluator<'a> {
             return Value::Na;
         }
         let offset = offset as usize;
+        if let Expr::Call { id, .. } = target {
+            // Evaluating the call keeps a stateful builtin in step with Pine; `[0]` then reads
+            // back the value this bar just recorded.
+            self.eval(target);
+            return self
+                .bar
+                .checked_sub(offset)
+                .and_then(|bar| {
+                    self.call_history
+                        .get(id)
+                        .and_then(|history| history.get(bar))
+                        .cloned()
+                })
+                .unwrap_or(Value::Na);
+        }
         let Expr::Ident(name) = target else {
             return Value::Na;
         };
@@ -1838,7 +1892,21 @@ impl<'a> Evaluator<'a> {
         }
         if let Some(rest) = name.strip_prefix("timeframe.") {
             return match rest {
-                "in_seconds" => Value::Num((self.context.timeframe.duration_ms() / 1000) as f64),
+                "in_seconds" => {
+                    let text = args
+                        .first()
+                        .map(|arg| self.eval(&arg.value))
+                        .and_then(|value| value.text().map(str::to_owned))
+                        .filter(|text| !text.is_empty());
+                    match text.as_deref().and_then(Bucket::parse) {
+                        Some(bucket) => Value::Num((bucket.duration_ms() / 1000) as f64),
+                        // Without a period the chart's own interval is what Pine answers.
+                        None if text.is_none() => {
+                            Value::Num((self.context.timeframe.duration_ms() / 1000) as f64)
+                        }
+                        None => Value::Na,
+                    }
+                }
                 // True on the first bar of a new `period`, as `timeframe.change` documents.
                 "change" => {
                     let period = args
@@ -2176,6 +2244,7 @@ impl<'a> Evaluator<'a> {
                     Var {
                         value: var.value.clone(),
                         history: Vec::new(),
+                        initialized: var.initialized,
                     },
                 )
             })
@@ -3351,6 +3420,139 @@ fn mintick_text(value: f64, mintick: f64) -> String {
 
 /// The namespaced name a v3/v4 script's bare builtin call means: `sma` is `ta.sma`, `abs` is
 /// `math.abs`, `color(...)` is `color.new` and `security(...)` is `request.security`.
+/// The call sites a script reads with `[n]`, whose value on every bar [`Evaluator::call_history`]
+/// keeps for it.
+fn indexed_calls(program: &Program) -> HashSet<NodeId> {
+    fn expression(expr: &Expr, ids: &mut HashSet<NodeId>) {
+        match expr {
+            Expr::Index { target, index } => {
+                if let Expr::Call { id, .. } = &**target {
+                    ids.insert(*id);
+                }
+                expression(target, ids);
+                expression(index, ids);
+            }
+            Expr::Call {
+                receiver, args, ..
+            } => {
+                if let Some(receiver) = receiver {
+                    expression(receiver, ids);
+                }
+                for arg in args {
+                    expression(&arg.value, ids);
+                }
+            }
+            Expr::Member { target, .. } => expression(target, ids),
+            Expr::Unary { value, .. } => expression(value, ids),
+            Expr::Binary { left, right, .. } => {
+                expression(left, ids);
+                expression(right, ids);
+            }
+            Expr::Ternary {
+                cond,
+                then,
+                otherwise,
+            } => {
+                expression(cond, ids);
+                expression(then, ids);
+                expression(otherwise, ids);
+            }
+            Expr::If {
+                cond,
+                then,
+                otherwise,
+            } => {
+                expression(cond, ids);
+                block(then, ids);
+                if let Some(otherwise) = otherwise {
+                    block(otherwise, ids);
+                }
+            }
+            Expr::Array(items) => {
+                for item in items {
+                    expression(item, ids);
+                }
+            }
+            Expr::Lambda { body, .. } => expression(body, ids),
+            Expr::Switch { subject, arms } => {
+                if let Some(subject) = subject {
+                    expression(subject, ids);
+                }
+                for arm in arms {
+                    for cond in &arm.conds {
+                        expression(cond, ids);
+                    }
+                    block(&arm.body, ids);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn block(body: &Block, ids: &mut HashSet<NodeId>) {
+        for statement in body {
+            match statement {
+                Stmt::Assign { value, .. } | Stmt::Expr(value) | Stmt::Tuple { value, .. } => {
+                    expression(value, ids)
+                }
+                Stmt::If {
+                    cond,
+                    then,
+                    otherwise,
+                } => {
+                    expression(cond, ids);
+                    block(then, ids);
+                    if let Some(otherwise) = otherwise {
+                        block(otherwise, ids);
+                    }
+                }
+                Stmt::For {
+                    from,
+                    to,
+                    step,
+                    body,
+                    ..
+                } => {
+                    expression(from, ids);
+                    expression(to, ids);
+                    if let Some(step) = step {
+                        expression(step, ids);
+                    }
+                    block(body, ids);
+                }
+                Stmt::ForIn { iterable, body, .. } => {
+                    expression(iterable, ids);
+                    block(body, ids);
+                }
+                Stmt::While { cond, body, .. } => {
+                    expression(cond, ids);
+                    block(body, ids);
+                }
+                Stmt::FieldAssign { target, value, .. } => {
+                    expression(target, ids);
+                    expression(value, ids);
+                }
+                Stmt::Function(function) => {
+                    for default in function.defaults.iter().flatten() {
+                        expression(default, ids);
+                    }
+                    block(&function.body, ids);
+                }
+                Stmt::Type(declaration) => {
+                    for field in &declaration.fields {
+                        if let Some(default) = &field.default {
+                            expression(default, ids);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut ids = HashSet::new();
+    block(&program.body, &mut ids);
+    ids
+}
+
 fn legacy_name(name: &str) -> Option<String> {
     match name {
         "color" => return Some("color.new".to_owned()),
@@ -4604,6 +4806,21 @@ plot(dayofweek.monday == 2 ? 1 : 0)
     }
 
     #[test]
+    fn a_call_reads_its_own_history_with_an_index() {
+        let output = run_bars(
+            "indicator(\"T\")\nplot(time(\"60\")[1])\nplot(ta.sma(close, 2)[1])\nplot(timeframe.in_seconds(\"1D\"))\n",
+            minute_bars(63),
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        // The bar before 01:01 opened at 00:00, and the first bar has nothing behind it.
+        assert!(output.plots[0].values[0].is_nan());
+        assert_eq!(output.plots[0].values[61], 1_704_070_800_000.0);
+        // The two-bar average of the bar before the third one.
+        assert_eq!(output.plots[1].values[2], 1.5);
+        assert_eq!(output.plots[2].values[0], 86_400.0);
+    }
+
+    #[test]
     fn time_close_is_the_bar_open_plus_its_timeframe() {
         let output = run_bars(
             "indicator(\"T\")\nplot(time_close - time)\nplot(time_close(\"60\") - time)\n",
@@ -4613,6 +4830,22 @@ plot(dayofweek.monday == 2 ? 1 : 0)
         assert_eq!(output.plots[0].values, [60_000.0, 60_000.0]);
         // The first bar opens at midnight and its hour closes at 01:00; the second opens at 01:00.
         assert_eq!(output.plots[1].values, [3_600_000.0, 3_540_000.0]);
+    }
+
+    #[test]
+    fn a_var_inside_a_function_keeps_its_value_between_bars() {
+        let output = run(
+            "indicator(\"T\")\nf(x) =>\n    var total = 0.0\n    total := total + x\n    total\nplot(f(1))\n",
+            &[1.0, 2.0, 3.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.plots[0].values, [1.0, 2.0, 3.0]);
+        // A function a script first reaches on a later bar starts its `var` there.
+        let late = run(
+            "indicator(\"T\")\nf(x) =>\n    var total = 0.0\n    total := total + x\n    total\nplot(close > 2 ? f(1) : 0)\n",
+            &[1.0, 3.0, 4.0],
+        );
+        assert_eq!(late.plots[0].values, [0.0, 1.0, 2.0]);
     }
 
     #[test]

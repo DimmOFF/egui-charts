@@ -164,7 +164,8 @@ pub(crate) fn apply_to_style(style: &mut egui::Style, theme: &Theme) {
 }
 
 /// Apply `theme` to egui's visuals and store it for [`ThemeExt::active_theme`](super::ThemeExt::active_theme).
-/// Also install Roboto ahead of the application's proportional fonts.
+/// Also install Roboto ahead of the application's proportional fonts, and a symbols fallback after
+/// them.
 ///
 /// Call it once at startup and again after the theme changes. Inside `eframe::App::ui` the root
 /// `Ui` already exists, so follow the call with `ui.set_style(ui.ctx().global_style())` for the
@@ -190,6 +191,22 @@ pub fn apply_to_egui(ctx: &egui::Context, theme: &Theme) {
                 priority: egui::FontPriority::Lowest,
             },
         ],
+    ));
+
+    // Script labels and tables carry arrows and geometric shapes (`⯅`, `▲`, `⬆`) that the text
+    // fonts lack, so a subset of Noto Sans Symbols 2 draws them after every other proportional
+    // font. It was cut from the Google Fonts release with
+    // `fonttools subset --unicodes=2190-21FF,25A0-25FF,2B00-2BFF,1F53C-1F53D --no-hinting`.
+    ctx.add_font(egui::FontInsert::new(
+        "Noto Symbols",
+        egui::FontData::from_static(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/fonts/NotoSansSymbols2-Arrows.ttf"
+        ))),
+        vec![egui::InsertFontFamily {
+            family: egui::FontFamily::Proportional,
+            priority: egui::FontPriority::Lowest,
+        }],
     ));
 
     // Store the theme so components resolve their colours from it while painting.
@@ -365,6 +382,25 @@ mod tests {
             })
             .drop_without_applying_deltas();
         }
+    }
+
+    /// A Pine label or table cell may carry arrows and geometric shapes the text fonts lack; the
+    /// bundled symbols face must draw them instead of a tofu box.
+    #[test]
+    fn bundled_symbols_cover_the_arrows_scripts_use() {
+        let ctx = egui::Context::default();
+        apply_to_egui(&ctx, &Theme::dark());
+        ctx.run_ui(Default::default(), |ui| {
+            let font = egui::FontId::proportional(14.0);
+            for symbol in ['⯅', '⯆', '▲', '▼', '⬆', '⬇'] {
+                assert!(
+                    ui.fonts_mut(|fonts| fonts.has_glyph(&font, symbol)),
+                    "U+{:04X} must have a glyph",
+                    symbol as u32
+                );
+            }
+        })
+        .drop_without_applying_deltas();
     }
 
     #[test]

@@ -948,6 +948,28 @@ impl<'a> Evaluator<'a> {
             .unwrap_or(Value::Na)
     }
 
+    /// Whether this bar opens a new session. shortcut: a session is one calendar day in UTC, so
+    /// a venue that splits its day into several sessions reports their inner breaks as one.
+    fn opens_session(&self) -> bool {
+        let Some(bar) = self.bars.get(self.bar) else {
+            return false;
+        };
+        self.bar
+            .checked_sub(1)
+            .and_then(|at| self.bars.get(at))
+            .is_none_or(|before| before.time.date_naive() != bar.time.date_naive())
+    }
+
+    /// Whether this bar closes its session, as [`Self::opens_session`] reads one.
+    fn closes_session(&self) -> bool {
+        let Some(bar) = self.bars.get(self.bar) else {
+            return false;
+        };
+        self.bars
+            .get(self.bar + 1)
+            .is_none_or(|next| next.time.date_naive() != bar.time.date_naive())
+    }
+
     fn member(&self, path: &str) -> Value {
         // An `enum` entry or a type's default: `Color.red` is a constant, not an object field.
         if let Some((namespace, name)) = path.split_once('.')
@@ -1039,6 +1061,13 @@ impl<'a> Evaluator<'a> {
                 return Value::Bool(
                     duration == 86_400_000 || duration == 604_800_000 || duration >= 2_419_200_000,
                 );
+            }
+            // `session.*` reads the session the engine can see: one calendar day.
+            "session.isfirstbar" | "session.isfirstbar_regular" => {
+                return Value::Bool(self.opens_session());
+            }
+            "session.islastbar" | "session.islastbar_regular" => {
+                return Value::Bool(self.closes_session());
             }
             // `ta.tr` is the true range the series' own bars give, without a `ta.tr()` call.
             "ta.tr" => {
@@ -4016,6 +4045,31 @@ mod tests {
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         assert_eq!(output.plots[0].values, [2.0, 2.0, 9.0]);
         assert_eq!(output.plots[1].values, [2.0, 2.0, 9.0]);
+    }
+
+    #[test]
+    fn a_session_is_the_calendar_day_of_the_bar() {
+        let bar = |day: u32, hour: u32, minute: u32, close: f64| {
+            Bar::new(
+                Utc.with_ymd_and_hms(2024, 1, day, hour, minute, 0).unwrap(),
+                close,
+                close + 1.0,
+                close - 1.0,
+                close,
+                1.0,
+            )
+        };
+        let output = run_bars(
+            "indicator(\"T\")\nplot(session.isfirstbar ? 1 : 0)\nplot(session.islastbar ? 1 : 0)\n",
+            vec![
+                bar(1, 23, 55, 1.0),
+                bar(1, 23, 59, 2.0),
+                bar(2, 0, 1, 3.0),
+                bar(2, 0, 5, 4.0),
+            ],
+        );
+        assert_eq!(output.plots[0].values, [1.0, 0.0, 1.0, 0.0]);
+        assert_eq!(output.plots[1].values, [0.0, 1.0, 0.0, 1.0]);
     }
 
     #[test]

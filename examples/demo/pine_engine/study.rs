@@ -35,9 +35,9 @@ pub struct PineStudy {
     markers: Vec<IndicatorMarker>,
     drawings: Vec<Drawing>,
     tables: Vec<StudyTable>,
-    /// Histories the last run read for `request.security` on other symbols.
+    /// Histories the last run read for `request.security` on other series.
     sources: Vec<SecurityData>,
-    /// Other-symbol histories the script asks the chart for, as `(symbol, interval)`.
+    /// Histories the script asked the chart for besides its own series, as `(symbol, interval)`.
     requests: Vec<(String, Timeframe)>,
     inputs: Vec<StudyInput>,
     visible: bool,
@@ -587,6 +587,58 @@ mod tests {
         assert_eq!(study.values().value(0, 2), Some(100.0));
         assert_eq!(study.values().value(0, 3), Some(100.0));
         assert_eq!(study.values().value(0, 4), Some(200.0));
+    }
+
+    /// The CISD table's shape: a `request.security` row that reads `Loading` until the feed's
+    /// finer history reaches the last chart bar, then the finer trend.
+    #[test]
+    fn a_lower_timeframe_row_leaves_loading_once_its_history_arrives() {
+        let mut study = PineStudy::new(
+            "//@version=6\nindicator(\"MTF\", overlay=true)\ntrend = close > open ? 1 : -1\nhtf = request.security(syminfo.tickerid, \"1\", trend)\nvar table t = table.new(position.top_right, 2, 2)\nif barstate.islast\n    table.cell(t, 0, 0, \"HTF\")\n    table.cell(t, 1, 0, htf == 1 ? \"UP\" : htf == -1 ? \"DOWN\" : \"Loading\")\n",
+        )
+        .unwrap();
+        study.set_timeframe(Timeframe::Hour4);
+        let chart: Vec<Bar> = [0, 4]
+            .iter()
+            .map(|hour| {
+                Bar::new(
+                    DateTime::UNIX_EPOCH + chrono::Duration::hours(*hour),
+                    11.0,
+                    12.0,
+                    8.0,
+                    9.0,
+                    1.0,
+                )
+            })
+            .collect();
+        let trend_cell = |study: &PineStudy| study.tables()[0].columns[1].clone();
+
+        study.calculate(&chart);
+        let request = study.data_requests().pop().expect("the finer timeframe");
+        assert_eq!(request.timeframe, Some(Timeframe::Min1));
+        assert_eq!(trend_cell(&study), "Loading");
+
+        let source: Vec<Bar> = (0..480)
+            .map(|minute| {
+                Bar::new(
+                    DateTime::UNIX_EPOCH + chrono::Duration::minutes(minute),
+                    10.0,
+                    11.0,
+                    9.0,
+                    10.5,
+                    1.0,
+                )
+            })
+            .collect();
+        let data = StudyData {
+            request,
+            bars: &source,
+            clock: egui_charts::model::BarClock::new(Timeframe::Min1),
+            instrument: None,
+            timeframe: Timeframe::Min1,
+        };
+        study.update_data(&chart, 0, &[data]);
+        assert_eq!(trend_cell(&study), "UP");
     }
 
     #[test]

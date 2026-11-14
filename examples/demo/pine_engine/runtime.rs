@@ -63,7 +63,7 @@ impl Default for Context {
     }
 }
 
-/// A history the host fetched for a `request.security` on another symbol.
+/// A history the host fetched for a `request.security` on another symbol or a lower timeframe.
 #[derive(Clone, Debug)]
 pub struct SecurityData {
     pub symbol: String,
@@ -124,7 +124,8 @@ pub struct RunOutput {
     pub fills: Vec<StudyFill>,
     pub drawings: Vec<DrawingOutput>,
     pub tables: Vec<StudyTable>,
-    /// Other-symbol histories the script read, as `(symbol, interval)`.
+    /// Histories the script read besides the chart's own series: another symbol or a lower
+    /// timeframe, as `(symbol, interval)`.
     pub security_requests: Vec<(String, egui_charts::model::Timeframe)>,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -200,6 +201,14 @@ struct SecuritySlot {
     ta: HashMap<NodeId, TaState>,
 }
 
+/// One lower-timeframe `request.security` expression read on each bar of the series the host
+/// supplied, with the bar's close time to place each reading on the chart.
+#[derive(Debug)]
+struct LowerSeries {
+    closes: Vec<i64>,
+    values: Vec<Value>,
+}
+
 /// Runs one script over a bar series.
 pub struct Evaluator<'a> {
     bars: Cow<'a, [Bar]>,
@@ -219,6 +228,13 @@ pub struct Evaluator<'a> {
     shapes: Vec<ShapeSlot>,
     shape_at: HashMap<NodeId, usize>,
     security: HashMap<NodeId, SecuritySlot>,
+    /// The values one lower-timeframe `request.security` read from the series the host supplied.
+    lower: HashMap<(NodeId, egui_charts::model::Timeframe), LowerSeries>,
+    /// Whether this run evaluates the script on a lower-timeframe series for `request.security`,
+    /// where a request for a still finer timeframe would need another such run.
+    nested: bool,
+    /// In such a run, the request whose readings the chart keeps, with each bar it ran on.
+    sampling: Option<(NodeId, Vec<(usize, Value)>)>,
     /// Histories for `request.security` calls on other symbols, supplied by the host.
     sources: &'a [SecurityData],
     /// Every other-symbol `request.security` this run asked for, with its interval.
@@ -275,6 +291,9 @@ impl<'a> Evaluator<'a> {
             shapes: Vec::new(),
             shape_at: HashMap::new(),
             security: HashMap::new(),
+            lower: HashMap::new(),
+            nested: false,
+            sampling: None,
             sources,
             security_requests: Vec::new(),
             diagnostics: Vec::new(),
@@ -1861,11 +1880,24 @@ impl<'a> Evaluator<'a> {
         self.unsupported(line, &name)
     }
 
+    /// `request.security(...)`: the value of the call, kept as this bar's reading when this run is
+    /// the lower-timeframe execution the chart samples.
+    fn security(&mut self, id: NodeId, args: &[Arg]) -> Value {
+        let value = self.security_value(id, args);
+        if let Some((sampled, readings)) = &mut self.sampling
+            && *sampled == id
+        {
+            readings.push((self.bar, value.clone()));
+        }
+        value
+    }
+
     /// `request.security(symbol, timeframe, expression)`: the expression's value on the last
     /// closed bar of `timeframe`, sampled from the bars on the chart. Another symbol reads the
-    /// history the host supplied for it. With `lookahead=barmerge.lookahead_on` the higher bar is
-    /// taken whole as soon as it opens, as Pine does when it repaints historical security values.
-    fn security(&mut self, id: NodeId, args: &[Arg]) -> Value {
+    /// history the host supplied for it, and so does a timeframe below the chart's. With
+    /// `lookahead=barmerge.lookahead_on` the higher bar is taken whole as soon as it opens, as
+    /// Pine does when it repaints historical security values.
+    fn security_value(&mut self, id: NodeId, args: &[Arg]) -> Value {
         let symbol = args
             .first()
             .map(|arg| self.eval(&arg.value))
@@ -1900,9 +1932,7 @@ impl<'a> Evaluator<'a> {
             return self.eval(expr);
         }
         if bucket.duration_ms() < self.context.timeframe.duration_ms() {
-            // A lower timeframe is `request.security_lower_tf`'s series, which this engine does
-            // not hold.
-            return Value::Na;
+            return self.lower_security(id, bucket);
         }
         let Some(bar) = self.bars.get(self.bar).cloned() else {
             return Value::Na;
@@ -1956,6 +1986,92 @@ impl<'a> Evaluator<'a> {
         value
     }
 
+    /// `request.security` on a timeframe below the chart's. The chart holds no bars that fine, so
+    /// the host fetches them, and the request reads the expression once per finer bar from a run
+    /// of the whole script there, as Pine evaluates such a request in the finer timeframe's own
+    /// context. Each chart bar then takes the last reading its bar had closed.
+    fn lower_security(&mut self, id: NodeId, bucket: Bucket) -> Value {
+        let Some(timeframe) = bucket.timeframe() else {
+            return Value::Na;
+        };
+        let request = (self.context.symbol.clone(), timeframe);
+        if !self.security_requests.contains(&request) {
+            self.security_requests.push(request);
+        }
+        if self.nested {
+            // shortcut: a request two timeframes down reads na, since a script that nests them
+            // would need a run inside a run; upgrade when such a script turns up.
+            return Value::Na;
+        }
+        let Some(source) = self
+            .sources
+            .iter()
+            .find(|source| source.symbol == self.context.symbol && source.timeframe == timeframe)
+        else {
+            return Value::Na;
+        };
+        let Some(bar) = self.bars.get(self.bar) else {
+            return Value::Na;
+        };
+        let key = (id, timeframe);
+        if !self.lower.contains_key(&key) {
+            let series = self.lower_series(id, source, timeframe);
+            self.lower.insert(key, series);
+        }
+        let series = &self.lower[&key];
+        let now = bar.time.timestamp_millis() + self.context.timeframe.duration_ms();
+        let seen = series.closes.partition_point(|close| *close <= now);
+        seen.checked_sub(1)
+            .and_then(|at| series.values.get(at))
+            .cloned()
+            .unwrap_or(Value::Na)
+    }
+
+    /// Runs the script over the supplied finer series, keeping the value of the request on every
+    /// bar it ran, with that bar's close time.
+    fn lower_series(
+        &self,
+        id: NodeId,
+        source: &SecurityData,
+        timeframe: egui_charts::model::Timeframe,
+    ) -> LowerSeries {
+        let mut context = self.context.clone();
+        context.timeframe = timeframe;
+        let mut sub = Evaluator::new(
+            self.program,
+            &source.bars,
+            &context,
+            self.inputs,
+            self.sources,
+        );
+        sub.nested = true;
+        sub.sampling = Some((id, Vec::new()));
+        let body = sub.program.body.as_slice();
+        let mut closes = Vec::with_capacity(source.bars.len());
+        for bar in 0..source.bars.len() {
+            sub.bar = bar;
+            sub.run_block(body);
+            sub.finish_bar();
+            let close = source.bars.get(bar + 1).map_or_else(
+                || source.bars[bar].time.timestamp_millis() + timeframe.duration_ms(),
+                |next| next.time.timestamp_millis(),
+            );
+            closes.push(close);
+        }
+        let mut values = vec![Value::Na; source.bars.len()];
+        for (bar, value) in sub
+            .sampling
+            .take()
+            .map(|(_, readings)| readings)
+            .unwrap_or_default()
+        {
+            if let Some(slot) = values.get_mut(bar) {
+                *slot = value;
+            }
+        }
+        LowerSeries { closes, values }
+    }
+
     /// `request.security` on another symbol: samples the host's history for that symbol and
     /// interval, evaluating the expression once per bar, as [`Self::security`] does for the
     /// chart's own bars. The request is recorded so the chart can fetch the history.
@@ -1975,7 +2091,8 @@ impl<'a> Evaluator<'a> {
             self.security_requests.push(request);
         }
         if bucket.duration_ms() < self.context.timeframe.duration_ms() {
-            // A lower timeframe is `request.security_lower_tf`'s series.
+            // Only the chart's own symbol is run again on a finer series; another symbol's lower
+            // timeframe would need a second history this engine does not fetch.
             return Value::Na;
         }
         let Some(bar) = self.bars.get(self.bar) else {
@@ -2036,6 +2153,8 @@ impl<'a> Evaluator<'a> {
         let mut sub = Evaluator::new(self.program, &[], self.context, self.inputs, self.sources);
         sub.bars = Cow::Owned(std::mem::take(&mut slot.bars));
         sub.ta = std::mem::take(&mut slot.ta);
+        // A request inside a lower-timeframe run must not start another such run.
+        sub.nested = self.nested;
         // A chart series passed to `request.security` keeps the value it had when the
         // higher-timeframe bar closed.
         sub.vars = self
@@ -3672,6 +3791,56 @@ mod tests {
         let values = &output.plots[0].values;
         // Hour closes are 60 and 120, so the two-bar average is 90 at 02:00.
         assert_eq!(values[120], 90.0);
+    }
+
+    /// A request for a timeframe below the chart's runs the script on the finer series the host
+    /// supplied, as Pine evaluates it in that series' own context.
+    #[test]
+    fn a_lower_timeframe_request_runs_the_script_on_that_series() {
+        let program = Parser::parse(
+            "indicator(\"T\")\nvar int bars = 0\nbars := bars + 1\nplot(request.security(syminfo.tickerid, \"1\", bars))\n",
+        )
+        .unwrap();
+        let context = Context {
+            timeframe: egui_charts::model::Timeframe::Min5,
+            ..Context::default()
+        };
+        let chart: Vec<Bar> = (0..3)
+            .map(|at| {
+                Bar::new(
+                    Utc.with_ymd_and_hms(2024, 1, 1, 0, at * 5, 0).unwrap(),
+                    10.0,
+                    11.0,
+                    9.0,
+                    10.0,
+                    1.0,
+                )
+            })
+            .collect();
+        let source = SecurityData {
+            symbol: String::new(),
+            timeframe: egui_charts::model::Timeframe::Min1,
+            bars: (0..10)
+                .map(|at| {
+                    Bar::new(
+                        Utc.with_ymd_and_hms(2024, 1, 1, 0, at, 0).unwrap(),
+                        10.0,
+                        11.0,
+                        9.0,
+                        10.0,
+                        1.0,
+                    )
+                })
+                .collect(),
+        };
+        let output = Evaluator::new(&program, &chart, &context, &HashMap::new(), &[source]).run();
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        // Each chart bar reads the script's own bar count on the last minute bar it closed.
+        assert_eq!(output.plots[0].values, [5.0, 10.0, 10.0]);
+        assert_eq!(
+            output.security_requests,
+            [(String::new(), egui_charts::model::Timeframe::Min1)]
+        );
     }
 
     #[test]

@@ -11,8 +11,9 @@ use egui_charts::studies::{
     FillBoundary, PlotType, StudyCell, StudyFill, StudyTable, StudyTablePosition,
 };
 
+use crate::pine_engine::ast;
 use crate::pine_engine::ast::{
-    Arg, Block, Diagnostic, Expr, Function, NodeId, Program, Stmt, TypeDecl,
+    Arg, Diagnostic, Expr, Function, NodeId, Program, Stmt, TypeDecl,
 };
 use crate::pine_engine::builtins::{self, TaState};
 use crate::pine_engine::parser::literal;
@@ -205,6 +206,18 @@ struct SecuritySlot {
     /// series comes from another symbol, so a reload starts it over.
     key: Option<i64>,
     ta: HashMap<NodeId, TaState>,
+    /// The script variables the request's expression can read, found on its first evaluation.
+    /// Only they are copied from the chart's own state, since a request over bars reads none.
+    referenced: Option<SecurityVars>,
+}
+
+/// The chart variables a `request.security` expression can read.
+#[derive(Debug)]
+enum SecurityVars {
+    /// All of them: the expression names its source at run time, as `input.source` does.
+    All,
+    /// Only these, found by reading the expression and the functions it calls.
+    Named(HashSet<String>),
 }
 
 /// One lower-timeframe `request.security` expression read on each bar of the series the host
@@ -238,7 +251,7 @@ pub struct Evaluator<'a> {
     /// with `[n]`, so `time(tf)[1]` and `ta.sma(...)[1]` read what the earlier bars saw.
     call_history: HashMap<NodeId, Vec<Value>>,
     /// The call sites whose value `call_history` keeps.
-    indexed: HashSet<NodeId>,
+    indexed: &'a HashSet<NodeId>,
     /// The values one lower-timeframe `request.security` read from the series the host supplied.
     lower: HashMap<(NodeId, egui_charts::model::Timeframe), LowerSeries>,
     /// Whether this run evaluates the script on a lower-timeframe series for `request.security`,
@@ -303,7 +316,7 @@ impl<'a> Evaluator<'a> {
             shape_at: HashMap::new(),
             security: HashMap::new(),
             call_history: HashMap::new(),
-            indexed: indexed_calls(program),
+            indexed: &program.indexed,
             lower: HashMap::new(),
             nested: false,
             sampling: None,
@@ -2025,6 +2038,7 @@ impl<'a> Evaluator<'a> {
             bucket,
             key: None,
             ta: HashMap::new(),
+            referenced: None,
         });
         if lookahead {
             if slot.key != Some(key) {
@@ -2205,6 +2219,7 @@ impl<'a> Evaluator<'a> {
             bucket,
             key: Some(first),
             ta: HashMap::new(),
+            referenced: None,
         });
         // A changed interval or a deeper history re-reads the series from its start.
         if slot.bucket != bucket || slot.key != Some(first) {
@@ -2214,6 +2229,7 @@ impl<'a> Evaluator<'a> {
                 bucket,
                 key: Some(first),
                 ta: HashMap::new(),
+                referenced: slot.referenced,
             };
         }
         let new_bars: Vec<Bar> = source.bars[slot.bars.len().min(seen)..seen].to_vec();
@@ -2238,20 +2254,26 @@ impl<'a> Evaluator<'a> {
         sub.nested = self.nested;
         // A chart series passed to `request.security` keeps the value it had when the
         // higher-timeframe bar closed.
-        sub.vars = self
-            .vars
-            .iter()
-            .map(|(name, var)| {
-                (
-                    name.clone(),
-                    Var {
-                        value: var.value.clone(),
-                        history: Vec::new(),
-                        initialized: var.initialized,
-                    },
-                )
-            })
-            .collect();
+        if slot.referenced.is_none() {
+            slot.referenced = Some(referenced_vars(self.program, expr));
+        }
+        let copy = |name: &String, var: &Var| {
+            (
+                name.clone(),
+                Var {
+                    value: var.value.clone(),
+                    history: Vec::new(),
+                    initialized: var.initialized,
+                },
+            )
+        };
+        sub.vars = match slot.referenced.as_ref().unwrap() {
+            SecurityVars::All => self.vars.iter().map(|(name, var)| copy(name, var)).collect(),
+            SecurityVars::Named(names) => names
+                .iter()
+                .filter_map(|name| self.vars.get(name).map(|var| copy(name, var)))
+                .collect(),
+        };
         sub.bar = bar;
         let value = sub.eval(expr);
         for diagnostic in sub.diagnostics.drain(..) {
@@ -3443,141 +3465,86 @@ fn mintick_text(value: f64, mintick: f64) -> String {
     format!("{value:.decimals$}")
 }
 
-/// The namespaced name a v3/v4 script's bare builtin call means: `sma` is `ta.sma`, `abs` is
-/// `math.abs`, `color(...)` is `color.new` and `security(...)` is `request.security`.
-/// The call sites a script reads with `[n]`, whose value on every bar [`Evaluator::call_history`]
-/// keeps for it.
-fn indexed_calls(program: &Program) -> HashSet<NodeId> {
-    fn expression(expr: &Expr, ids: &mut HashSet<NodeId>) {
-        match expr {
-            Expr::Index { target, index } => {
-                if let Expr::Call { id, .. } = &**target {
-                    ids.insert(*id);
-                }
-                expression(target, ids);
-                expression(index, ids);
-            }
-            Expr::Call {
-                receiver, args, ..
-            } => {
-                if let Some(receiver) = receiver {
-                    expression(receiver, ids);
-                }
-                for arg in args {
-                    expression(&arg.value, ids);
-                }
-            }
-            Expr::Member { target, .. } => expression(target, ids),
-            Expr::Unary { value, .. } => expression(value, ids),
-            Expr::Binary { left, right, .. } => {
-                expression(left, ids);
-                expression(right, ids);
-            }
-            Expr::Ternary {
-                cond,
-                then,
-                otherwise,
-            } => {
-                expression(cond, ids);
-                expression(then, ids);
-                expression(otherwise, ids);
-            }
-            Expr::If {
-                cond,
-                then,
-                otherwise,
-            } => {
-                expression(cond, ids);
-                block(then, ids);
-                if let Some(otherwise) = otherwise {
-                    block(otherwise, ids);
-                }
-            }
-            Expr::Array(items) => {
-                for item in items {
-                    expression(item, ids);
-                }
-            }
-            Expr::Lambda { body, .. } => expression(body, ids),
-            Expr::Switch { subject, arms } => {
-                if let Some(subject) = subject {
-                    expression(subject, ids);
-                }
-                for arm in arms {
-                    for cond in &arm.conds {
-                        expression(cond, ids);
-                    }
-                    block(&arm.body, ids);
-                }
-            }
-            _ => {}
-        }
-    }
-    fn block(body: &Block, ids: &mut HashSet<NodeId>) {
-        for statement in body {
-            match statement {
-                Stmt::Assign { value, .. } | Stmt::Expr(value) | Stmt::Tuple { value, .. } => {
-                    expression(value, ids)
-                }
-                Stmt::If {
-                    cond,
-                    then,
-                    otherwise,
-                } => {
-                    expression(cond, ids);
-                    block(then, ids);
-                    if let Some(otherwise) = otherwise {
-                        block(otherwise, ids);
-                    }
-                }
-                Stmt::For {
-                    from,
-                    to,
-                    step,
-                    body,
-                    ..
-                } => {
-                    expression(from, ids);
-                    expression(to, ids);
-                    if let Some(step) = step {
-                        expression(step, ids);
-                    }
-                    block(body, ids);
-                }
-                Stmt::ForIn { iterable, body, .. } => {
-                    expression(iterable, ids);
-                    block(body, ids);
-                }
-                Stmt::While { cond, body, .. } => {
-                    expression(cond, ids);
-                    block(body, ids);
-                }
-                Stmt::FieldAssign { target, value, .. } => {
-                    expression(target, ids);
-                    expression(value, ids);
-                }
-                Stmt::Function(function) => {
-                    for default in function.defaults.iter().flatten() {
-                        expression(default, ids);
-                    }
-                    block(&function.body, ids);
-                }
-                Stmt::Type(declaration) => {
-                    for field in &declaration.fields {
-                        if let Some(default) = &field.default {
-                            expression(default, ids);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+/// The call sites a script reads with `[n]`, whose value on every bar
+/// [`Evaluator::call_history`] keeps for it.
+pub(crate) fn indexed_calls(body: &[Stmt]) -> HashSet<NodeId> {
     let mut ids = HashSet::new();
-    block(&program.body, &mut ids);
+    ast::visit_stmts(body, &mut |expr| {
+        if let Expr::Index { target, .. } = expr
+            && let Expr::Call { id, .. } = &**target
+        {
+            ids.insert(*id);
+        }
+    });
     ids
 }
 
+/// The script variables an expression can read, including through the functions it calls. A
+/// `request.security` request hands the chart's values only for these, so a request that reads
+/// bars alone copies nothing and stays cheap on a long history.
+fn referenced_vars(program: &Program, expr: &Expr) -> SecurityVars {
+    let mut functions: HashMap<&str, &Function> = HashMap::new();
+    for statement in &program.body {
+        if let Stmt::Function(function) = statement {
+            functions.insert(function.name.as_str(), function);
+        }
+    }
+    let mut names = HashSet::new();
+    let mut called = HashSet::new();
+    let mut all = false;
+    collect_names(expr, &functions, &mut names, &mut called, &mut all);
+    if all {
+        SecurityVars::All
+    } else {
+        SecurityVars::Named(names)
+    }
+}
+
+fn collect_names(
+    expr: &Expr,
+    functions: &HashMap<&str, &Function>,
+    names: &mut HashSet<String>,
+    called: &mut HashSet<String>,
+    all: &mut bool,
+) {
+    let mut queue: Vec<String> = Vec::new();
+    fn reading(
+        expr: &Expr,
+        names: &mut HashSet<String>,
+        queue: &mut Vec<String>,
+        all: &mut bool,
+    ) {
+        match expr {
+            Expr::Ident(name) => {
+                names.insert(name.clone());
+            }
+            // The setting holds the name of a series, so what it reads is only known at run time.
+            Expr::Call { callee, .. } if callee.join(".") == "input.source" => *all = true,
+            Expr::Call { callee, .. } if callee.len() == 1 => queue.push(callee[0].clone()),
+            _ => {}
+        }
+    }
+    expr.visit(&mut |expr| reading(expr, names, &mut queue, all));
+    while let Some(callee) = queue.pop() {
+        let Some(function) = functions.get(callee.as_str()).copied() else {
+            continue;
+        };
+        if !called.insert(callee) {
+            continue;
+        }
+        // A default argument fills a parameter even when the caller leaves it out, so it can
+        // read a chart value as well.
+        for default in function.defaults.iter().flatten() {
+            default.visit(&mut |expr| reading(expr, names, &mut queue, all));
+        }
+        ast::visit_stmts(&function.body, &mut |expr| {
+            reading(expr, names, &mut queue, all)
+        });
+    }
+}
+
+/// The namespaced name a v3/v4 script's bare builtin call means: `sma` is `ta.sma`, `abs` is
+/// `math.abs`, `color(...)` is `color.new` and `security(...)` is `request.security`.
 fn legacy_name(name: &str) -> Option<String> {
     match name {
         "color" => return Some("color.new".to_owned()),
@@ -4028,6 +3995,19 @@ mod tests {
         let values = &output.plots[0].values;
         // Hour closes are 60 and 120, so the two-bar average is 90 at 02:00.
         assert_eq!(values[120], 90.0);
+    }
+
+    /// A chart value a request reads, even through a function, comes from the chart's own state;
+    /// a request that reads bars alone copies none of it.
+    #[test]
+    fn request_security_reads_the_chart_value_a_function_returns() {
+        let output = run_bars(
+            "indicator(\"T\")\ndouble = close * 2\nshown() => double\nplot(request.security(syminfo.tickerid, \"60\", shown()))\n",
+            minute_bars(62),
+        );
+        let values = &output.plots[0].values;
+        assert!(values[59].is_nan(), "the first hour has not closed yet");
+        assert_eq!(values[60], 122.0);
     }
 
     /// A request for a timeframe below the chart's runs the script on the finer series the host

@@ -924,6 +924,16 @@ impl<'a> Evaluator<'a> {
                 .get(self.bar)
                 .map(|bar| Value::Num(bar.time.timestamp_millis() as f64))
                 .unwrap_or(Value::Na),
+            // A bar closes one timeframe after it opens; a trade-based chart has no duration.
+            "time_close" => self
+                .bars
+                .get(self.bar)
+                .map(|bar| {
+                    Value::Num(
+                        (bar.time.timestamp_millis() + self.context.timeframe.duration_ms()) as f64,
+                    )
+                })
+                .unwrap_or(Value::Na),
             "hour" => self.clock(|time| time.hour() as f64),
             "minute" => self.clock(|time| time.minute() as f64),
             "second" => self.clock(|time| time.second() as f64),
@@ -4576,6 +4586,33 @@ plot(dayofweek.monday == 2 ? 1 : 0)
         assert_eq!(output.plots[1].values[1], 1.0);
         assert_eq!(output.plots[2].values[1], 1.0);
         assert_eq!(output.plots[6].values[1], 1.0);
+    }
+
+    #[test]
+    fn na_only_reads_a_missing_value_as_missing() {
+        let output = run(
+            "indicator(\"T\")\ntype S\n    float v\n    label l\ns = S.new(1.0, label.new(bar_index, close, \"x\"))\nplot(na(s) ? 1 : 0)\nplot(na(s.l) ? 1 : 0)\nplot(na(close) ? 1 : 0)\nplot(na(close[999]) ? 1 : 0)\n",
+            &[1.0, 2.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let at = |index: usize| output.plots[index].values[1];
+        // An object that exists is a value, even when one of its fields is `na`.
+        assert_eq!(at(0), 0.0);
+        assert_eq!(at(1), 0.0);
+        assert_eq!(at(2), 0.0);
+        assert_eq!(at(3), 1.0);
+    }
+
+    #[test]
+    fn time_close_is_the_bar_open_plus_its_timeframe() {
+        let output = run_bars(
+            "indicator(\"T\")\nplot(time_close - time)\nplot(time_close(\"60\") - time)\n",
+            minute_bars(2),
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.plots[0].values, [60_000.0, 60_000.0]);
+        // The first bar opens at midnight and its hour closes at 01:00; the second opens at 01:00.
+        assert_eq!(output.plots[1].values, [3_600_000.0, 3_540_000.0]);
     }
 
     #[test]

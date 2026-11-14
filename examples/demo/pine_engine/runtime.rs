@@ -2596,10 +2596,13 @@ impl<'a> Evaluator<'a> {
             fields.insert("__columns".into(), Value::Num(columns as f64));
             fields.insert("__rows".into(), Value::Num(rows as f64));
             // `table.new(position.top_right, columns, rows, ...)`: the first argument is a member
-            // path, which is read as text so it is not evaluated as an unknown name.
+            // path, which is read as text so it is not evaluated as an unknown name. A script may
+            // also pass a variable holding that constant, which evaluates to the member's name.
             let position = args
                 .first()
-                .and_then(|arg| dotted(&arg.value))
+                .map(|arg| self.eval(&arg.value))
+                .and_then(|value| value.text().map(str::to_owned))
+                .or_else(|| args.first().and_then(|arg| dotted(&arg.value)))
                 .unwrap_or_else(|| "position.top_right".into());
             fields.insert("__position".into(), Value::Str(position));
             drop(fields);
@@ -3291,17 +3294,18 @@ fn line_pattern(value: &Value) -> egui_charts::model::LineStyle {
     }
 }
 
-/// The Pine `position.*` corner a table sits in.
+/// The Pine `position.*` corner a table sits in, as the path or the member's bare name.
 fn table_position(name: Option<&str>) -> StudyTablePosition {
+    let name = name.map(|name| name.strip_prefix("position.").unwrap_or(name));
     match name {
-        Some("position.top_left") => StudyTablePosition::TopLeft,
-        Some("position.top_center") => StudyTablePosition::TopCenter,
-        Some("position.top_right") => StudyTablePosition::TopRight,
-        Some("position.middle_left") => StudyTablePosition::MiddleLeft,
-        Some("position.middle_center") => StudyTablePosition::MiddleCenter,
-        Some("position.middle_right") => StudyTablePosition::MiddleRight,
-        Some("position.bottom_left") => StudyTablePosition::BottomLeft,
-        Some("position.bottom_center") => StudyTablePosition::BottomCenter,
+        Some("top_left") => StudyTablePosition::TopLeft,
+        Some("top_center") => StudyTablePosition::TopCenter,
+        Some("top_right") => StudyTablePosition::TopRight,
+        Some("middle_left") => StudyTablePosition::MiddleLeft,
+        Some("middle_center") => StudyTablePosition::MiddleCenter,
+        Some("middle_right") => StudyTablePosition::MiddleRight,
+        Some("bottom_left") => StudyTablePosition::BottomLeft,
+        Some("bottom_center") => StudyTablePosition::BottomCenter,
         _ => StudyTablePosition::BottomRight,
     }
 }
@@ -3738,6 +3742,16 @@ mod tests {
         assert_eq!(table.cell_bg, vec![vec![Some(Color32::RED), None]]);
         assert_eq!(table.cell_text, vec![vec![Some(Color32::WHITE), None]]);
         assert_eq!(table.position, StudyTablePosition::TopRight);
+    }
+
+    /// A script may keep its corner in a variable, as CISD does with its position input.
+    #[test]
+    fn a_table_takes_its_position_from_a_variable() {
+        let output = run(
+            "indicator(\"T\")\ntp = position.middle_right\nvar table t = table.new(tp, 1, 1)\ntable.cell(t, 0, 0, \"x\")\nplot(close)\n",
+            &[1.0],
+        );
+        assert_eq!(output.tables[0].position, StudyTablePosition::MiddleRight);
     }
 
     #[test]

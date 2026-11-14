@@ -184,11 +184,14 @@ mod tests {
         let bars: Vec<_> = (0..300)
             .map(|at| {
                 let close = 100.0 + (at as f64 * 0.7).sin() * 5.0;
+                // A real bar opens where the previous one closed, so a study that reads the
+                // candle body sees one.
+                let open = 100.0 + ((at as f64 - 1.0) * 0.7).sin() * 5.0;
                 egui_charts::model::Bar::new(
                     chrono::DateTime::UNIX_EPOCH + chrono::Duration::minutes(at * 5),
-                    close - 0.4,
-                    close + 1.0,
-                    close - 1.0,
+                    open,
+                    close.max(open) + 1.0,
+                    close.min(open) - 1.0,
                     close,
                     10.0 + at as f64,
                 )

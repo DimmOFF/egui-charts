@@ -1663,3 +1663,88 @@ fn unclassified_footprint_rows_do_not_look_like_the_poc() {
         "(unclassified row, POC row) sell cell fills, chart then host, light then dark: {fills:?}"
     );
 }
+
+/// A study that draws its own lines, as a Pine script's `line.new` does, paints them on the
+/// price pane even with every plot hidden.
+#[cfg(feature = "drawings")]
+#[test]
+fn study_drawings_paint_on_the_price_pane() {
+    use crate::drawings::{ChartPoint, Drawing, DrawingToolType};
+    use crate::studies::IndicatorValues;
+
+    struct Drawn {
+        values: IndicatorValues,
+        drawings: Vec<Drawing>,
+    }
+
+    impl crate::studies::Indicator for Drawn {
+        fn name(&self) -> &str {
+            "Drawn"
+        }
+
+        fn calculate(&mut self, _: &[crate::model::Bar]) {}
+
+        fn values(&self) -> &IndicatorValues {
+            &self.values
+        }
+
+        fn colors(&self) -> Vec<egui::Color32> {
+            Vec::new()
+        }
+
+        fn set_colors(&mut self, _: Vec<egui::Color32>) {}
+
+        fn set_visible(&mut self, _: bool) {}
+
+        fn clone_box(&self) -> Box<dyn crate::studies::Indicator> {
+            Box::new(Self {
+                values: self.values.clone(),
+                drawings: self.drawings.clone(),
+            })
+        }
+
+        fn plot_style(&self, _: usize) -> crate::studies::PlotStyle {
+            crate::studies::PlotStyle {
+                color: egui::Color32::WHITE,
+                width: 1.0,
+                pattern: crate::model::LineStyle::Solid,
+                plot_type: crate::studies::PlotType::Line,
+                visible: false,
+            }
+        }
+
+        fn drawings(&self) -> &[Drawing] {
+            &self.drawings
+        }
+
+        fn keeps_drawing_style(&self) -> bool {
+            true
+        }
+
+        fn is_overlay(&self) -> bool {
+            true
+        }
+    }
+
+    let color = egui::Color32::from_rgb(255, 0, 255);
+    let mut line = Drawing::new(0, DrawingToolType::TrendLine);
+    line.chart_points = vec![ChartPoint::new(0.0, 105.0), ChartPoint::new(99.0, 105.0)];
+    line.completed = true;
+    line.color = color.to_srgba_unmultiplied();
+    let mut chart = chart(&[100.0], &[110.0]);
+    chart.add_indicator(Box::new(Drawn {
+        values: IndicatorValues::new(),
+        drawings: vec![line],
+    }));
+    let ctx = egui::Context::default();
+    let painted = shapes(&ctx, &mut chart, 0.0, vec![]);
+    let plot = chart.last_rendered_price_rect;
+    assert!(
+        painted.iter().any(|shape| match shape {
+            Shape::LineSegment { points, stroke } => stroke.color == color
+                && points.iter().all(|point| plot.contains(*point)),
+            _ => false,
+        }),
+        "the study's line must reach the price pane, in its own colour"
+    );
+}

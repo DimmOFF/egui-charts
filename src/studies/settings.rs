@@ -978,6 +978,10 @@ impl Indicator for ConfiguredStudy {
     fn drawings(&self) -> &[crate::drawings::Drawing] {
         self.study.drawings()
     }
+    #[cfg(feature = "drawings")]
+    fn keeps_drawing_style(&self) -> bool {
+        self.study.keeps_drawing_style()
+    }
     fn candles(&self) -> &[super::StudyCandle] {
         self.study.candles()
     }

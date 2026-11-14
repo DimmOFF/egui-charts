@@ -104,20 +104,33 @@ pub(crate) fn paint(
         }
     }
     let width = widths.iter().sum::<f32>();
-    let height = 22.0 * (table.rows.len() + 2) as f32;
+    // A Pine table has no caption, while a built-in one is titled and keeps to half the pane
+    // so it leaves the chart readable. A Pine table is sized by its script, so it may fill the
+    // room the legend leaves.
+    let caption = if table.title.is_empty() { 0.0 } else { 22.0 };
+    let height = 22.0 * (table.rows.len() + 1) as f32 + caption;
     let mut available = rect.shrink(8.0);
     available.min.y += 24.0;
     if !available.is_positive() || rect.height() < 44.0 {
         return Rect::from_min_size(rect.min, egui::Vec2::ZERO);
     }
-    let title_width = painter
-        .layout_no_wrap(table.title.clone(), font.clone(), theme.ui.text)
-        .size()
-        .x
-        + 16.0;
+    let title_width = if caption == 0.0 {
+        0.0
+    } else {
+        painter
+            .layout_no_wrap(table.title.clone(), font.clone(), theme.ui.text)
+            .size()
+            .x
+            + 16.0
+    };
+    let limit = if caption == 0.0 {
+        available.height()
+    } else {
+        rect.height() * 0.5
+    };
     let size = vec2(
         width.max(title_width).min(available.width()),
-        height.min(available.height()).min(rect.height() * 0.5),
+        height.min(available.height()).min(limit),
     );
     let (align_x, align_y) = match table.position {
         StudyTablePosition::TopLeft => (0.0, 0.0),
@@ -153,24 +166,26 @@ pub(crate) fn paint(
         ),
         StrokeKind::Inside,
     );
-    painter.text(
-        bounds.min + vec2(8.0, 11.0),
-        Align2::LEFT_CENTER,
-        &table.title,
-        font.clone(),
-        theme.ui.text,
-    );
+    if caption > 0.0 {
+        painter.text(
+            bounds.min + vec2(8.0, 11.0),
+            Align2::LEFT_CENTER,
+            &table.title,
+            font.clone(),
+            theme.ui.text,
+        );
+    }
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .id_salt(id)
-            .max_rect(Rect::from_min_max(bounds.min + vec2(0.0, 22.0), bounds.max)),
+            .max_rect(Rect::from_min_max(bounds.min + vec2(0.0, caption), bounds.max)),
     );
     child.set_clip_rect(painter.clip_rect());
     egui::ScrollArea::both()
         .auto_shrink([false, false])
         .show(&mut child, |ui| {
             let (content, _) =
-                ui.allocate_exact_size(vec2(width, height - 22.0), egui::Sense::hover());
+                ui.allocate_exact_size(vec2(width, height - caption), egui::Sense::hover());
             let painter = ui.painter();
             let mut y = content.top();
             for (row_index, row) in std::iter::once(
@@ -353,5 +368,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A Pine table has no caption row, and one that fits its pane shows every row at once
+    /// rather than clipping the last one behind a scroll bar.
+    #[test]
+    fn an_uncaptioned_table_shows_every_row_it_declares() {
+        use egui::{RawInput, Rect, Shape, pos2, vec2};
+
+        let table = StudyTable {
+            columns: ["Timeframe".into(), "Trend".into()].into(),
+            rows: (0..10)
+                .map(|row| vec![StudyCell::Text(format!("{row}m")), StudyCell::Text("UP".into())])
+                .collect(),
+            ..StudyTable::default()
+        };
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
+        let output = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(rect),
+                ..Default::default()
+            },
+            |ui| {
+                paint(ui, rect, &table, ui.scope_id().with("table"));
+            },
+        );
+        let last = output.shapes.iter().find_map(|clipped| match &clipped.shape {
+            Shape::Text(text) if text.galley.text() == "9m" => Some((clipped, text)),
+            _ => None,
+        });
+        let Some((clipped, text)) = last else {
+            panic!("the last row must be painted");
+        };
+        assert!(
+            clipped
+                .clip_rect
+                .contains_rect(Rect::from_min_size(text.pos, text.galley.size())),
+            "the last row must not be clipped: {:?}",
+            clipped.clip_rect
+        );
+        output.drop_without_applying_deltas();
     }
 }

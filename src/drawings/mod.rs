@@ -41,8 +41,8 @@ pub use domain::{
     GhostFeedConfig, HandlePos, ImageConfig, LineMeasurementPosition, LineMeasurements,
     LineTextHorizontalAlign, LineTextOrientation, LineTextVerticalAlign, NoteTextStyle,
     ParseToolTypeError, PitchforkConfig, PitchforkLevel, PositionReadout, PositionSize,
-    PositionSizing, PositionStyle, RegressionTrendConfig, TimeframeVisibility, VwapBand,
-    VwapConfig,
+    PositionSizing, PositionStyle, RegressionTrendConfig, TextAnchor, TimeframeVisibility,
+    VwapBand, VwapConfig,
 };
 
 // Re-export manager types

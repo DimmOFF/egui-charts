@@ -482,9 +482,8 @@ pub(crate) fn sample_bars() -> Vec<Bar> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drawings::DrawingManager;
+    use crate::drawings::{DrawingManager, TextAnchor};
     use egui::{Color32, Context, Pos2, RawInput, Shape};
-
     /// A non-default style reaches geometry in every renderer family, while fills keep
     /// their configured colour. Dashes in a 200 px horizontal edge cannot be one solid edge.
     #[test]
@@ -1831,6 +1830,61 @@ mod tests {
                 ["Earnings"]
             );
         }
+    }
+
+    /// A Pine label's placement keeps its box clear of the point: `Below` starts it `spacing.sm`
+    /// under the point with every line centred, `Above` ends it that far over it, and `Left` ends
+    /// it beside the point with the lines centred on each other.
+    #[test]
+    fn anchored_text_boxes_keep_clear_of_their_point() {
+        fn texts(shapes: &[Shape], out: &mut Vec<egui::epaint::TextShape>) {
+            for shape in shapes {
+                match shape {
+                    Shape::Vec(shapes) => texts(shapes, out),
+                    Shape::Text(text) => out.push(text.clone()),
+                    _ => {}
+                }
+            }
+        }
+        let point = Pos2::new(200.0, 200.0);
+        let gap = crate::tokens::DESIGN_TOKENS.spacing.sm;
+        let box_of = |anchor: TextAnchor, text: &str| {
+            let mut drawing = Drawing::new(7, DrawingToolType::TextLabel);
+            drawing.points = vec![point];
+            drawing.chart_points = vec![crate::drawings::ChartPoint::new(20.0, 300.0)];
+            drawing.text = Some(text.into());
+            drawing.text_anchor = anchor;
+            let mut painted = Vec::new();
+            texts(&paint(&drawing), &mut painted);
+            let [text] = &painted[..] else {
+                panic!("one text");
+            };
+            (text.galley.rect.translate(text.pos.to_vec2()), text.clone())
+        };
+
+        let (below, text) = box_of(TextAnchor::Below, "4H\n(1:02:03)");
+        assert_eq!(below.min.y, point.y + gap, "{below:?}");
+        assert!((below.center().x - point.x).abs() <= 1.0, "{below:?}");
+        // Both lines are centred on each other, not left-aligned under the box.
+        let [first, second] = &text.galley.rows[..] else {
+            panic!("two lines");
+        };
+        assert!(
+            (first.rect().center().x - second.rect().center().x).abs() <= 1.0,
+            "lines are centred"
+        );
+
+        let (above, _) = box_of(TextAnchor::Above, "4H");
+        assert_eq!(above.max.y, point.y - gap, "{above:?}");
+        assert!((above.center().x - point.x).abs() <= 1.0, "{above:?}");
+
+        let (left, _) = box_of(TextAnchor::Left, "4H");
+        assert_eq!(left.max.x, point.x - gap, "{left:?}");
+        assert_eq!(left.center().y, point.y, "{left:?}");
+
+        // The placement annotations drawn by hand had keeps the point on the box's corner.
+        let (overlay, _) = box_of(TextAnchor::Overlay, "Text");
+        assert_eq!(overlay.min, point);
     }
 
     /// A pattern's labels and selection handles can cross the pane edge;

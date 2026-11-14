@@ -12,7 +12,7 @@ use super::{
     ArrowStyle, BarsPatternConfig, ChartPoint, DrawingToolType, ElliottDegree, FibonacciConfig,
     FontWeight, GANN_SQUARE_UNITS, GannConfig, GhostFeedConfig, ImageConfig, LineMeasurements,
     NoteTextStyle, PitchforkConfig, PositionReadout, PositionSize, PositionSizing, PositionStyle,
-    RegressionTrendConfig, TimeframeVisibility, VwapConfig,
+    RegressionTrendConfig, TextAnchor, TimeframeVisibility, VwapConfig,
 };
 
 use crate::data::VolumeProfileConfig;
@@ -191,6 +191,10 @@ pub struct Drawing {
     /// Widest line of wrapped text, in points.
     #[serde(default = "default_text_wrap_width")]
     pub text_wrap_width: f32,
+    /// Where a Text or Anchored text's box sits around its anchor. Older drawings put its
+    /// top-left corner on the point.
+    #[serde(default)]
+    pub text_anchor: TextAnchor,
     /// Whether a Text or Anchored text grows and shrinks with the bar spacing instead of keeping
     /// its font size at every zoom: the text, its wrap width and its box scale together. Older
     /// drawings keep their size.
@@ -576,6 +580,7 @@ impl Drawing {
             },
             text_wrap: false,
             text_wrap_width: default_text_wrap_width(),
+            text_anchor: TextAnchor::default(),
             text_follows_zoom: false,
             text_zoom_spacing: None,
             note_text_style: None,

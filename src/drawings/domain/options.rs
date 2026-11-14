@@ -1184,6 +1184,35 @@ pub enum LineTextOrientation {
     Horizontal,
 }
 
+/// Where a Text or Anchored text's box sits around its anchor, as Pine's `label.style_*` places
+/// one. A box kept to a side holds that side's edge a small gap off the point, so the bar, dot or
+/// line it annotates stays visible.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextAnchor {
+    /// The box's top-left corner on the point, with no gap: the placement of annotations drawn
+    /// by hand.
+    #[default]
+    Overlay,
+    /// The box above the point.
+    Above,
+    /// The box below the point.
+    Below,
+    /// The box left of the point.
+    Left,
+    /// The box right of the point.
+    Right,
+    /// The box above and left of the point.
+    AboveLeft,
+    /// The box above and right of the point.
+    AboveRight,
+    /// The box below and left of the point.
+    BelowLeft,
+    /// The box below and right of the point.
+    BelowRight,
+    /// The box centred on the point.
+    Centered,
+}
+
 /// Independent readouts of a trend line, ray, extended line, info line or trend angle, and the
 /// placement of the text of those tools and of a horizontal line or ray or a vertical line,
 /// which have no readouts. Readouts start hidden except on an info line, see [`Self::for_tool`];

@@ -1,4 +1,4 @@
-//! Settings for an existing study, staged until Apply.
+//! Settings for an existing study, staged until Ok.
 
 use crate::localization as l10n;
 use crate::model::LineStyle;
@@ -6,8 +6,8 @@ use crate::model::Timeframe;
 use crate::studies::{
     Indicator, InputKind, InputValue, PlotType, StudyInput, StudyScale, StudySettings,
 };
-use crate::theme::Theme;
-use crate::ui_kit::{FormGrid, dialog::DialogFooter, modal::Modal};
+use crate::theme::{Theme, ThemeExt};
+use crate::ui_kit::{dialog::DialogFooter, modal::Modal};
 use crate::widget::SeriesId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -78,6 +78,30 @@ fn width_picker(ui: &mut egui::Ui, width: &mut f32) {
             .suffix(l10n::text(ui.ctx(), " px")),
     )
     .accessible_name(l10n::text(ui.ctx(), "Line width"));
+}
+
+/// A section heading above a group of inputs, as the settings dialog of TradingView draws it.
+fn section_heading(ui: &mut egui::Ui, title: &str, first: bool) {
+    let theme = ui.active_theme();
+    if first {
+        ui.add_space(theme.spacing.xs);
+    } else {
+        ui.add_space(theme.spacing.sm);
+        ui.separator();
+        ui.add_space(theme.spacing.sm);
+    }
+    ui.add(egui::Label::new(
+        egui::RichText::new(l10n::text(ui.ctx(), title)).strong(),
+    ));
+    ui.add_space(theme.spacing.xs);
+}
+
+/// The question mark through which TradingView shows an input's tooltip.
+fn tooltip_mark(ui: &mut egui::Ui, tooltip: &str) {
+    let response = ui.add(
+        egui::Label::new(egui::RichText::new("?").weak()).sense(egui::Sense::hover()),
+    );
+    response.on_hover_text(l10n::text(ui.ctx(), tooltip));
 }
 
 impl IndicatorSettingsDialog {
@@ -176,7 +200,7 @@ impl IndicatorSettingsDialog {
     }
 
     /// Preview staged values on the chart without recording history. Closing or cancelling
-    /// restores the opening settings on the current bars. Apply restores them too, then returns
+    /// restores the opening settings on the current bars. Ok restores them too, then returns
     /// the final edit for the host to commit in one [`Chart::user_action`](crate::widget::Chart::user_action).
     /// Call this every frame from opening until the dialog closes, using the same chart.
     pub fn show_preview_for_chart(
@@ -236,7 +260,7 @@ impl IndicatorSettingsDialog {
         None
     }
 
-    /// Show the staged edit. Apply returns it once; the host calls
+    /// Show the staged edit. Ok returns it once; the host calls
     /// [`Indicator::apply_settings`] on the original study, then lets the chart recalculate.
     pub fn show(&mut self, ctx: &egui::Context, _theme: &Theme) -> Option<StudyEdit> {
         let edit = self.edit.as_mut()?;
@@ -254,7 +278,7 @@ impl IndicatorSettingsDialog {
                 )
                 .show(ui);
                 ui.separator();
-                egui::ScrollArea::both()
+                egui::ScrollArea::vertical()
                     .max_height((ui.available_height() - 72.0).max(0.0))
                     .show(ui, |ui| match self.tab {
                         Tab::Inputs => {
@@ -265,57 +289,166 @@ impl IndicatorSettingsDialog {
                                     "This study has no editable inputs.",
                                 ));
                             }
-                            if !self.inputs.is_empty()
-                                && ui
-                                    .small_button(l10n::text(ui.ctx(), "Reset inputs"))
-                                    .clicked()
-                            {
-                                for input in &mut self.inputs {
-                                    input.value = input.default.clone();
-                                }
-                            }
+                            // A study source replaces the chart as the symbol the study
+                            // calculates on, so its own symbol inputs no longer apply.
                             let study_source = self.inputs.iter().any(|input| {
                                 matches!(
                                     input.value,
                                     InputValue::Source(crate::studies::StudySource::Study { .. })
                                 )
                             });
+                            let forced = |input: &StudyInput| {
+                                study_source
+                                    && matches!(
+                                        input.id.as_str(),
+                                        "calculation_symbol"
+                                            | "calculation_timeframe"
+                                            | "wait_for_close"
+                                    )
+                            };
+                            for input in &mut self.inputs {
+                                if forced(input) {
+                                    input.value = input.default.clone();
+                                }
+                            }
                             let shown: Vec<_> = self
                                 .inputs
                                 .iter()
-                                .map(|input| input.is_shown(&self.inputs))
+                                .map(|input| !forced(input) && input.is_shown(&self.inputs))
                                 .collect();
-                            FormGrid::new("study_inputs").show(ui, |ui| {
-                                for (input, shown) in self.inputs.iter_mut().zip(shown) {
-                                    if study_source
-                                        && matches!(
-                                            input.id.as_str(),
-                                            "calculation_symbol"
-                                                | "calculation_timeframe"
-                                                | "wait_for_close"
-                                        )
+                            let mut section: Option<String> = None;
+                            let mut first_section = true;
+                            let mut at = 0;
+                            while at < shown.len() {
+                                if !shown[at] {
+                                    at += 1;
+                                    continue;
+                                }
+                                let group = self.inputs[at].group.clone();
+                                if first_section || group != section {
+                                    if let Some(title) = &group {
+                                        section_heading(ui, title, first_section);
+                                    }
+                                    section = group;
+                                    first_section = false;
+                                }
+                                let inline = self.inputs[at]
+                                    .inline
+                                    .clone()
+                                    .filter(|inline| !inline.is_empty());
+                                let mut end = at + 1;
+                                if let Some(inline) = &inline {
+                                    while end < shown.len()
+                                        && shown[end]
+                                        && self.inputs[end].inline.as_deref()
+                                            == Some(inline.as_str())
                                     {
-                                        input.value = input.default.clone();
-                                        continue;
+                                        end += 1;
                                     }
-                                    if !shown {
-                                        continue;
-                                    }
-                                    if crate::ui::strategy_report::inputs::show_input(
-                                        ui,
-                                        input,
-                                        &self.sources,
-                                    ) && let (
-                                        InputKind::Choice(choices),
-                                        InputValue::Choice(choice),
-                                    ) = (&input.kind, &input.value)
+                                }
+                                if inline.is_some() {
+                                    let mut tooltip = None;
+                                    ui.horizontal_wrapped(|ui| {
+                                        for index in at..end {
+                                            let input = &mut self.inputs[index];
+                                            let before = input.value.clone();
+                                            tooltip = input.tooltip.clone().or(tooltip);
+                                            if matches!(&input.kind, InputKind::Toggle) {
+                                                let InputValue::Toggle(toggle) = &mut input.value
+                                                else {
+                                                    continue;
+                                                };
+                                                ui.checkbox(
+                                                    toggle,
+                                                    l10n::text(ui.ctx(), &input.label),
+                                                );
+                                            } else {
+                                                let label = (!input.label.is_empty()).then(|| {
+                                                    ui.label(l10n::text(ui.ctx(), &input.label)).id
+                                                });
+                                                let response =
+                                                    crate::ui::strategy_report::inputs::show_input_control(
+                                                        ui,
+                                                        input,
+                                                        &self.sources,
+                                                        label,
+                                                    );
+                                                if let Some(label) = label {
+                                                    response.labelled_by(label);
+                                                }
+                                            }
+                                            if before != input.value
+                                                && let (
+                                                    InputKind::Choice(choices),
+                                                    InputValue::Choice(choice),
+                                                ) = (&input.kind, &input.value)
+                                                && let Some(label) = choices.get(*choice)
+                                            {
+                                                choice_labels
+                                                    .push((input.id.clone(), label.clone()));
+                                            }
+                                        }
+                                        if let Some(tooltip) = tooltip {
+                                            tooltip_mark(ui, &tooltip);
+                                        }
+                                    });
+                                } else {
+                                    let input = &mut self.inputs[at];
+                                    let before = input.value.clone();
+                                    ui.horizontal(|ui| {
+                                        // Leave the fields a fixed part of the row, so a long
+                                        // title is shortened instead of pushing them out.
+                                        let fields =
+                                            (ui.available_width() * 0.4).clamp(120.0, 240.0);
+                                        let label = ui
+                                            .allocate_ui_with_layout(
+                                                egui::vec2(
+                                                    (ui.available_width() - fields).max(0.0),
+                                                    ui.spacing().interact_size.y,
+                                                ),
+                                                egui::Layout::left_to_right(
+                                                    egui::Align::Center,
+                                                ),
+                                                |ui| {
+                                                    ui.add(
+                                                        egui::Label::new(l10n::text(
+                                                            ui.ctx(),
+                                                            &input.label,
+                                                        ))
+                                                        .truncate(),
+                                                    )
+                                                },
+                                            )
+                                            .inner;
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if let Some(tooltip) = &input.tooltip {
+                                                    tooltip_mark(ui, tooltip);
+                                                }
+                                                crate::ui::strategy_report::inputs::show_input_control(
+                                                    ui,
+                                                    input,
+                                                    &self.sources,
+                                                    Some(label.id),
+                                                )
+                                                .labelled_by(label.id);
+                                            },
+                                        );
+                                    });
+                                    if before != input.value
+                                        && let (
+                                            InputKind::Choice(choices),
+                                            InputValue::Choice(choice),
+                                        ) = (&input.kind, &input.value)
                                         && let Some(label) = choices.get(*choice)
                                     {
                                         choice_labels.push((input.id.clone(), label.clone()));
                                     }
                                 }
-                            });
-                            // A stale saved label would otherwise override the user's choice on Apply.
+                                at = end;
+                            }
+                            // A stale saved label would otherwise override the user's choice on Ok.
                             for (id, label) in choice_labels {
                                 let label_id = format!("{id}_label");
                                 if let Some(input) = self.inputs.iter_mut().find(|input| {
@@ -330,26 +463,37 @@ impl IndicatorSettingsDialog {
                             }
                         }
                         Tab::Style => {
-                            ui.checkbox(
-                                &mut edit.settings.show_legend_values,
-                                l10n::text(ui.ctx(), "Show values in status line"),
-                            );
+                            let theme = ui.active_theme();
+                            let mut first = true;
+                            if !edit.settings.plots.is_empty() {
+                                section_heading(ui, "Plots", first);
+                                first = false;
+                            }
                             for (line, plot) in edit.settings.plots.iter_mut().enumerate() {
+                                let name = self
+                                    .line_names
+                                    .get(line)
+                                    .map_or("Plot", String::as_str)
+                                    .to_owned();
                                 ui.push_id(line, |ui| {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.checkbox(
-                                            &mut plot.visible,
-                                            l10n::text(
-                                                ui.ctx(),
-                                                self.line_names
-                                                    .get(line)
-                                                    .map_or("Plot", String::as_str),
-                                            ),
+                                    ui.horizontal(|ui| {
+                                        let shown = ui.checkbox(&mut plot.visible, "");
+                                        ui.color_edit_button_srgba(&mut plot.color)
+                                            .labelled_by(shown.id);
+                                        let label = ui.add(
+                                            egui::Label::new(l10n::text(ui.ctx(), &name))
+                                                .truncate(),
                                         );
-                                        ui.color_edit_button_srgba(&mut plot.color);
-                                        width_picker(ui, &mut plot.width);
+                                        shown.labelled_by(label.id);
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                width_picker(ui, &mut plot.width);
+                                            },
+                                        );
                                     });
                                     ui.horizontal_wrapped(|ui| {
+                                        ui.add_space(theme.spacing.lg);
                                         pattern_combo(ui, &mut plot.pattern);
                                         egui::ComboBox::from_id_salt("plot_type")
                                             .selected_text(l10n::text(
@@ -437,8 +581,11 @@ impl IndicatorSettingsDialog {
                                             });
                                         }
                                     }
-                                    ui.separator();
                                 });
+                            }
+                            if !edit.settings.levels.is_empty() {
+                                section_heading(ui, "Levels", first);
+                                first = false;
                             }
                             for (index, level) in edit.settings.levels.iter_mut().enumerate() {
                                 let (drawn, caption) = self
@@ -448,10 +595,11 @@ impl IndicatorSettingsDialog {
                                     .unwrap_or((f64::NAN, "Level"));
                                 ui.push_id(("level", index), |ui| {
                                     ui.horizontal_wrapped(|ui| {
-                                        ui.checkbox(
-                                            &mut level.visible,
-                                            l10n::text(ui.ctx(), caption),
-                                        );
+                                        let shown = ui.checkbox(&mut level.visible, "");
+                                        ui.color_edit_button_srgba(&mut level.color)
+                                            .accessible_name(l10n::text(ui.ctx(), "Level colour"));
+                                        let label = ui.label(l10n::text(ui.ctx(), caption));
+                                        shown.labelled_by(label.id);
                                         let mut value = level.value.unwrap_or(drawn);
                                         if ui
                                             .add(egui::DragValue::new(&mut value).speed(0.1))
@@ -460,8 +608,6 @@ impl IndicatorSettingsDialog {
                                         {
                                             level.value = Some(value);
                                         }
-                                        ui.color_edit_button_srgba(&mut level.color)
-                                            .accessible_name(l10n::text(ui.ctx(), "Level colour"));
                                         pattern_combo(ui, &mut level.pattern);
                                         width_picker(ui, &mut level.width);
                                         ui.checkbox(
@@ -481,8 +627,13 @@ impl IndicatorSettingsDialog {
                                         .accessible_name(l10n::text(ui.ctx(), "Fill colour"));
                                 });
                             }
-                            if !edit.settings.levels.is_empty() {
-                                ui.separator();
+                            let background = edit.settings.background.is_some()
+                                || edit.settings.background_visible
+                                || !edit.settings.fills.is_empty()
+                                || !edit.settings.gradients.is_empty();
+                            if background {
+                                section_heading(ui, "Background", first);
+                                first = false;
                             }
                             ui.horizontal_wrapped(|ui| {
                                 let mut enabled = edit.settings.background.is_some()
@@ -563,8 +714,8 @@ impl IndicatorSettingsDialog {
                                     });
                                 });
                             }
+                            section_heading(ui, "Precision", first);
                             ui.horizontal_wrapped(|ui| {
-                                ui.label(l10n::text(ui.ctx(), "Precision"));
                                 let mut automatic = edit.settings.precision.is_none();
                                 if ui
                                     .checkbox(&mut automatic, l10n::text(ui.ctx(), "Automatic"))
@@ -582,9 +733,13 @@ impl IndicatorSettingsDialog {
                                     .accessible_name(l10n::text(ui.ctx(), "Precision"));
                                 }
                             });
+                            ui.checkbox(
+                                &mut edit.settings.show_legend_values,
+                                l10n::text(ui.ctx(), "Values in status line"),
+                            );
                         }
                         Tab::Visibility => {
-                            ui.label(l10n::text(ui.ctx(), "Show this study on these intervals:"));
+                            section_heading(ui, "Show on intervals", true);
                             let mut intervals = Timeframe::all();
                             for interval in self
                                 .current_interval
@@ -621,10 +776,28 @@ impl IndicatorSettingsDialog {
                         .levels
                         .iter()
                         .all(|level| level.value.is_none_or(f64::is_finite));
-                (apply, cancel) = DialogFooter::new("Apply")
+                let mut reset_inputs = false;
+                (apply, cancel) = DialogFooter::new("Ok")
                     .primary_enabled(valid)
                     .secondary("Cancel")
-                    .show(ui);
+                    .show_with_left(ui, |ui| {
+                        if self.tab == Tab::Inputs && !self.inputs.is_empty() {
+                            ui.menu_button(l10n::text(ui.ctx(), "Defaults"), |ui| {
+                                if ui
+                                    .button(l10n::text(ui.ctx(), "Reset inputs"))
+                                    .clicked()
+                                {
+                                    reset_inputs = true;
+                                    ui.close();
+                                }
+                            });
+                        }
+                    });
+                if reset_inputs {
+                    for input in &mut self.inputs {
+                        input.value = input.default.clone();
+                    }
+                }
             });
         if !open || cancel {
             self.edit = None;
@@ -709,7 +882,7 @@ mod tests {
             let mut dialog = IndicatorSettingsDialog::default();
             for (action, theme, size) in [
                 ("Cancel", Theme::dark(), egui::vec2(1440.0, 900.0)),
-                ("Apply", Theme::light(), egui::vec2(420.0, 640.0)),
+                ("Ok", Theme::light(), egui::vec2(420.0, 640.0)),
             ] {
                 assert!(dialog.open_for_chart(&chart, id));
                 dialog.edit.as_mut().unwrap().settings = edited.clone();
@@ -995,7 +1168,7 @@ mod tests {
                     ("fork_transparency".into(), InputValue::Length(75)),
                 ]
             };
-            for (action, theme) in [("Cancel", Theme::light()), ("Apply", Theme::dark())] {
+            for (action, theme) in [("Cancel", Theme::light()), ("Ok", Theme::dark())] {
                 let mut dialog = IndicatorSettingsDialog::default();
                 assert!(dialog.open_for_chart(&chart, id));
                 dialog.tab = if channel { Tab::Style } else { Tab::Inputs };
@@ -1079,7 +1252,7 @@ mod tests {
                 harness.run();
                 drop(harness);
                 assert!(chart.indicator_mut(id).unwrap().snapshot_settings() == before);
-                if action == "Apply" {
+                if action == "Ok" {
                     let edit = applied.unwrap();
                     chart.user_action(|chart| {
                         chart
@@ -1244,7 +1417,7 @@ mod tests {
         for (action, theme, size) in [
             ("Cancel", Theme::dark(), egui::vec2(360.0, 640.0)),
             ("Cancel", Theme::light(), egui::vec2(360.0, 640.0)),
-            ("Apply", Theme::light(), egui::vec2(1440.0, 900.0)),
+            ("Ok", Theme::light(), egui::vec2(1440.0, 900.0)),
         ] {
             dialog.open(SeriesId(2), &study, Some(Timeframe::Min1));
             dialog.tab = Tab::Style;
@@ -1280,7 +1453,7 @@ mod tests {
             harness.run();
             drop(harness);
             assert!(study.snapshot_settings() == before);
-            if action == "Apply" {
+            if action == "Ok" {
                 let edit = applied.unwrap();
                 study.apply_settings(&edit.inputs, edit.settings).unwrap();
             } else {
@@ -1542,7 +1715,7 @@ mod tests {
             for (action, theme, size) in [
                 ("Cancel", Theme::light(), egui::vec2(320.0, 450.0)),
                 ("Cancel", Theme::dark(), egui::vec2(320.0, 450.0)),
-                ("Apply", Theme::dark(), egui::vec2(1440.0, 900.0)),
+                ("Ok", Theme::dark(), egui::vec2(1440.0, 900.0)),
             ] {
                 assert!(dialog.open_for_chart(&chart, id));
                 dialog.tab = Tab::Style;
@@ -1781,7 +1954,7 @@ mod tests {
         for (action, theme, size) in [
             ("Cancel", Theme::dark(), egui::vec2(360.0, 640.0)),
             ("Cancel", Theme::light(), egui::vec2(360.0, 640.0)),
-            ("Apply", Theme::light(), egui::vec2(1440.0, 900.0)),
+            ("Ok", Theme::light(), egui::vec2(1440.0, 900.0)),
         ] {
             let setup_theme = theme.clone();
             let mut harness = Harness::builder()
@@ -2164,7 +2337,7 @@ mod tests {
                 }
             });
         harness.run();
-        harness.get_by_label("Apply").click();
+        harness.get_by_label("Ok").click();
         harness.run();
         drop(harness);
         let study = chart.indicator_mut(id).unwrap();
@@ -2268,5 +2441,62 @@ mod tests {
         assert!(!dialog.open_for_chart(&chart, id));
         assert!(chart.set_indicator_user_edit_enabled(id, true));
         assert!(dialog.open_for_chart(&chart, id));
+    }
+
+    /// Inputs carrying `group`, `inline` and `tooltip` draw as the script asks: one heading per
+    /// group, one row per inline group, and the tooltip mark on the row it describes.
+    #[test]
+    fn inputs_group_inline_and_tooltip_draw_as_the_script_asks() {
+        use egui_kittest::{Harness, kittest::Queryable};
+
+        let study = ConfiguredStudy::new(Box::new(SMA::new(20)));
+        let mut dialog = IndicatorSettingsDialog::default();
+        dialog.open(SeriesId(2), &study, Some(Timeframe::Min1));
+        dialog.inputs = vec![
+            StudyInput::new(
+                "fast",
+                "Fast",
+                InputValue::Length(3),
+                InputKind::Length(1, 1000),
+            )
+            .with_group("EMA")
+            .with_inline("1"),
+            StudyInput::new("show", "Show", InputValue::Toggle(true), InputKind::Toggle)
+                .with_group("EMA")
+                .with_inline("1"),
+            StudyInput::new(
+                "alert",
+                "Enable alerts",
+                InputValue::Toggle(false),
+                InputKind::Toggle,
+            )
+            .with_group("Alerts")
+            .with_tooltip("Warn me"),
+        ];
+        let mut harness = Harness::builder()
+            .with_context_setup(egui_extras::install_image_loaders)
+            .with_size(egui::Vec2::new(1440.0, 900.0))
+            .build_ui(|ui| {
+                dialog.show(ui.ctx(), &Theme::dark());
+            });
+        harness.run();
+        for heading in ["EMA", "Alerts"] {
+            assert_eq!(harness.query_all_by_label(heading).count(), 1, "{heading}");
+        }
+        let fast = harness.get_by_label("Fast").rect();
+        let show = harness.get_by_label("Show").rect();
+        assert!(
+            (fast.center().y - show.center().y).abs() < 1.0,
+            "{fast:?} {show:?}"
+        );
+        let heading = harness.get_by_label("Alerts").rect();
+        assert!(heading.top() >= fast.bottom(), "{heading:?} {fast:?}");
+        let alerts = harness.get_by_label("Enable alerts").rect();
+        let mark = harness.get_by_label("?").rect();
+        assert!(
+            (mark.center().y - alerts.center().y).abs() < 1.0,
+            "{mark:?} {alerts:?}"
+        );
+        assert!(mark.left() > alerts.right(), "{mark:?} {alerts:?}");
     }
 }

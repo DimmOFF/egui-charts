@@ -11,7 +11,21 @@ pub(crate) fn show_input(
 ) -> bool {
     let previous = input.value.clone();
     let label = ui.label(l10n::text(ui.ctx(), &input.label));
-    let response = match (&input.kind, &mut input.value) {
+    let response = show_input_control(ui, input, sources, Some(label.id));
+    response.labelled_by(label.id);
+    ui.end_row();
+    previous != input.value
+}
+
+/// The widget of an input, without its label or grid row, for a row an editor lays out itself.
+/// `label` names the fields a control splits into, such as a custom interval's seconds.
+pub(crate) fn show_input_control(
+    ui: &mut egui::Ui,
+    input: &mut StudyInput,
+    sources: &[(StudySource, String)],
+    label: Option<egui::Id>,
+) -> egui::Response {
+    match (&input.kind, &mut input.value) {
         (InputKind::Length(min, max), InputValue::Length(value)) => {
             ui.add(egui::DragValue::new(value).range(*min..=*max))
         }
@@ -90,23 +104,21 @@ pub(crate) fn show_input(
                 .response;
             if let Some(Timeframe::Custom(seconds)) = value {
                 let mut count = seconds.get();
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut count)
-                            .range(1..=u64::MAX)
-                            .suffix(l10n::text(ui.ctx(), " s")),
-                    )
-                    .labelled_by(label.id)
-                    .changed()
-                {
+                let response = ui.add(
+                    egui::DragValue::new(&mut count)
+                        .range(1..=u64::MAX)
+                        .suffix(l10n::text(ui.ctx(), " s")),
+                );
+                let response = match label {
+                    Some(label) => response.labelled_by(label),
+                    None => response,
+                };
+                if response.changed() {
                     *seconds = std::num::NonZeroU64::new(count).unwrap();
                 }
             }
             response
         }
         _ => ui.label(l10n::text(ui.ctx(), "This input is unavailable.")),
-    };
-    response.labelled_by(label.id);
-    ui.end_row();
-    previous != input.value
+    }
 }

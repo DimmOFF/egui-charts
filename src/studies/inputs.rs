@@ -44,6 +44,12 @@ pub struct StudyInput {
     /// The choice input this one applies with and the choices it applies to. An editor hides it
     /// under the other choices and keeps its value. `None` always shows it.
     pub shown_when: Option<(String, Vec<usize>)>,
+    /// The section an editor lists this input under. `None` leaves it outside any section.
+    pub group: Option<String>,
+    /// Inputs an editor puts on one row share this value. `None` gives the input its own row.
+    pub inline: Option<String>,
+    /// Help an editor shows beside the input.
+    pub tooltip: Option<String>,
 }
 
 impl StudyInput {
@@ -61,7 +67,28 @@ impl StudyInput {
             value,
             kind,
             shown_when: None,
+            group: None,
+            inline: None,
+            tooltip: None,
         }
+    }
+
+    /// List this input under a section heading.
+    pub fn with_group(mut self, group: impl Into<String>) -> Self {
+        self.group = Some(group.into());
+        self
+    }
+
+    /// Put this input on the row of every input with the same `inline` value.
+    pub fn with_inline(mut self, inline: impl Into<String>) -> Self {
+        self.inline = Some(inline.into());
+        self
+    }
+
+    /// Show `tooltip` beside the input.
+    pub fn with_tooltip(mut self, tooltip: impl Into<String>) -> Self {
+        self.tooltip = Some(tooltip.into());
+        self
     }
 
     /// Set the declared default independently of the current value.

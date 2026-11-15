@@ -37,6 +37,12 @@ pub struct InputDecl {
     pub kind: InputKind,
     pub title: String,
     pub default: Value,
+    /// The `group` heading the input appears under.
+    pub group: Option<String>,
+    /// Inputs sharing this `inline` value sit on one row.
+    pub inline: Option<String>,
+    /// The `tooltip` shown beside the input.
+    pub tooltip: Option<String>,
 }
 
 /// A call argument, named when the script names it.

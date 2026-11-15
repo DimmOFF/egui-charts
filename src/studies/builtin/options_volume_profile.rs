@@ -2672,6 +2672,8 @@ mod tests {
                 });
             harness.run();
             if reset {
+                harness.get_by_label("Defaults").click();
+                harness.run();
                 harness.get_by_label("Reset inputs").click();
                 harness.run();
             } else {
@@ -2684,7 +2686,7 @@ mod tests {
                     harness.run();
                 }
             }
-            harness.get_by_label("Apply").click();
+            harness.get_by_label("Ok").click();
             harness.run();
             drop(harness);
             let edit = edit.expect("an applied profile edit");

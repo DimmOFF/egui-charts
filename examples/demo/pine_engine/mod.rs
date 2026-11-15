@@ -134,6 +134,20 @@ mod tests {
     }
 
     #[test]
+    fn inputs_keep_their_group_inline_and_tooltip() {
+        let script = Script::parse(
+            "indicator(\"T\")\ng = \"EMA\"\nfast = input.int(3, \"Fast\", inline = \"1\", group = g, tooltip = \"Speed\")\nslow = input.int(5, \"Slow\", group = g)\n",
+        )
+        .unwrap();
+        let inputs = script.inputs();
+        assert_eq!(inputs[0].group.as_deref(), Some("EMA"));
+        assert_eq!(inputs[0].inline.as_deref(), Some("1"));
+        assert_eq!(inputs[0].tooltip.as_deref(), Some("Speed"));
+        assert_eq!(inputs[1].group.as_deref(), Some("EMA"));
+        assert_eq!(inputs[1].inline, None);
+    }
+
+    #[test]
     fn loops_parse_without_diagnostics() {
         let script =
             Script::parse("indicator(\"T\")\nfor i = 0 to 3\n    plot(close)\n").unwrap();

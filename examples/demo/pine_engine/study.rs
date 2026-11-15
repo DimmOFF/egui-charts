@@ -427,7 +427,11 @@ fn study_input(decl: &InputDecl) -> StudyInput {
             InputKind::Text,
         ),
     };
-    StudyInput::new(id, decl.title.clone(), value, kind)
+    let mut input = StudyInput::new(id, decl.title.clone(), value, kind);
+    input.group = decl.group.clone();
+    input.inline = decl.inline.clone();
+    input.tooltip = decl.tooltip.clone();
+    input
 }
 
 /// The Pine value an edited input holds.

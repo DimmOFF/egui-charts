@@ -9,6 +9,7 @@ use crate::pine_engine::ast::{
 };
 use crate::pine_engine::lexer::{Spanned, Token, lex};
 use crate::pine_engine::value::Value;
+use std::collections::HashMap;
 
 /// Type words a Pine declaration may start with.
 const TYPES: &[&str] = &[
@@ -1223,13 +1224,30 @@ pub fn rgba_of(rgba: u32) -> egui::Color32 {
 
 /// Collects the `input.*` declarations of a parsed body, so the settings dialog can show them.
 pub fn inputs_of(block: &Block, inputs: &mut Vec<InputDecl>) {
+    // A script may name its groups and inlines with string variables, as
+    // `group = g_EmaGroup` does, so the declarations resolve those first.
+    let mut text = HashMap::new();
+    for statement in block {
+        if let Stmt::Assign {
+            name,
+            value: Expr::Str(value),
+            ..
+        } = statement
+        {
+            text.insert(name.as_str(), value.as_str());
+        }
+    }
+    inputs_of_block(block, inputs, &text);
+}
+
+fn inputs_of_block(block: &Block, inputs: &mut Vec<InputDecl>, text: &HashMap<&str, &str>) {
     for statement in block {
         match statement {
-            Stmt::Assign { value, .. } | Stmt::Expr(value) => inputs_of_expr(value, inputs),
-            Stmt::Tuple { value, .. } => inputs_of_expr(value, inputs),
+            Stmt::Assign { value, .. } | Stmt::Expr(value) => inputs_of_expr(value, inputs, text),
+            Stmt::Tuple { value, .. } => inputs_of_expr(value, inputs, text),
             Stmt::FieldAssign { target, value, .. } => {
-                inputs_of_expr(target, inputs);
-                inputs_of_expr(value, inputs);
+                inputs_of_expr(target, inputs, text);
+                inputs_of_expr(value, inputs, text);
             }
             Stmt::For {
                 from,
@@ -1238,86 +1256,86 @@ pub fn inputs_of(block: &Block, inputs: &mut Vec<InputDecl>) {
                 body,
                 ..
             } => {
-                inputs_of_expr(from, inputs);
-                inputs_of_expr(to, inputs);
+                inputs_of_expr(from, inputs, text);
+                inputs_of_expr(to, inputs, text);
                 if let Some(step) = step {
-                    inputs_of_expr(step, inputs);
+                    inputs_of_expr(step, inputs, text);
                 }
-                inputs_of(body, inputs);
+                inputs_of_block(body, inputs, text);
             }
             Stmt::ForIn { iterable, body, .. } => {
-                inputs_of_expr(iterable, inputs);
-                inputs_of(body, inputs);
+                inputs_of_expr(iterable, inputs, text);
+                inputs_of_block(body, inputs, text);
             }
             Stmt::While { cond, body, .. } => {
-                inputs_of_expr(cond, inputs);
-                inputs_of(body, inputs);
+                inputs_of_expr(cond, inputs, text);
+                inputs_of_block(body, inputs, text);
             }
             Stmt::If {
                 cond,
                 then,
                 otherwise,
             } => {
-                inputs_of_expr(cond, inputs);
-                inputs_of(then, inputs);
+                inputs_of_expr(cond, inputs, text);
+                inputs_of_block(then, inputs, text);
                 if let Some(otherwise) = otherwise {
-                    inputs_of(otherwise, inputs);
+                    inputs_of_block(otherwise, inputs, text);
                 }
             }
-            Stmt::Function(function) => inputs_of(&function.body, inputs),
+            Stmt::Function(function) => inputs_of_block(&function.body, inputs, text),
             Stmt::Break | Stmt::Continue | Stmt::Type(_) | Stmt::Unsupported { .. } => {}
         }
     }
 }
 
-fn inputs_of_expr(expr: &Expr, inputs: &mut Vec<InputDecl>) {
+fn inputs_of_expr(expr: &Expr, inputs: &mut Vec<InputDecl>, text: &HashMap<&str, &str>) {
     match expr {
         Expr::Call {
             callee, args, id, ..
         } => {
             if callee.first().is_some_and(|name| name == "input")
                 && let Some(kind) = callee.get(1).map(String::as_str).or(Some("input"))
-                && let Some(decl) = input_declaration(*id, kind, args)
+                && let Some(decl) = input_declaration(*id, kind, args, text)
             {
                 inputs.push(decl);
             }
             for arg in args {
-                inputs_of_expr(&arg.value, inputs);
+                inputs_of_expr(&arg.value, inputs, text);
             }
         }
-        Expr::Member { target, .. } => inputs_of_expr(target, inputs),
+        Expr::Member { target, .. } => inputs_of_expr(target, inputs, text),
         Expr::Index { target, index } => {
-            inputs_of_expr(target, inputs);
-            inputs_of_expr(index, inputs);
+            inputs_of_expr(target, inputs, text);
+            inputs_of_expr(index, inputs, text);
         }
-        Expr::Unary { value, .. } => inputs_of_expr(value, inputs),
+        Expr::Unary { value, .. } => inputs_of_expr(value, inputs, text),
         Expr::Binary { left, right, .. } => {
-            inputs_of_expr(left, inputs);
-            inputs_of_expr(right, inputs);
+            inputs_of_expr(left, inputs, text);
+            inputs_of_expr(right, inputs, text);
         }
         Expr::Ternary {
             cond,
             then,
             otherwise,
         } => {
-            inputs_of_expr(cond, inputs);
-            inputs_of_expr(then, inputs);
-            inputs_of_expr(otherwise, inputs);
+            inputs_of_expr(cond, inputs, text);
+            inputs_of_expr(then, inputs, text);
+            inputs_of_expr(otherwise, inputs, text);
         }
         Expr::If {
             cond,
             then,
             otherwise,
         } => {
-            inputs_of_expr(cond, inputs);
-            inputs_of(then, inputs);
+            inputs_of_expr(cond, inputs, text);
+            inputs_of_block(then, inputs, text);
             if let Some(otherwise) = otherwise {
-                inputs_of(otherwise, inputs);
+                inputs_of_block(otherwise, inputs, text);
             }
         }
         Expr::Array(items) => {
             for item in items {
-                inputs_of_expr(item, inputs);
+                inputs_of_expr(item, inputs, text);
             }
         }
         _ => {}
@@ -1343,10 +1361,18 @@ fn arg<'a>(args: &'a [Arg], name: &str) -> Option<&'a Expr> {
 }
 
 /// The schema of one `input.*` call.
-fn input_declaration(id: NodeId, kind: &str, args: &[Arg]) -> Option<InputDecl> {
+fn input_declaration(
+    id: NodeId,
+    kind: &str,
+    args: &[Arg],
+    text: &HashMap<&str, &str>,
+) -> Option<InputDecl> {
     let legacy = kind == "input";
     let positional: Vec<&Arg> = args.iter().filter(|arg| arg.name.is_none()).collect();
-    let text_of = |expr: &Expr| literal(expr).and_then(|value| value.text().map(str::to_owned));
+    let text_of = |expr: &Expr| match expr {
+        Expr::Ident(name) => text.get(name.as_str()).map(|text| (*text).to_owned()),
+        _ => literal(expr).and_then(|value| value.text().map(str::to_owned)),
+    };
     let title = args
         .iter()
         .find(|arg| arg.name.as_deref() == Some("title"))
@@ -1357,6 +1383,14 @@ fn input_declaration(id: NodeId, kind: &str, args: &[Arg]) -> Option<InputDecl> 
             positional.get(at).and_then(|arg| text_of(&arg.value))
         })
         .unwrap_or_default();
+    let setting = |name: &str| {
+        arg(args, name)
+            .and_then(|expr| text_of(expr))
+            .filter(|value| !value.is_empty())
+    };
+    let group = setting("group");
+    let inline = setting("inline");
+    let tooltip = setting("tooltip");
     let options = arg(args, "options").and_then(|expr| match expr {
         Expr::Array(items) => Some(
             items
@@ -1457,6 +1491,9 @@ fn input_declaration(id: NodeId, kind: &str, args: &[Arg]) -> Option<InputDecl> 
         kind,
         title,
         default,
+        group,
+        inline,
+        tooltip,
     })
 }
 

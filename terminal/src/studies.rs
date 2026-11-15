@@ -103,6 +103,7 @@ impl Terminal {
             .set_recents_shown(!state.hide_symbol_recents);
         if let Some(storage) = &self.services.storage {
             state.settings_dialog.templates.set_storage(storage.clone());
+            state.indicator_settings.set_storage(storage.clone());
             state.symbol_search.set_storage(storage.clone());
         }
     }

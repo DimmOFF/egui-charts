@@ -3,10 +3,13 @@
 use crate::localization as l10n;
 use crate::model::LineStyle;
 use crate::model::Timeframe;
+use crate::services::StoreKind;
 use crate::studies::{
     Indicator, InputKind, InputValue, PlotType, StudyInput, StudyScale, StudySettings,
+    StudyTemplate,
 };
 use crate::theme::{Theme, ThemeExt};
+use crate::ui::dialogs::templates::TemplateStore;
 use crate::ui_kit::{dialog::DialogFooter, modal::Modal};
 use crate::widget::SeriesId;
 
@@ -31,7 +34,6 @@ pub struct StudyEdit {
 
 /// Inputs, Style and Visibility editor for an applied study. Closing or cancelling discards
 /// staged values. Chart-aware previews retain an opening settings snapshot for restoration.
-#[derive(Default)]
 pub struct IndicatorSettingsDialog {
     edit: Option<StudyEdit>,
     inputs: Vec<StudyInput>,
@@ -46,6 +48,35 @@ pub struct IndicatorSettingsDialog {
     price_scale: bool,
     original: Option<crate::studies::StudySettingsSnapshot>,
     previewed: Option<StudyEdit>,
+    /// The whole study as opened, the source of the parts a template does not override.
+    template: Option<StudyTemplate>,
+    /// Named templates of this study, kept in memory unless the host attaches its storage.
+    templates: TemplateStore<StudyTemplate>,
+    /// The name being typed for a template to save, while the form is open.
+    save_name: Option<String>,
+}
+
+impl Default for IndicatorSettingsDialog {
+    fn default() -> Self {
+        Self {
+            edit: None,
+            inputs: Vec::new(),
+            title: String::new(),
+            line_names: Vec::new(),
+            levels: Vec::new(),
+            gradient_names: Vec::new(),
+            tab: Tab::default(),
+            current_interval: None,
+            sources: Vec::new(),
+            overlay: false,
+            price_scale: false,
+            original: None,
+            previewed: None,
+            template: None,
+            templates: TemplateStore::new(StoreKind::IndicatorTemplates),
+            save_name: None,
+        }
+    }
 }
 
 impl crate::ui_kit::tab_bar::TabLabel for Tab {
@@ -180,8 +211,15 @@ impl IndicatorSettingsDialog {
         self.overlay = study.is_overlay();
         self.price_scale = study.scale() == StudyScale::Main;
         self.current_interval = interval;
+        self.template = Some(StudyTemplate::from_study(study));
+        self.save_name = None;
         self.tab = Tab::Inputs;
         self.sources.clear();
+    }
+
+    /// Attach the host's storage, so saved templates outlive this session.
+    pub fn set_storage(&mut self, storage: std::sync::Arc<dyn crate::services::Storage>) {
+        self.templates.set_storage(storage);
     }
 
     /// Open on a chart study and offer its other studies as source inputs, excluding cycles.
@@ -312,6 +350,7 @@ impl IndicatorSettingsDialog {
     /// Show the staged edit. Ok returns it once; the host calls
     /// [`Indicator::apply_settings`] on the original study, then lets the chart recalculate.
     pub fn show(&mut self, ctx: &egui::Context, _theme: &Theme) -> Option<StudyEdit> {
+        self.templates.poll(ctx);
         let edit = self.edit.as_mut()?;
         let mut open = true;
         let mut apply = false;
@@ -320,6 +359,7 @@ impl IndicatorSettingsDialog {
             .width(560.0)
             .min_height(180.0)
             .top(120.0)
+            .draggable(true)
             .show(ctx, &mut open, |ui| {
                 crate::ui_kit::tab_bar::TabBar::new(
                     &[Tab::Inputs, Tab::Style, Tab::Visibility],
@@ -327,6 +367,9 @@ impl IndicatorSettingsDialog {
                 )
                 .show(ui);
                 ui.separator();
+                if let Some(error) = &self.templates.error {
+                    ui.colored_label(ui.visuals().error_fg_color, l10n::text(ui.ctx(), error));
+                }
                 // TradingView's fields are outlined boxes on the dialog surface, with
                 // roomier rows than the panels around them.
                 let theme = ui.active_theme();
@@ -342,7 +385,7 @@ impl IndicatorSettingsDialog {
                 }
                 ui.spacing_mut().item_spacing.y = theme.spacing.md;
                 ui.spacing_mut().interact_size.y = 22.0;
-                egui::ScrollArea::both()
+                egui::ScrollArea::vertical()
                     .max_height((ui.available_height() - 72.0).max(0.0))
                     .show(ui, |ui| match self.tab {
                         Tab::Inputs => {
@@ -867,25 +910,108 @@ impl IndicatorSettingsDialog {
                         .iter()
                         .all(|level| level.value.is_none_or(f64::is_finite));
                 let mut reset_inputs = false;
+                let mut save_name = self.save_name.take();
+                let mut load_template = None;
+                let mut delete_template = None;
+                let mut save_template = false;
                 (apply, cancel) = DialogFooter::new("Ok")
                     .primary_enabled(valid)
                     .secondary("Cancel")
                     .show_with_left(ui, |ui| {
-                        if self.tab == Tab::Inputs && !self.inputs.is_empty() {
-                            ui.menu_button(l10n::text(ui.ctx(), "Defaults"), |ui| {
-                                if ui
-                                    .button(l10n::text(ui.ctx(), "Reset inputs"))
-                                    .clicked()
-                                {
-                                    reset_inputs = true;
-                                    ui.close();
-                                }
-                            });
+                        if let Some(name) = &mut save_name {
+                            ui.add(
+                                egui::TextEdit::singleline(name)
+                                    .hint_text(l10n::text(ui.ctx(), "Template name"))
+                                    .desired_width(140.0),
+                            );
+                            save_template = ui
+                                .add_enabled(
+                                    !name.trim().is_empty(),
+                                    egui::Button::new(l10n::text(ui.ctx(), "Save")),
+                                )
+                                .clicked();
+                            if ui.button(l10n::text(ui.ctx(), "Cancel")).clicked()
+                                || ui.input(|input| input.key_pressed(egui::Key::Escape))
+                            {
+                                save_name = None;
+                            }
+                        } else {
+                            if self.tab == Tab::Inputs && !self.inputs.is_empty() {
+                                ui.menu_button(l10n::text(ui.ctx(), "Defaults"), |ui| {
+                                    if ui
+                                        .button(l10n::text(ui.ctx(), "Reset inputs"))
+                                        .clicked()
+                                    {
+                                        reset_inputs = true;
+                                        ui.close();
+                                    }
+                                    ui.separator();
+                                    // TradingView saves a template per study, so list only this
+                                    // study's, as the drawing tools do per tool.
+                                    for (name, template) in self.templates.entries() {
+                                        if template.name != self.title {
+                                            continue;
+                                        }
+                                        if ui.button(name).clicked() {
+                                            load_template = Some(template.clone());
+                                            ui.close();
+                                        }
+                                        if ui
+                                            .button(l10n::format_text(
+                                                ui.ctx(),
+                                                "Delete {name}",
+                                                &[("name", name.clone())],
+                                            ))
+                                            .clicked()
+                                        {
+                                            delete_template = Some(name.clone());
+                                        }
+                                    }
+                                });
+                            }
+                            if ui
+                                .button(l10n::text(ui.ctx(), "Save template"))
+                                .clicked()
+                            {
+                                save_name = Some(String::new());
+                            }
                         }
                     });
+                self.save_name = save_name;
                 if reset_inputs {
                     for input in &mut self.inputs {
                         input.value = input.default.clone();
+                    }
+                }
+                if let Some(name) = delete_template
+                    && let Err(error) = self.templates.delete(&name)
+                {
+                    self.templates.error = Some(error);
+                }
+                if let Some(template) = load_template {
+                    for input in &mut self.inputs {
+                        if let Some((_, value)) =
+                            template.inputs.iter().find(|(id, _)| *id == input.id)
+                            && input.accepts(value)
+                        {
+                            input.value = value.clone();
+                        }
+                    }
+                    edit.settings = template.settings.clone();
+                }
+                if save_template
+                    && let Some(mut template) = self.template.clone()
+                {
+                    template.inputs = self
+                        .inputs
+                        .iter()
+                        .map(|input| (input.id.clone(), input.value.clone()))
+                        .collect();
+                    template.settings = edit.settings.clone();
+                    let name = self.save_name.as_deref().unwrap_or_default().trim().to_owned();
+                    match self.templates.save(&name, template) {
+                        Ok(()) => self.save_name = None,
+                        Err(error) => self.templates.error = Some(error),
                     }
                 }
             });
@@ -2588,5 +2714,79 @@ mod tests {
             "{mark:?} {alerts:?}"
         );
         assert!(mark.left() > alerts.right(), "{mark:?} {alerts:?}");
+    }
+    /// "Save template" keeps the staged inputs and styles, and the saved template restages them
+    /// over the edits made since.
+    #[test]
+    fn save_template_restages_the_staged_edit() {
+        use crate::model::{Bar, BarData};
+        use crate::widget::Chart;
+        use egui_kittest::{Harness, kittest::Queryable};
+
+        let bars = (0..4)
+            .map(|i| {
+                Bar::new(
+                    chrono::DateTime::from_timestamp(i * 60, 0).unwrap(),
+                    10.0,
+                    12.0,
+                    9.0,
+                    11.0,
+                    1.0,
+                )
+            })
+            .collect();
+        let mut chart = Chart::new(BarData::from_bars(bars));
+        chart.set_timeframe(Timeframe::Min1);
+        let id = chart.add_indicator(Box::new(SMA::new(7)));
+        let colour = egui::Color32::from_rgb(200, 30, 40);
+        let mut dialog = IndicatorSettingsDialog::default();
+        assert!(dialog.open_for_chart(&chart, id));
+        let period = dialog
+            .inputs
+            .iter()
+            .position(|input| input.id == "period")
+            .unwrap();
+        dialog.inputs[period].value = InputValue::Length(5);
+        dialog.edit.as_mut().unwrap().settings.plots[0].color = colour;
+        dialog.save_name = Some("Mine".into());
+        let mut harness = Harness::builder()
+            .allow_missing_glyphs()
+            .with_context_setup(egui_extras::install_image_loaders)
+            .with_size(egui::Vec2::new(1000.0, 800.0))
+            .build_ui_state(
+                |ui, dialog: &mut IndicatorSettingsDialog| {
+                    let _ = dialog.show(ui.ctx(), &Theme::dark());
+                },
+                dialog,
+            );
+        harness.run();
+        harness.get_by_label("Save").click();
+        harness.run();
+        let saved = harness
+            .state()
+            .templates
+            .entries()
+            .get("Mine")
+            .cloned()
+            .expect("the name form saves the template");
+        assert_eq!(
+            saved
+                .inputs
+                .iter()
+                .find(|(id, _)| id == "period")
+                .map(|(_, value)| value.clone()),
+            Some(InputValue::Length(5))
+        );
+        assert_eq!(saved.settings.plots[0].color, colour);
+        harness.state_mut().inputs[period].value = InputValue::Length(9);
+        harness.get_by_label("Defaults").click();
+        harness.run();
+        harness.get_by_label("Mine").click();
+        harness.run();
+        assert_eq!(harness.state().inputs[period].value, InputValue::Length(5));
+        assert_eq!(
+            harness.state().edit.as_ref().unwrap().settings.plots[0].color,
+            colour
+        );
     }
 }

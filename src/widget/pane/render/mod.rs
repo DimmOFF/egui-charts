@@ -563,13 +563,15 @@ impl Chart {
                 let mut config = IndicatorPaneConfig::from_study(indicator);
                 config.show_name = self.config.show_indicator_labels;
                 config.show_values = self.config.show_indicator_last_val;
+                // TradingView's "Values in status line" hides everything the legend says after
+                // the study name, the input caption included.
+                let caption =
+                    self.config.show_indicator_inputs && indicator.settings().show_legend_values;
                 config.inputs = match study {
-                    Some(idx) if self.config.show_indicator_inputs => {
-                        self.study_inputs[idx].clone()
-                    }
+                    Some(idx) if caption => self.study_inputs[idx].clone(),
                     _ => String::new(),
                 };
-                if self.config.show_indicator_inputs
+                if caption
                     && indicator.is_volume()
                     && indicator.plot_style(2).visible
                     && config.inputs.is_empty()

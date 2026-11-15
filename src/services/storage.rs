@@ -21,6 +21,8 @@ pub enum StoreKind {
     StudyTemplates,
     /// Named drawing property templates, without chart anchors.
     DrawingTemplates,
+    /// Named inputs and presentation of one study, saved from its settings dialog.
+    IndicatorTemplates,
     /// The user's notes on one symbol, one document per symbol, named by the symbol.
     SymbolNotes,
     /// Named chart layouts: the arrangement of the charts and the symbol, interval, chart type,

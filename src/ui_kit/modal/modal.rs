@@ -7,7 +7,7 @@ use egui::{Color32, Context, Id, Ui};
 
 use crate::theme::ThemeExt;
 use crate::tokens::DESIGN_TOKENS;
-use crate::ui_kit::dialog::{dialog_frame, title_row};
+use crate::ui_kit::dialog::{dialog_frame, title_row_with_drag};
 
 /// A modal dialog widget
 pub struct Modal {
@@ -22,6 +22,7 @@ pub struct Modal {
     fill: Option<Color32>,
     backdrop: Option<Color32>,
     top: Option<f32>,
+    draggable: bool,
 }
 
 impl Modal {
@@ -39,6 +40,7 @@ impl Modal {
             fill: None,
             backdrop: None,
             top: None,
+            draggable: false,
         }
     }
 
@@ -98,6 +100,12 @@ impl Modal {
         self
     }
 
+    /// Let the user move the modal by its title row. The place is remembered for this id.
+    pub fn draggable(mut self, draggable: bool) -> Self {
+        self.draggable = draggable;
+        self
+    }
+
     /// Show the modal
     ///
     /// Returns `Some(R)` if the modal was shown, where R is the result of the content function.
@@ -142,17 +150,35 @@ impl Modal {
 
         let mut close_clicked = false;
         let mut modal = egui::Modal::new(self.id);
-        if let Some(top) = self.top {
+        let drag_id = self.id.with("title_drag");
+        let offset_id = self.id.with("drag_offset");
+        let offset = ctx
+            .data(|data| data.get_temp::<egui::Vec2>(offset_id))
+            .unwrap_or(egui::Vec2::ZERO);
+        if self.top.is_some() || self.draggable {
             let screen = ctx.content_rect();
-            let top = top.clamp(
-                screen.top() + 24.0,
-                (screen.bottom() - height.unwrap_or(0.0) - 24.0).max(screen.top() + 24.0),
-            );
+            let (pivot, mut pos) = match self.top {
+                Some(top) => (
+                    egui::Align2::CENTER_TOP,
+                    egui::pos2(
+                        screen.center().x,
+                        top.clamp(
+                            screen.top() + 24.0,
+                            (screen.bottom() - height.unwrap_or(0.0) - 24.0)
+                                .max(screen.top() + 24.0),
+                        ),
+                    ),
+                ),
+                None => (egui::Align2::CENTER_CENTER, screen.center()),
+            };
+            if self.draggable {
+                pos += offset;
+            }
             modal = modal.area(
                 egui::Area::new(self.id)
                     .order(egui::Order::Foreground)
-                    .pivot(egui::Align2::CENTER_TOP)
-                    .fixed_pos(egui::pos2(screen.center().x, top)),
+                    .pivot(pivot)
+                    .fixed_pos(pos),
             );
         }
         let response = modal.frame(frame).backdrop_color(backdrop).show(ctx, |ui| {
@@ -161,10 +187,51 @@ impl Modal {
             // Start from the window cap each frame, so scrolling content can grow and shrink.
             ui.set_max_height(max_height);
             if !self.title.is_empty() {
-                close_clicked = title_row(ui, &self.title, self.closable);
+                let drag = self.draggable.then_some(drag_id);
+                close_clicked = title_row_with_drag(ui, &self.title, self.closable, drag);
             }
             add_contents(ui)
         });
+
+        if self.draggable {
+            // Apply the pointer motion one frame late, so the drag never fights the layout, and
+            // keep every edge of the moved modal inside the window.
+            let screen = ctx.content_rect();
+            let rect = response.response.rect;
+            let delta = if ctx.is_being_dragged(drag_id) {
+                ctx.input(|input| input.pointer.delta())
+            } else {
+                egui::Vec2::ZERO
+            };
+            let clamp = |screen_lo: f32, screen_hi: f32, lo: f32, hi: f32, shift: f32| {
+                let (low, high) = (screen_lo - lo, screen_hi - hi);
+                if low <= high {
+                    shift.clamp(low, high)
+                } else {
+                    0.0
+                }
+            };
+            let moved = offset
+                + egui::vec2(
+                    clamp(
+                        screen.left(),
+                        screen.right(),
+                        rect.left(),
+                        rect.right(),
+                        delta.x,
+                    ),
+                    clamp(
+                        screen.top(),
+                        screen.bottom(),
+                        rect.top(),
+                        rect.bottom(),
+                        delta.y,
+                    ),
+                );
+            if moved != offset {
+                ctx.data_mut(|data| data.insert_temp(offset_id, moved));
+            }
+        }
 
         if !self.title.is_empty() {
             let translated_label = l10n::text(ctx, &self.title);
@@ -323,5 +390,62 @@ mod tests {
                 assert!(small.height() < 300.0, "{small:?}");
             }
         }
+    }
+    /// A draggable modal follows the pointer from its title row and never leaves the window.
+    #[test]
+    fn a_draggable_modal_follows_its_title() {
+        let ctx = Context::default();
+        let mut open = true;
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 800.0));
+        let area = std::cell::Cell::new(Id::NULL);
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut frame = |events: Vec<egui::Event>| {
+            ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    Modal::new("drag", "Title")
+                        .width(400.0)
+                        .draggable(true)
+                        .show(ui.ctx(), &mut open, |ui| {
+                            area.set(ui.layer_id().id);
+                            ui.label("Body");
+                        });
+                },
+            )
+            .drop_without_applying_deltas();
+        };
+        frame(Vec::new());
+        frame(Vec::new());
+        let before = ctx.memory(|memory| memory.area_rect(area.get())).unwrap();
+        let at = Pos2::new(before.center().x, before.top() + 30.0);
+        frame(vec![egui::Event::PointerMoved(at), press(at, true)]);
+        frame(vec![egui::Event::PointerMoved(at + Vec2::new(120.0, 90.0))]);
+        frame(Vec::new());
+        frame(Vec::new());
+        let moved = ctx.memory(|memory| memory.area_rect(area.get())).unwrap();
+        assert!(
+            (moved.left() - before.left() - 120.0).abs() < 1.0
+                && (moved.top() - before.top() - 90.0).abs() < 1.0,
+            "{before:?} {moved:?}"
+        );
+        // The window edge stops it, however far the pointer goes past it.
+        let at = Pos2::new(moved.center().x, moved.top() + 30.0);
+        frame(vec![press(at, false), press(at, true)]);
+        frame(vec![egui::Event::PointerMoved(Pos2::new(-4000.0, -4000.0))]);
+        frame(Vec::new());
+        let kept = ctx.memory(|memory| memory.area_rect(area.get())).unwrap();
+        assert!(
+            kept.left() >= 0.0 && kept.top() >= 0.0,
+            "{moved:?} {kept:?}"
+        );
     }
 }

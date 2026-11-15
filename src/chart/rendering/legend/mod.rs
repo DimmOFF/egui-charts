@@ -692,6 +692,9 @@ impl<'a> Legend<'a> {
                     continue;
                 }
                 let (row_start, row_end) = (layout.pos, layout.row_end);
+                // TradingView hides everything after a study's name, its inputs caption too,
+                // when "Values in status line" is off.
+                let status_values = study.settings().show_legend_values;
                 if self.show_indicator_titles {
                     layout.text(
                         if study.is_volume() {
@@ -705,7 +708,7 @@ impl<'a> Legend<'a> {
                     );
                 }
                 if study.is_volume() {
-                    if self.show_indicator_inputs && study.plot_style(2).visible {
+                    if self.show_indicator_inputs && status_values && study.plot_style(2).visible {
                         layout.text(
                             study.line_names().get(2).cloned().unwrap_or_default(),
                             theme.text.ohlc,
@@ -735,6 +738,7 @@ impl<'a> Legend<'a> {
                     }
                 } else {
                     if self.show_indicator_inputs
+                        && status_values
                         && let Some(inputs) = self
                             .study_inputs
                             .get(index)

@@ -191,8 +191,23 @@ fn dialog_key(ui: &Ui, key: egui::Key) -> bool {
 
 /// Title row shared with the modal dialogs, which hide the close button when not closable.
 pub(crate) fn title_row(ui: &mut Ui, title: &str, closable: bool) -> bool {
+    title_row_with_drag(ui, title, closable, None)
+}
+
+/// The title row, dragging `drag` by its free width so that the dialog can be moved.
+pub(crate) fn title_row_with_drag(
+    ui: &mut Ui,
+    title: &str,
+    closable: bool,
+    drag: Option<egui::Id>,
+) -> bool {
     // Fix the row height before placing the title so the title centres on the button.
     let row = Vec2::new(ui.available_width(), ButtonSize::MD.pixels());
+    if let Some(drag) = drag {
+        // Registered before the close button, which then takes the clicks on its own rect.
+        let rect = egui::Rect::from_min_size(ui.cursor().min, row);
+        ui.interact(rect, drag, egui::Sense::drag());
+    }
     // The close button first, so a long title is elided in the width left rather than widening
     // the dialog past a narrow window.
     let close = ui

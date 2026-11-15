@@ -1748,3 +1748,39 @@ fn study_drawings_paint_on_the_price_pane() {
         "the study's line must reach the price pane, in its own colour"
     );
 }
+
+/// The status-line switch hides the study's input caption as well as its values, as TradingView
+/// does.
+#[test]
+fn study_legend_hides_its_inputs_with_its_values() {
+    let ctx = egui::Context::default();
+    let mut chart = chart(&[100.0], &[110.0]);
+    let study = chart.add_indicator(Box::new(crate::studies::SMA::new(1)));
+    chart.set_indicator_inputs(study, "1 close");
+    fn legend(ctx: &egui::Context, chart: &mut crate::widget::Chart) -> Vec<String> {
+        shapes(ctx, chart, 0.1, vec![])
+            .into_iter()
+            .filter_map(|shape| match shape {
+                Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+    let texts = legend(&ctx, &mut chart);
+    assert!(
+        texts.iter().any(|text| text.contains("1 close")),
+        "{texts:?}"
+    );
+    chart.user_action(|chart| {
+        let study = chart.indicator_mut(study).unwrap();
+        let mut settings = study.settings();
+        settings.show_legend_values = false;
+        study.apply_settings(&[], settings).unwrap();
+    });
+    let texts = legend(&ctx, &mut chart);
+    assert!(texts.iter().any(|text| text.contains("SMA")), "{texts:?}");
+    assert!(
+        !texts.iter().any(|text| text.contains("1 close")),
+        "{texts:?}"
+    );
+}

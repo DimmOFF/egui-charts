@@ -2,13 +2,18 @@
 //! keeps them between runs.
 
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use egui_charts::icons::icons;
 use egui_charts::studies::{CustomIndicator, Indicator, IndicatorFactory};
 use egui_charts::theme::ThemeExt;
-use egui_charts::ui_kit::buttons::{ButtonSize, IconButton};
+use egui_charts::ui_kit::buttons::{Button, ButtonSize, IconButton};
+use egui_charts::widget::{Chart, SeriesId};
 
 use crate::pine_engine::PineStudy;
+
+/// What a new script starts as.
+const NEW_SCRIPT: &str = "//@version=6\nindicator(\"My script\")\nplot(close)\n";
 
 /// One stored script, named by the title its `indicator`/`study` call gives it.
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -17,6 +22,7 @@ struct SavedScript {
     source: String,
 }
 
+#[derive(Default)]
 pub struct PineScripts {
     path: PathBuf,
     scripts: Vec<SavedScript>,
@@ -28,6 +34,40 @@ pub struct PineScripts {
     /// The index of the selected script, or `None` while a new one is edited.
     editing: Option<usize>,
     status: Vec<String>,
+    /// The compiled script the host should put on the chart.
+    pending: Option<ChartPush>,
+    /// Whether the script name is being edited in place.
+    renaming: bool,
+    rename_draft: String,
+    /// Whether the rename field still has to take the focus.
+    rename_focus: bool,
+}
+
+/// A compiled script for the host to add to the chart.
+pub struct ChartPush {
+    /// The series this script replaces, for an update.
+    pub replace: Option<SeriesId>,
+    pub indicator: Box<dyn Indicator>,
+}
+
+/// What the top row offers besides the script menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChartAction {
+    Add,
+    Update,
+}
+
+/// A script menu entry clicked in the current frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuAction {
+    New,
+    Rename,
+    Save,
+    Import,
+    Export,
+    Delete,
+    Add,
+    Update,
 }
 
 impl PineScripts {
@@ -52,11 +92,9 @@ impl PineScripts {
         Self {
             path,
             scripts,
-            open: false,
-            pinned: false,
             draft,
             editing,
-            status: Vec::new(),
+            ..Self::default()
         }
     }
 
@@ -82,18 +120,37 @@ impl PineScripts {
     ///
     /// A pinned editor claims its width from `ui` before the terminal draws its frame, which
     /// docks it to the right of the terminal's right rail; otherwise it floats in a window.
-    pub fn show(&mut self, ui: &mut egui::Ui) -> bool {
+    /// `on_chart` is the series of the selected script the chart already carries.
+    pub fn show(&mut self, ui: &mut egui::Ui, on_chart: Option<SeriesId>) -> bool {
         if !self.open {
             return false;
         }
         if self.pinned {
-            self.show_docked(ui)
+            self.show_docked(ui, on_chart)
         } else {
-            self.show_window(ui.ctx())
+            self.show_window(ui.ctx(), on_chart)
         }
     }
 
-    fn show_window(&mut self, ctx: &egui::Context) -> bool {
+    /// The series of the selected script on `chart`, if the chart carries it.
+    pub fn on_chart(&self, chart: &Chart) -> Option<SeriesId> {
+        let name = self.current()?.name.as_str();
+        chart
+            .indicators()
+            .find(|(_, indicator)| indicator.name() == name)
+            .map(|(id, _)| id)
+    }
+
+    /// Takes the script the editor compiled for the chart.
+    pub fn take_chart_push(&mut self) -> Option<ChartPush> {
+        self.pending.take()
+    }
+
+    fn current(&self) -> Option<&SavedScript> {
+        self.editing.and_then(|at| self.scripts.get(at))
+    }
+
+    fn show_window(&mut self, ctx: &egui::Context, on_chart: Option<SeriesId>) -> bool {
         let mut changed = false;
         let mut close = false;
         // The window's own title bar has no room for the pin, so the editor draws the row.
@@ -105,9 +162,7 @@ impl PineScripts {
             .resizable(true)
             .show(ctx, |ui| {
                 self.title_row(ui, &mut close);
-                let (body_changed, body_close) = self.body(ui);
-                changed = body_changed;
-                close |= body_close;
+                changed = self.body(ui, on_chart);
             });
         if close {
             self.open = false;
@@ -115,7 +170,7 @@ impl PineScripts {
         changed
     }
 
-    fn show_docked(&mut self, ui: &mut egui::Ui) -> bool {
+    fn show_docked(&mut self, ui: &mut egui::Ui, on_chart: Option<SeriesId>) -> bool {
         let mut changed = false;
         let mut close = false;
         let max_width = (ui.available_width() * 0.6).max(320.0);
@@ -131,9 +186,7 @@ impl PineScripts {
             )
             .show(ui, |ui| {
                 self.title_row(ui, &mut close);
-                let (body_changed, body_close) = self.body(ui);
-                changed = body_changed;
-                close |= body_close;
+                changed = self.body(ui, on_chart);
             });
         if close {
             self.open = false;
@@ -174,116 +227,234 @@ impl PineScripts {
         ui.separator();
     }
 
-    /// The script picker, the code and the actions. Returns `(scripts changed, close clicked)`.
-    fn body(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
+    /// The script menu, the name, the chart button, the numbered code and the status.
+    fn body(&mut self, ui: &mut egui::Ui, on_chart: Option<SeriesId>) -> bool {
         let mut changed = false;
-        let mut close = false;
+        let mut action = None;
         ui.horizontal(|ui| {
-            let current = self
-                .editing
-                .and_then(|at| self.scripts.get(at))
-                .map(|script| script.name.as_str())
-                .unwrap_or("—");
-            let mut pick = None;
-            egui::ComboBox::from_label("Script")
-                .selected_text(current)
-                .show_ui(ui, |ui| {
-                    for (at, script) in self.scripts.iter().enumerate() {
-                        if ui
-                            .selectable_label(self.editing == Some(at), &script.name)
-                            .clicked()
-                        {
-                            pick = Some(at);
-                        }
+            let (menu, _) = egui::containers::menu::MenuButton::from_button(
+                icons::MENU
+                    .as_button(egui::Vec2::splat(16.0))
+                    .frame_when_inactive(false),
+            )
+            .ui(ui, |ui| {
+                ui.menu_button("Create new", |ui| {
+                    if ui.button("Indicator").clicked() {
+                        action = Some(MenuAction::New);
+                        ui.close();
                     }
                 });
-            if let Some(at) = pick {
-                self.editing = Some(at);
-                self.draft = self.scripts[at].source.clone();
-                self.status.clear();
+                if ui.button("Rename").clicked() {
+                    action = Some(MenuAction::Rename);
+                    ui.close();
+                }
+                if ui.button("Save").clicked() {
+                    action = Some(MenuAction::Save);
+                    ui.close();
+                }
+                if ui.button("Import").clicked() {
+                    action = Some(MenuAction::Import);
+                    ui.close();
+                }
+                if ui.button("Export").clicked() {
+                    action = Some(MenuAction::Export);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Delete").clicked() {
+                    action = Some(MenuAction::Delete);
+                    ui.close();
+                }
+            });
+            menu.on_hover_text("Script menu");
+            if self.renaming {
+                let response =
+                    ui.add(egui::TextEdit::singleline(&mut self.rename_draft).desired_width(180.0));
+                if self.rename_focus {
+                    response.request_focus();
+                    self.rename_focus = false;
+                }
+                let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
+                let entered = ui.input(|input| input.key_pressed(egui::Key::Enter));
+                if response.lost_focus() || (response.has_focus() && entered) {
+                    if escaped {
+                        self.renaming = false;
+                    } else {
+                        changed |= self.commit_rename();
+                    }
+                }
+            } else {
+                self.name_menu(ui);
             }
-            if ui.button("New").clicked() {
-                self.editing = None;
-                self.draft.clear();
-                self.status.clear();
-            }
-            if ui.button("Delete").clicked()
-                && let Some(at) = self.editing.take()
-                && at < self.scripts.len()
-            {
-                self.scripts.remove(at);
-                self.save();
-                self.draft.clear();
-                self.status.clear();
-                changed = true;
+            match self.chart_action(on_chart) {
+                Some(ChartAction::Add) => {
+                    if Button::new("Add to chart").primary().show(ui).clicked() {
+                        action = Some(MenuAction::Add);
+                    }
+                }
+                Some(ChartAction::Update) => {
+                    if Button::new("Update").primary().show(ui).clicked() {
+                        action = Some(MenuAction::Update);
+                    }
+                }
+                None => {}
             }
         });
+        match action {
+            Some(MenuAction::New) => {
+                self.editing = None;
+                self.draft = NEW_SCRIPT.to_owned();
+                self.status.clear();
+            }
+            Some(MenuAction::Rename) => {
+                self.renaming = true;
+                self.rename_draft = self.current().map_or_else(String::new, |s| s.name.clone());
+                self.rename_focus = true;
+            }
+            Some(MenuAction::Save) => changed |= self.apply(),
+            Some(MenuAction::Import) => changed |= self.import(),
+            Some(MenuAction::Export) => self.export(),
+            Some(MenuAction::Delete) => {
+                if let Some(at) = self.editing.take()
+                    && at < self.scripts.len()
+                {
+                    self.scripts.remove(at);
+                    self.draft.clear();
+                    self.status.clear();
+                    self.save();
+                    changed = true;
+                }
+            }
+            Some(MenuAction::Add) => changed |= self.add_to_chart(None),
+            Some(MenuAction::Update) => changed |= self.add_to_chart(on_chart),
+            None => {}
+        }
         ui.separator();
         // Without a bounded height the editor asks for every row it holds, the window grows
         // past the screen and its close button goes with it. The width is passed in too:
-        // left to itself the field shrinks to a few characters inside the scroll area.
-        let width = ui.available_width();
-        let height = (ui.available_height() - 60.0).clamp(160.0, 900.0);
+        // left to itself the field shrinks to a few characters inside the scroll area. Only the
+        // diagnostics at the bottom take their space out of the code area in pinned mode.
+        let reserved = if self.status.is_empty() { 0.0 } else { 80.0 };
+        let height = (ui.available_height() - reserved).max(120.0);
+        let font = egui::TextStyle::Monospace.resolve(ui.style());
+        let digit = ui.fonts_mut(|fonts| fonts.glyph_width(&font, '0'));
+        let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
+        let rows = ((height - 8.0) / row_height).max(4.0) as usize;
+        let lines = self.draft.bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let gutter = digit * lines.to_string().len() as f32 + 8.0;
         egui::ScrollArea::vertical()
             .id_salt("pine-code")
             .max_height(height)
+            .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.set_min_width(width);
-                let mut layouter =
-                    |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
-                        let mut job = pine_layout_job(ui, buffer.as_str());
-                        job.wrap.max_width = wrap_width;
-                        ui.fonts_mut(|fonts| fonts.layout_job(job))
-                    };
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.draft)
+                ui.set_min_width(ui.available_width());
+                ui.horizontal_top(|ui| {
+                    let (gutter_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(gutter, 0.0), egui::Sense::hover());
+                    let width = (ui.available_width() - 8.0).max(80.0);
+                    let mut layouter =
+                        |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
+                            let mut job = pine_layout_job(ui, buffer.as_str());
+                            job.wrap.max_width = wrap_width;
+                            ui.fonts_mut(|fonts| fonts.layout_job(job))
+                        };
+                    let output = egui::TextEdit::multiline(&mut self.draft)
                         .code_editor()
-                        .desired_rows(24)
+                        .desired_rows(rows)
                         .desired_width(width)
-                        .layouter(&mut layouter),
-                );
+                        .layouter(&mut layouter)
+                        .show(ui);
+                    paint_line_numbers(ui, gutter_rect, &output);
+                });
             });
-        ui.horizontal(|ui| {
-            if ui.button("Apply").clicked() {
-                changed = true;
-                self.apply();
-            }
-            if ui.button("Import temp/pine").clicked() {
-                changed = true;
-                self.import();
-            }
-            if ui.button("Close").clicked() {
-                close = true;
+        if !self.status.is_empty() {
+            egui::ScrollArea::vertical()
+                .id_salt("pine-status")
+                .max_height(80.0)
+                .show(ui, |ui| {
+                    for line in &self.status {
+                        ui.label(line);
+                    }
+                });
+        }
+        changed
+    }
+
+    /// The selected script's name, as a menu that switches to another stored script.
+    fn name_menu(&mut self, ui: &mut egui::Ui) {
+        let name = self
+            .current()
+            .map_or("Untitled script", |script| script.name.as_str());
+        let mut pick = None;
+        ui.menu_button(name, |ui| {
+            for (at, script) in self.scripts.iter().enumerate() {
+                if ui
+                    .selectable_label(self.editing == Some(at), &script.name)
+                    .clicked()
+                {
+                    pick = Some(at);
+                    ui.close();
+                }
             }
         });
-        for line in &self.status {
-            ui.label(line);
+        if let Some(at) = pick {
+            self.editing = Some(at);
+            self.draft = self.scripts[at].source.clone();
+            self.status.clear();
         }
-        (changed, close)
+    }
+
+    /// What the chart button offers: Add while the script is elsewhere, Update while it differs.
+    fn chart_action(&self, on_chart: Option<SeriesId>) -> Option<ChartAction> {
+        match on_chart {
+            None => Some(ChartAction::Add),
+            Some(_) => self
+                .current()
+                .filter(|script| script.source != self.draft)
+                .map(|_| ChartAction::Update),
+        }
+    }
+
+    /// Renames the draft's script and stores the result when it is a saved one.
+    fn commit_rename(&mut self) -> bool {
+        self.renaming = false;
+        let name = self.rename_draft.trim().to_owned();
+        if name.is_empty() {
+            return false;
+        }
+        self.draft = script_with_title(&self.draft, &name);
+        self.current().is_some() && self.apply()
+    }
+
+    /// Compiles the draft, stores it and hands the result to the chart.
+    fn add_to_chart(&mut self, replace: Option<SeriesId>) -> bool {
+        if !self.apply() {
+            return false;
+        }
+        let Some(script) = self.current() else {
+            return false;
+        };
+        let Ok(study) = PineStudy::new(&script.source) else {
+            return false;
+        };
+        self.pending = Some(ChartPush {
+            replace,
+            indicator: Box::new(study),
+        });
+        true
     }
 
     /// Compiles the draft, stores it and reports what it could not run.
-    fn apply(&mut self) {
+    fn apply(&mut self) -> bool {
         self.status.clear();
         let study = match PineStudy::new(&self.draft) {
             Ok(study) => study,
             Err(error) => {
                 self.status.push(error);
-                return;
+                return false;
             }
         };
-        let mut name = study.name().to_owned();
-        let taken = |scripts: &[SavedScript], editing: Option<usize>, name: &str| {
-            scripts
-                .iter()
-                .enumerate()
-                .any(|(at, script)| Some(at) != editing && script.name == name)
-        };
-        let mut copy = 2;
-        while taken(&self.scripts, self.editing, &name) {
-            name = format!("{} ({copy})", study.name());
-            copy += 1;
-        }
+        let name = self.unique_name(study.name(), self.editing);
         let script = SavedScript {
             name: name.clone(),
             source: self.draft.clone(),
@@ -303,20 +474,86 @@ impl PineScripts {
             self.status.push(format!("`{name}` compiled"));
         }
         self.save();
+        true
     }
 
-    /// Adds the scripts of the development folder that are not stored yet.
-    fn import(&mut self) {
+    /// `name` with a copy number that no script other than `keep` already uses.
+    fn unique_name(&self, name: &str, keep: Option<usize>) -> String {
+        let taken = |candidate: &str| {
+            self.scripts
+                .iter()
+                .enumerate()
+                .any(|(at, script)| Some(at) != keep && script.name == candidate)
+        };
+        let mut candidate = name.to_owned();
+        let mut copy = 2;
+        while taken(&candidate) {
+            candidate = format!("{name} ({copy})");
+            copy += 1;
+        }
+        candidate
+    }
+
+    /// Adds the `.pine` files the user picks.
+    fn import(&mut self) -> bool {
+        let Some(paths) = rfd::FileDialog::new()
+            .add_filter("Pine script", &["pine"])
+            .pick_files()
+        else {
+            return false;
+        };
+        let mut status = Vec::new();
         let mut added = 0;
-        for script in import_folder() {
-            if self.scripts.iter().any(|stored| stored.name == script.name) {
-                continue;
-            }
-            self.scripts.push(script);
+        for path in paths {
+            let source = match std::fs::read_to_string(&path) {
+                Ok(source) => source,
+                Err(error) => {
+                    status.push(format!("Could not read {}: {error}", path.display()));
+                    continue;
+                }
+            };
+            // A file that does not compile yet still opens, named after the file.
+            let name = PineStudy::new(&source)
+                .map(|study| study.name().to_owned())
+                .unwrap_or_else(|_| {
+                    path.file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or("Imported script")
+                        .to_owned()
+                });
+            let name = self.unique_name(&name, None);
+            self.scripts.push(SavedScript { name, source });
             added += 1;
         }
-        self.status = vec![format!("Scripts imported: {added}")];
-        self.save();
+        if added > 0 {
+            status.push(format!("Scripts imported: {added}"));
+            self.save();
+        }
+        self.status = status;
+        added > 0
+    }
+
+    /// Writes the draft to the `.pine` file the user picks.
+    fn export(&mut self) {
+        let name = self
+            .current()
+            .map_or("script", |script| script.name.as_str());
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Pine script", &["pine"])
+            .set_file_name(pine_file_name(name))
+            .save_file()
+        else {
+            return;
+        };
+        let path = if path.extension().is_some() {
+            path
+        } else {
+            path.with_extension("pine")
+        };
+        self.status = vec![match std::fs::write(&path, &self.draft) {
+            Ok(()) => format!("Exported to {}", path.display()),
+            Err(error) => format!("Could not write {}: {error}", path.display()),
+        }];
     }
 
     fn save(&self) {
@@ -324,6 +561,65 @@ impl PineScripts {
             eprintln!("Pine scripts: {error}");
         }
     }
+}
+
+/// The line numbers of `output` in the `gutter` left of it.
+fn paint_line_numbers(ui: &egui::Ui, gutter: egui::Rect, output: &egui::text_edit::TextEditOutput) {
+    let font = egui::TextStyle::Monospace.resolve(ui.style());
+    let color = ui.active_theme().ui.text_muted;
+    let painter = ui.painter();
+    let mut line = 1;
+    for row in &output.galley.rows {
+        painter.text(
+            egui::pos2(gutter.right() - 4.0, output.galley_pos.y + row.pos.y),
+            egui::Align2::RIGHT_TOP,
+            line.to_string(),
+            font.clone(),
+            color,
+        );
+        if row.ends_with_newline {
+            line += 1;
+        }
+    }
+}
+
+/// `source` with the title of its `indicator`/`study` call set to `name`.
+fn script_with_title(source: &str, name: &str) -> String {
+    let Some(call) = TITLE.captures(source) else {
+        return source.to_owned();
+    };
+    let prefix = call.get(1).expect("group one is the call").end();
+    let end = call.get(0).expect("the whole match").end();
+    let mut text = String::with_capacity(source.len() + name.len());
+    text.push_str(&source[..prefix]);
+    text.push('"');
+    text.push_str(&name.replace('"', ""));
+    text.push('"');
+    text.push_str(&source[end..]);
+    text
+}
+
+/// The `indicator`/`study` call up to its title, which group one ends before.
+static TITLE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#"(?m)^([ \t]*(?:indicator|study)[ \t]*\([ \t]*)(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')"#,
+    )
+    .expect("the title pattern is valid")
+});
+
+/// `name` as a file name that ends in `.pine`.
+fn pine_file_name(name: &str) -> String {
+    let safe: String = name
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || matches!(character, ' ' | '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{}.pine", safe.trim())
 }
 
 fn write_scripts(path: &PathBuf, scripts: &[SavedScript]) -> Result<(), String> {
@@ -627,13 +923,9 @@ mod tests {
             let screen =
                 egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0));
             let mut pine = PineScripts {
-                path: PathBuf::new(),
-                scripts: Vec::new(),
                 open: true,
                 pinned,
-                draft: String::new(),
-                editing: None,
-                status: Vec::new(),
+                ..PineScripts::default()
             };
             let mut width = screen.width();
             for _ in 0..2 {
@@ -643,7 +935,7 @@ mod tests {
                         ..Default::default()
                     },
                     |ui| {
-                        pine.show(ui);
+                        pine.show(ui, None);
                         width = ui.available_rect_before_wrap().width();
                     },
                 );
@@ -654,6 +946,42 @@ mod tests {
                 assert_eq!(width, screen.width());
             }
         }
+    }
+
+    /// The chart offers Add until the script is there, and Update only while it differs.
+    #[test]
+    fn the_chart_button_follows_the_edited_script() {
+        let source = "indicator(\"T\")\nplot(close)".to_owned();
+        let mut pine = PineScripts {
+            scripts: vec![SavedScript {
+                name: "T".to_owned(),
+                source: source.clone(),
+            }],
+            draft: source,
+            editing: Some(0),
+            ..PineScripts::default()
+        };
+        assert_eq!(pine.chart_action(None), Some(ChartAction::Add));
+        assert_eq!(pine.chart_action(Some(SeriesId(7))), None);
+        pine.draft.push_str("\nplot(open)");
+        assert_eq!(
+            pine.chart_action(Some(SeriesId(7))),
+            Some(ChartAction::Update)
+        );
+    }
+
+    /// Renaming rewrites the title the indicator call gives the script.
+    #[test]
+    fn renaming_rewrites_the_indicator_title() {
+        assert_eq!(
+            script_with_title(
+                "//@version=6\nindicator(\"Old\", overlay=true)\nplot(close)",
+                "New"
+            ),
+            "//@version=6\nindicator(\"New\", overlay=true)\nplot(close)"
+        );
+        // A script without an indicator call keeps its source.
+        assert_eq!(script_with_title("plot(close)", "New"), "plot(close)");
     }
 
     /// Comments, strings, keywords, built-ins, numbers and colours get their own runs.

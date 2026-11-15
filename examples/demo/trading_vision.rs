@@ -101,8 +101,17 @@ fn main() -> eframe::Result {
             let terminal = terminal.as_mut().expect("the terminal was built above");
             // A docked editor takes its width from the window before the terminal draws its
             // frame, so the terminal's right rail ends up to its left, as in the reference.
-            if pine.show(ui) {
+            let on_chart = pine.on_chart(terminal.chart());
+            if pine.show(ui, on_chart) {
                 terminal.set_indicator_factory(pine.factory());
+            }
+            // Add to chart and Update compile the script and hand it over from the editor.
+            if let Some(push) = pine.take_chart_push() {
+                let chart = terminal.chart_mut();
+                if let Some(replace) = push.replace {
+                    chart.remove_series(replace);
+                }
+                chart.add_indicator(push.indicator);
             }
             // Actions the terminal leaves to its host: host entries and those without a default.
             for action in terminal.show(ui) {

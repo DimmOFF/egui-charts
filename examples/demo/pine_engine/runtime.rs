@@ -3,6 +3,8 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{Datelike, TimeZone, Timelike};
 use egui::Color32;
@@ -49,6 +51,9 @@ pub struct Context {
     pub root: String,
     /// The Pine name of the instrument type, which `syminfo.type` reads.
     pub symbol_type: String,
+    /// Set when the run's results are no longer wanted, such as when the bars moved on. A run
+    /// stops at the next bar instead of finishing work that its study would discard.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Default for Context {
@@ -60,6 +65,7 @@ impl Default for Context {
             exchange: String::new(),
             root: String::new(),
             symbol_type: String::new(),
+            cancel: None,
         }
     }
 }
@@ -338,6 +344,11 @@ impl<'a> Evaluator<'a> {
     pub fn run(mut self) -> RunOutput {
         let body = self.program.body.as_slice();
         for bar in 0..self.bars.len() {
+            if let Some(cancel) = &self.context.cancel
+                && cancel.load(Ordering::Relaxed)
+            {
+                break;
+            }
             self.bar = bar;
             self.run_block(body);
             self.finish_bar();

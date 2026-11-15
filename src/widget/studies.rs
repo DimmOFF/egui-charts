@@ -305,6 +305,12 @@ impl Chart {
     pub(super) fn refresh_element_studies(&mut self, now: f64) -> Option<f64> {
         let cutoff = self.replay_time();
         let cache = &mut self.element_studies;
+        for (at, study) in cache.studies.indicators_mut().iter_mut().enumerate() {
+            if study.update_ready() {
+                cache.pending_from[at] = Some(0);
+                cache.next_refresh[at] = f64::NEG_INFINITY;
+            }
+        }
         let requests = cache
             .studies
             .indicators()

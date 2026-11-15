@@ -603,6 +603,14 @@ impl Indicator for ConfiguredStudy {
         true
     }
 
+    fn update_ready(&mut self) -> bool {
+        self.study.update_ready()
+    }
+
+    fn settle(&mut self) {
+        self.study.settle();
+    }
+
     fn user_edit_enabled(&self) -> bool {
         self.settings
             .user_edit_enabled

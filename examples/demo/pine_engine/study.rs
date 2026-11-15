@@ -1,6 +1,7 @@
 //! A parsed Pine script as a chart study: its plots become lines, `fill` becomes a band and
 //! `plotshape` becomes text labels.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use egui::Color32;
@@ -25,6 +26,8 @@ struct RunTask {
     result: Arc<Mutex<Option<RunOutput>>>,
     /// The script, context and bars the run was given.
     version: Version,
+    /// Set when the run's bars are gone, so it stops instead of finishing for nothing.
+    cancel: Arc<AtomicBool>,
 }
 
 /// What a run was calculated from, so a finished run is only applied to the same state.
@@ -69,8 +72,6 @@ pub struct PineStudy {
     generation: u64,
     /// Whether the next update must finish in the calling thread, for export and snapshots.
     settle: bool,
-    /// Whether a run has finished, so the values and styles are known.
-    started: bool,
 }
 
 impl PineStudy {
@@ -107,7 +108,6 @@ impl PineStudy {
             task: None,
             generation: 0,
             settle: false,
-            started: false,
         })
     }
 
@@ -119,7 +119,6 @@ impl PineStudy {
 
     /// Takes `output`, a run over `bars` bars, as the values and drawings to draw.
     fn store(&mut self, output: RunOutput, bars: usize) {
-        self.started = true;
         self.values = IndicatorValues::new();
         let mut row = vec![f64::NAN; output.plots.len()];
         for bar in 0..bars {
@@ -222,12 +221,20 @@ impl Indicator for PineStudy {
     }
 
     fn update_data(&mut self, data: &[Bar], from: usize, sources: &[StudyData<'_>]) {
+        if data.is_empty() {
+            // The chart drops the values of bars it no longer has. The styles and drawings stay
+            // until the next finished run replaces them.
+            self.values.clear();
+            return;
+        }
         let sources = security_sources(sources);
         let version = state_of(self.generation, data);
         if self.settle {
             // Export, a snapshot or an undo step reads the values at once.
             self.settle = false;
-            self.task = None;
+            if let Some(task) = self.task.take() {
+                task.cancel.store(true, Ordering::Relaxed);
+            }
             self.sources = sources;
             self.calculate(data);
             return;
@@ -241,21 +248,19 @@ impl Indicator for PineStudy {
                 }
                 // A run for other bars is stale; the newer bars below start another.
                 Some(_) => {}
-                // Still running: the picture stays until it lands.
-                None => {
+                // The same bars: the running run is the one wanted, and the picture stays
+                // until it lands.
+                None if task.version == version => {
                     self.task = Some(task);
                     if from == 0 {
                         self.clear_output();
                     }
                     return;
                 }
+                // The bars moved on, as when a drag pages older ones in: stop this run and
+                // start the one these bars need instead of waiting for a result to discard.
+                None => task.cancel.store(true, Ordering::Relaxed),
             }
-        }
-        if !self.started {
-            // The first run, at add: the chart draws the study at once.
-            self.sources = sources;
-            self.calculate(data);
-            return;
         }
         let Some(ctx) = self.ctx.clone() else {
             self.sources = sources;
@@ -267,16 +272,25 @@ impl Indicator for PineStudy {
             self.clear_output();
         }
         let script = self.script.clone();
-        let context = self.context.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut context = self.context.clone();
+        context.cancel = Some(Arc::clone(&cancel));
         let bars = data.to_vec();
         let result: Arc<Mutex<Option<RunOutput>>> = Arc::new(Mutex::new(None));
         let slot = Arc::clone(&result);
+        let finished = Arc::clone(&cancel);
         std::thread::spawn(move || {
             let output = script.run(&bars, &context, &sources);
-            *slot.lock().unwrap_or_else(|error| error.into_inner()) = Some(output);
+            if !finished.load(Ordering::Relaxed) {
+                *slot.lock().unwrap_or_else(|error| error.into_inner()) = Some(output);
+            }
             ctx.request_repaint();
         });
-        self.task = Some(RunTask { result, version });
+        self.task = Some(RunTask {
+            result,
+            version,
+            cancel,
+        });
     }
 
     fn update_ready(&mut self) -> bool {
@@ -907,5 +921,27 @@ mod tests {
         study.update_data(&longer, 0, &[]);
         assert_eq!(study.values().len(), longer.len());
         assert!(!study.update_ready());
+    }
+
+    /// Adding a study starts its first run on a thread, not in the frame that adds it. The
+    /// chart's blanking call drops the values of the old bars and keeps the styles.
+    #[test]
+    fn the_first_run_leaves_the_calling_thread() {
+        let mut study = PineStudy::new("//@version=6\nindicator(\"T\")\nplot(close)").unwrap();
+        study.set_context(Some(egui::Context::default()));
+        let data = bars(&[1.0; 1200]);
+        study.update_data(&data, 0, &[]);
+        assert!(study.values().is_empty(), "the run is still on its thread");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !study.update_ready() {
+            assert!(std::time::Instant::now() < deadline, "the run finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        study.update_data(&data, 0, &[]);
+        assert_eq!(study.values().len(), data.len());
+        let names = study.line_names.len();
+        study.update(&[], 0);
+        assert!(study.values().is_empty());
+        assert_eq!(study.line_names.len(), names, "the styles stay");
     }
 }

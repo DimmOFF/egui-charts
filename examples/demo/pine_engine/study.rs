@@ -308,9 +308,11 @@ impl Indicator for PineStudy {
 
     fn update(&mut self, data: &[Bar], from: usize) {
         if data.is_empty() {
-            // The chart drops the values of bars it no longer has before it recalculates. The
-            // styles and drawings stay until the next run replaces them.
-            self.values.clear();
+            // The chart blanks a study whose values belong to other bars. A finished run already
+            // holds the values for these bars, so the lines keep their picture until it lands.
+            if !self.update_ready() {
+                self.values.clear();
+            }
             return;
         }
         self.update_data(data, from, &[]);
@@ -657,6 +659,15 @@ mod tests {
             .collect()
     }
 
+    /// Waits for the run in flight to put its result where the next update takes it.
+    fn wait_for_run(study: &mut PineStudy) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !study.update_ready() {
+            assert!(std::time::Instant::now() < deadline, "the run finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     const TRIPLE_EMA: &str = "//@version=6\nindicator(\"Tripple EMA\", overlay=true)\nfast = input.int(3, \"Fast\")\nslow = input.int(5, \"Slow\")\na = ta.ema(close, fast)\nb = ta.ema(close, slow)\np1 = plot(a, \"Fast\", color=color.new(color.red, 40))\np2 = plot(b, \"Slow\", color=color.blue)\nfill(p1, p2, color=color.new(color.green, 90))\n";
 
     #[test]
@@ -932,16 +943,33 @@ mod tests {
         let data = bars(&[1.0; 1200]);
         study.update_data(&data, 0, &[]);
         assert!(study.values().is_empty(), "the run is still on its thread");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !study.update_ready() {
-            assert!(std::time::Instant::now() < deadline, "the run finished");
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        wait_for_run(&mut study);
         study.update_data(&data, 0, &[]);
         assert_eq!(study.values().len(), data.len());
         let names = study.line_names.len();
         study.update(&[], 0);
         assert!(study.values().is_empty());
         assert_eq!(study.line_names.len(), names, "the styles stay");
+    }
+
+    /// The chart blanks a study whose turn has not come while a finished run waits to be drawn:
+    /// the lines keep their picture until that run lands, or they blink once per run.
+    #[test]
+    fn a_finished_run_keeps_the_lines_until_they_are_drawn() {
+        let mut study = PineStudy::new("//@version=6\nindicator(\"T\")\nplot(close)").unwrap();
+        study.set_context(Some(egui::Context::default()));
+        let data = bars(&[1.0; 1200]);
+        study.update_data(&data, 0, &[]);
+        wait_for_run(&mut study);
+        study.update_data(&data, 0, &[]);
+        assert_eq!(study.values().len(), data.len());
+        // A tick starts the next run; the blanking call comes before that run is drawn.
+        study.update_data(&data, data.len() - 1, &[]);
+        assert_eq!(study.values().len(), data.len(), "the lines blinked");
+        wait_for_run(&mut study);
+        study.update(&[], 0);
+        assert_eq!(study.values().len(), data.len(), "the lines blinked");
+        study.update_data(&data, 0, &[]);
+        assert_eq!(study.values().len(), data.len());
     }
 }

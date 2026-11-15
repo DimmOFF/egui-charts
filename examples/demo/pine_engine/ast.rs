@@ -2,6 +2,7 @@
 //! shows for what this subset does not run.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::pine_engine::value::Value;
 
@@ -56,7 +57,7 @@ pub struct Arg {
 pub enum Expr {
     Number(f64),
     Bool(bool),
-    Str(String),
+    Str(Arc<str>),
     Color(u32),
     Na,
     Ident(String),
@@ -118,9 +119,7 @@ impl Expr {
         f(self);
         match self {
             Expr::Member { target, .. } => target.visit(f),
-            Expr::Call {
-                receiver, args, ..
-            } => {
+            Expr::Call { receiver, args, .. } => {
                 if let Some(receiver) = receiver {
                     receiver.visit(f);
                 }

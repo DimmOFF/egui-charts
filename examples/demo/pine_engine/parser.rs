@@ -175,9 +175,9 @@ impl Parser {
         let mut overlay = true;
         for (at, arg) in args.iter().enumerate() {
             match (arg.name.as_deref(), literal(&arg.value)) {
-                (Some("title"), Some(Value::Str(text))) => title = Some(text),
+                (Some("title"), Some(Value::Str(text))) => title = Some(text.to_string()),
                 // v4 wrote the title first: `study("Title", ...)`.
-                (None, Some(Value::Str(text))) if at == 0 => title = Some(text),
+                (None, Some(Value::Str(text))) if at == 0 => title = Some(text.to_string()),
                 (Some("overlay"), Some(Value::Bool(flag))) => overlay = flag,
                 _ => {}
             }
@@ -327,10 +327,7 @@ impl Parser {
         at += 1;
         // A declared return type comes first: `float myAverage(...) =>`.
         if matches!(self.tokens.get(at).map(|s| &s.token), Some(Token::Ident(_)))
-            && self
-                .tokens
-                .get(at + 1)
-                .is_some_and(|next| next.is_op("("))
+            && self.tokens.get(at + 1).is_some_and(|next| next.is_op("("))
         {
             at += 1;
         }
@@ -565,7 +562,9 @@ impl Parser {
         let mut names = Vec::new();
         for item in items {
             let Expr::Ident(name) = item else {
-                return Err(format!("line {line}: expected a name in a tuple assignment"));
+                return Err(format!(
+                    "line {line}: expected a name in a tuple assignment"
+                ));
             };
             names.push(name);
         }
@@ -763,7 +762,10 @@ impl Parser {
         let mut params = Vec::new();
         match self.peek().clone() {
             Token::Ident(name) => {
-                let arrow = self.tokens.get(self.at + 1).is_some_and(|next| next.is_op("=>"));
+                let arrow = self
+                    .tokens
+                    .get(self.at + 1)
+                    .is_some_and(|next| next.is_op("=>"));
                 if !arrow {
                     return Ok(None);
                 }
@@ -1066,7 +1068,7 @@ impl Parser {
             }
             Token::Str(text) => {
                 self.advance();
-                Ok(Expr::Str(text))
+                Ok(Expr::Str(text.into()))
             }
             Token::Color(rgba) => {
                 self.advance();
@@ -1234,7 +1236,7 @@ pub fn inputs_of(block: &Block, inputs: &mut Vec<InputDecl>) {
             ..
         } = statement
         {
-            text.insert(name.as_str(), value.as_str());
+            text.insert(name.as_str(), value.as_ref());
         }
     }
     inputs_of_block(block, inputs, &text);
@@ -1471,7 +1473,7 @@ fn input_declaration(
                 positional
                     .first()
                     .and_then(|arg| path_of(&arg.value))
-                    .map(|path| Value::Str(path.join(".")))
+                    .map(|path| Value::Str(path.join(".").into()))
                     .unwrap_or(Value::Na)
             } else {
                 default_expr

@@ -1,4 +1,4 @@
-﻿//! Evaluates a parsed script bar by bar: series and `var` state, user functions, `if` values,
+//! Evaluates a parsed script bar by bar: series and `var` state, user functions, `if` values,
 //! `plot`/`fill`/`plotshape`, and the stateful builtins.
 
 use std::borrow::Cow;
@@ -255,6 +255,10 @@ pub struct Evaluator<'a> {
     security: HashMap<NodeId, SecuritySlot>,
     /// The value a call site answered on each bar, kept only for call sites a script indexes
     /// with `[n]`, so `time(tf)[1]` and `ta.sma(...)[1]` read what the earlier bars saw.
+    /// The call sites' names, resolved once: a bar would otherwise rebuild each path.
+    call_names: HashMap<NodeId, Arc<str>>,
+    /// A reused buffer for a dotted member path such as `syminfo.tickerid`.
+    member_path: String,
     call_history: HashMap<NodeId, Vec<Value>>,
     /// The call sites whose value `call_history` keeps.
     indexed: &'a HashSet<NodeId>,
@@ -321,6 +325,8 @@ impl<'a> Evaluator<'a> {
             shapes: Vec::new(),
             shape_at: HashMap::new(),
             security: HashMap::new(),
+            call_names: HashMap::new(),
+            member_path: String::new(),
             call_history: HashMap::new(),
             indexed: &program.indexed,
             lower: HashMap::new(),
@@ -564,6 +570,11 @@ impl<'a> Evaluator<'a> {
             }
         }
         if self.locals.is_empty() {
+            if let Some(var) = self.vars.get_mut(name) {
+                var.value = value;
+                var.initialized = true;
+                return;
+            }
             let var = self.vars.entry(name.to_owned()).or_insert_with(|| Var {
                 value: Value::Na,
                 history: Vec::new(),
@@ -857,8 +868,14 @@ impl<'a> Evaluator<'a> {
                         .cloned()
                         .unwrap_or(Value::Na);
                 }
-                let path = format!("{}.{}", dotted(target).unwrap_or_default(), name);
-                self.member(&path)
+                let mut path = std::mem::take(&mut self.member_path);
+                path.clear();
+                let _ = dotted_into(target, &mut path);
+                path.push('.');
+                path.push_str(name);
+                let value = self.member(&path);
+                self.member_path = path;
+                value
             }
             Expr::Call {
                 id,
@@ -1088,14 +1105,14 @@ impl<'a> Evaluator<'a> {
             "barstate.isrealtime" => return Value::Bool(false),
             "barstate.ishistory" => return Value::Bool(true),
             "syminfo.tickerid" | "syminfo.ticker" => {
-                return Value::Str(self.context.symbol.clone());
+                return Value::Str(self.context.symbol.clone().into());
             }
-            "syminfo.prefix" => return Value::Str(self.context.exchange.clone()),
-            "syminfo.root" => return Value::Str(self.context.root.clone()),
-            "syminfo.type" => return Value::Str(self.context.symbol_type.clone()),
+            "syminfo.prefix" => return Value::Str(self.context.exchange.clone().into()),
+            "syminfo.root" => return Value::Str(self.context.root.clone().into()),
+            "syminfo.type" => return Value::Str(self.context.symbol_type.clone().into()),
             // The instrument has no separate long name here, and the chart runs the regular session.
-            "syminfo.description" => return Value::Str(self.context.symbol.clone()),
-            "syminfo.session" => return Value::Str("regular".to_owned()),
+            "syminfo.description" => return Value::Str(self.context.symbol.clone().into()),
+            "syminfo.session" => return Value::Str("regular".into()),
             "syminfo.mintick" => return Value::Num(self.context.mintick),
             // A contract's point value is unknown to the engine; one is the unit contract.
             "syminfo.pointvalue" => return Value::Num(1.0),
@@ -1126,8 +1143,8 @@ impl<'a> Evaluator<'a> {
             | "chart.is_range"
             | "chart.is_renko" => return Value::Bool(false),
     // shortcut: the chart's timezone is not passed to studies yet, so Pine sees UTC.
-    "syminfo.timezone" => return Value::Str("UTC".to_owned()),
-            "timeframe.period" => return Value::Str(pine_period(self.context.timeframe)),
+    "syminfo.timezone" => return Value::Str("UTC".into()),
+            "timeframe.period" => return Value::Str(pine_period(self.context.timeframe).into()),
             "timeframe.multiplier" => return Value::Num(pine_multiplier(self.context.timeframe)),
             "timeframe.in_seconds" | "timeframe.in_seconds()" => {
                 return Value::Num((self.context.timeframe.duration_ms() / 1000) as f64);
@@ -1213,7 +1230,7 @@ impl<'a> Evaluator<'a> {
             }),
             // `shape.*`, `location.*`, `plot.*` and the like: the names the plot and input
             // calls read back as strings.
-            _ if !namespace.is_empty() => Value::Str(name.to_owned()),
+            _ if !namespace.is_empty() => Value::Str(name.into()),
             // v4 scripts spell a colour without the namespace: `color=red`.
             _ => builtins::color_constant(path)
                 .map(Value::Color)
@@ -1250,7 +1267,8 @@ impl<'a> Evaluator<'a> {
                 argument(index, name)
                     .text()
                     .map(str::to_owned)
-                    .unwrap_or_else(|| fallback.to_owned()),
+                    .unwrap_or_else(|| fallback.to_owned())
+                    .into(),
             )
         };
         // `xloc` follows the corners in each drawing's own signature.
@@ -1264,11 +1282,12 @@ impl<'a> Evaluator<'a> {
             argument(xloc, "xloc")
                 .text()
                 .unwrap_or("bar_index")
-                .to_owned(),
+                .to_owned()
+                .into(),
         );
         let is_time = xloc.text() == Some("bar_time");
         let mut fields = HashMap::new();
-        fields.insert("__kind".to_owned(), Value::Str(kind_name(kind).to_owned()));
+        fields.insert("__kind".to_owned(), Value::Str(kind_name(kind).into()));
         fields.insert("__deleted".to_owned(), Value::Bool(false));
         fields.insert("xloc".to_owned(), xloc);
         match kind {
@@ -1307,7 +1326,7 @@ impl<'a> Evaluator<'a> {
                 fields.insert("y2".to_owned(), y);
                 fields.insert(
                     "text".to_owned(),
-                    Value::Str(drawing_text(&argument(2, "text"))),
+                    Value::Str(drawing_text(&argument(2, "text")).into()),
                 );
                 fields.insert(
                     "color".to_owned(),
@@ -1360,7 +1379,7 @@ impl<'a> Evaluator<'a> {
                 );
                 fields.insert(
                     "text".to_owned(),
-                    Value::Str(drawing_text(&argument(10, "text"))),
+                    Value::Str(drawing_text(&argument(10, "text")).into()),
                 );
                 fields.insert(
                     "text_color".to_owned(),
@@ -1499,7 +1518,7 @@ impl<'a> Evaluator<'a> {
                 set_field(object, "x2", self.drawing_x_in(argument(0), is_time));
                 set_field(object, "y2", argument(1));
             }
-            "set_text" => set_field(object, "text", Value::Str(drawing_text(&argument(0)))),
+            "set_text" => set_field(object, "text", Value::Str(drawing_text(&argument(0)).into())),
             "set_color" => set_field(object, "color", argument(0)),
             "set_textcolor" | "set_text_color" => set_field(object, "text_color", argument(0)),
             "set_bgcolor" | "set_fill_color" => set_field(object, "fill_color", argument(0)),
@@ -1651,10 +1670,13 @@ impl<'a> Evaluator<'a> {
         args: &[Arg],
         line: usize,
     ) -> Value {
-        let name = callee.join(".");
-        // A v3/v4 script calls its builtins without a namespace: `sma(...)`, `abs(...)`, `red`.
-        let name = legacy_name(&name).unwrap_or(name);
-        match name.as_str() {
+        let name = Arc::clone(self.call_names.entry(id).or_insert_with(|| {
+            let joined = callee.join(".");
+            // A v3/v4 script calls its builtins without a namespace: `sma(...)`, `abs(...)`, `red`.
+            legacy_name(&joined).unwrap_or(joined).into()
+        }));
+        let name = name.as_ref();
+        match name {
             "plot" => return self.plot(id, args),
             "plotcandle" | "plotbar" => {
                 return self.plot_candle(id, args, name == "plotbar");
@@ -1720,7 +1742,7 @@ impl<'a> Evaluator<'a> {
             return Value::Bool(matches!(value, None | Some(Value::Na)));
         }
         if matches!(
-            name.as_str(),
+            name,
             "int" | "float" | "bool" | "hour" | "minute" | "second" | "year" | "month"
                 | "dayofmonth" | "dayofweek" | "weekofyear" | "time" | "time_close" | "timestamp"
         ) {
@@ -1787,7 +1809,7 @@ impl<'a> Evaluator<'a> {
             // `str.tostring(price, format.mintick)` prints at the instrument's tick precision.
             if rest == "tostring" && values.get(1).and_then(Value::text) == Some("mintick") {
                 return match values.first().and_then(Value::number) {
-                    Some(number) => Value::Str(mintick_text(number, self.context.mintick)),
+                    Some(number) => Value::Str(mintick_text(number, self.context.mintick).into()),
                     None => Value::Na,
                 };
             }
@@ -1962,7 +1984,7 @@ impl<'a> Evaluator<'a> {
                 .map(|arg| self.eval(&arg.value))
                 .and_then(|value| value.text().map(str::to_owned))
                 .unwrap_or_else(|| self.context.symbol.clone());
-            return Value::Str(symbol.rsplit(':').next().unwrap_or_default().to_owned());
+            return Value::Str(symbol.rsplit(':').next().unwrap_or_default().into());
         }
         if name == "request.security" {
             return self.security(id, args);
@@ -1978,7 +2000,7 @@ impl<'a> Evaluator<'a> {
             return self.table_call(&name["table.".len()..], args);
         }
         if callee.len() == 1
-            && let Some(function) = self.functions.get(name.as_str()).copied()
+            && let Some(function) = self.functions.get(name).copied()
         {
             return self.call_function(function, args, None, line);
         }
@@ -2838,7 +2860,7 @@ impl<'a> Evaluator<'a> {
                 .and_then(|value| value.text().map(str::to_owned))
                 .or_else(|| args.first().and_then(|arg| dotted(&arg.value)))
                 .unwrap_or_else(|| "position.top_right".into());
-            fields.insert("__position".into(), Value::Str(position));
+            fields.insert("__position".into(), Value::Str(position.into()));
             drop(fields);
             self.tables.push(shared);
             return object;
@@ -2872,7 +2894,7 @@ impl<'a> Evaluator<'a> {
                 let mut fields = value::lock_object(&shared);
                 match text {
                     Some(text) if !text.is_empty() => {
-                        fields.insert(key, Value::Str(text));
+                        fields.insert(key, Value::Str(text.into()));
                         for (prefix, color) in [("b", bg), ("t", ink)] {
                             let key = format!("{prefix}:{column}:{row}");
                             match color {
@@ -2909,7 +2931,7 @@ impl<'a> Evaluator<'a> {
                             fields.remove(&format!("c:{column}:{row}"));
                         }
                         false => {
-                            fields.insert(format!("c:{column}:{row}"), Value::Str(text));
+                            fields.insert(format!("c:{column}:{row}"), Value::Str(text.into()));
                         }
                     }
                     return Value::Na;
@@ -2934,7 +2956,7 @@ impl<'a> Evaluator<'a> {
                     .and_then(|value| value.text().map(str::to_owned))
                     .or_else(|| args.get(1).and_then(|arg| dotted(&arg.value)))
                     .unwrap_or_else(|| "position.bottom_right".into());
-                value::lock_object(&shared).insert("__position".into(), Value::Str(position));
+                value::lock_object(&shared).insert("__position".into(), Value::Str(position.into()));
             }
             "clear" => {
                 let mut bound = |at: usize, fallback: usize| {
@@ -3126,14 +3148,14 @@ impl<'a> Evaluator<'a> {
 fn binary(op: &str, left: Value, right: Value) -> Value {
     if op == "+" && (matches!(left, Value::Str(_)) || matches!(right, Value::Str(_))) {
         let text = |value: &Value| match value {
-            Value::Str(text) => text.clone(),
+            Value::Str(text) => text.to_string(),
             Value::Na => String::new(),
             other => match other.number() {
                 Some(number) => number.to_string(),
                 None => String::new(),
             },
         };
-        return Value::Str(format!("{}{}", text(&left), text(&right)));
+        return Value::Str(format!("{}{}", text(&left), text(&right)).into());
     }
     if matches!(op, "==" | "!=") {
         let equal = match (&left, &right) {
@@ -3172,10 +3194,24 @@ fn binary(op: &str, left: Value, right: Value) -> Value {
 
 /// The dotted path of a member expression, e.g. `color.new`.
 fn dotted(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Ident(name) => Some(name.clone()),
-        Expr::Member { target, name } => Some(format!("{}.{}", dotted(target)?, name)),
-        _ => None,
+    let mut out = String::new();
+    dotted_into(expr, &mut out).then_some(out)
+}
+
+fn dotted_into(expr: &Expr, out: &mut String) -> bool {    match expr {
+        Expr::Ident(name) => {
+            out.push_str(name);
+            true
+        }
+        Expr::Member { target, name } => {
+            if !dotted_into(target, out) {
+                return false;
+            }
+            out.push('.');
+            out.push_str(name);
+            true
+        }
+        _ => false,
     }
 }
 
@@ -3234,7 +3270,7 @@ fn kind_name(kind: DrawingKind) -> &'static str {
 fn drawing_text(value: &Value) -> String {
     match value {
         Value::Na => String::new(),
-        Value::Str(text) => text.clone(),
+        Value::Str(text) => text.to_string(),
         other => builtins::display(other),
     }
 }

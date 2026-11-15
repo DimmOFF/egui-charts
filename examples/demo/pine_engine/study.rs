@@ -622,15 +622,15 @@ fn pine_value(decl: &InputDecl, value: &InputValue) -> Value {
         InputValue::Choice(index) => match &decl.kind {
             crate::pine_engine::ast::InputKind::Choice(choices) => choices
                 .get(*index)
-                .map(|choice| Value::Str(choice.clone()))
+                .map(|choice| Value::Str(choice.clone().into()))
                 .unwrap_or(Value::Na),
             _ => Value::Num(*index as f64),
         },
         InputValue::Timeframe(timeframe) => timeframe
-            .map(|timeframe| Value::Str(timeframe.as_str().into_owned()))
+            .map(|timeframe| Value::Str(timeframe.as_str().into_owned().into()))
             .unwrap_or(Value::Na),
-        InputValue::Symbol(symbol) => Value::Str(symbol.clone()),
-        InputValue::Text(text) => Value::Str(text.clone()),
+        InputValue::Symbol(symbol) => Value::Str(symbol.clone().into()),
+        InputValue::Text(text) => Value::Str(text.clone().into()),
         _ => Value::Na,
     }
 }

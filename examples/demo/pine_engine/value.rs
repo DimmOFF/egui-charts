@@ -23,8 +23,7 @@ pub struct Matrix {
 impl Matrix {
     /// The value at a row and column, or `None` outside the matrix.
     pub fn get(&self, row: usize, column: usize) -> Option<f64> {
-        (row < self.rows && column < self.columns)
-            .then(|| self.values[row * self.columns + column])
+        (row < self.rows && column < self.columns).then(|| self.values[row * self.columns + column])
     }
 }
 
@@ -82,7 +81,7 @@ pub fn lock_object(object: &ObjectRef) -> MutexGuard<'_, HashMap<String, Value>>
 pub enum Value {
     Num(f64),
     Bool(bool),
-    Str(String),
+    Str(Arc<str>),
     Color(Color32),
     /// Pine's `na`.
     Na,
@@ -140,7 +139,7 @@ impl Value {
 
     pub fn text(&self) -> Option<&str> {
         match self {
-            Value::Str(text) => Some(text),
+            Value::Str(text) => Some(text.as_ref()),
             _ => None,
         }
     }

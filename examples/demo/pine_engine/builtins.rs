@@ -1,8 +1,9 @@
-﻿//! The `ta.*`, `math.*`, `color.*` and `str.*` calls of the subset, with the per-call-site
+//! The `ta.*`, `math.*`, `color.*` and `str.*` calls of the subset, with the per-call-site
 //! state a series function needs. The runtime keys [`TaState`] by call site, so `ta.ema` at two
 //! places in a script keeps two independent averages.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use egui::Color32;
 use egui_charts::model::Bar;
@@ -1765,25 +1766,25 @@ fn text_known(name: &str, args: &[Value]) -> Option<Value> {
             match (args.get(1).and_then(Value::text), value.number()) {
                 // `str.tostring(price, "#.##")` prints under the pattern instead of in full.
                 (Some(pattern), Some(number)) if !pattern.is_empty() => {
-                    Value::Str(format_number(number, pattern))
+                    Value::Str(format_number(number, pattern).into())
                 }
-                _ => Value::Str(render(value)),
+                _ => Value::Str(render(value).into()),
             }
         }
         "format_number" => {
             let value = value_at(args, 0)?.number()?;
             match args.get(1).and_then(Value::text) {
-                Some(pattern) => Value::Str(format_number(value, pattern)),
-                None => Value::Str(render(&Value::Num(value))),
+                Some(pattern) => Value::Str(format_number(value, pattern).into()),
+                None => Value::Str(render(&Value::Num(value)).into()),
             }
         }
         "format" => {
             let template = args.first()?.text()?.to_owned();
-            Value::Str(fill_format(&template, args))
+            Value::Str(fill_format(&template, args).into())
         }
         "length" => Value::Num(args.first()?.text()?.chars().count() as f64),
-        "upper" => Value::Str(args.first()?.text()?.to_uppercase()),
-        "lower" => Value::Str(args.first()?.text()?.to_lowercase()),
+        "upper" => Value::Str(args.first()?.text()?.to_uppercase().into()),
+        "lower" => Value::Str(args.first()?.text()?.to_lowercase().into()),
         "contains" => Value::Bool(args.first()?.text()?.contains(args.get(1)?.text()?)),
         "startswith" => Value::Bool(args.first()?.text()?.starts_with(args.get(1)?.text()?)),
         "endswith" => Value::Bool(args.first()?.text()?.ends_with(args.get(1)?.text()?)),
@@ -1794,7 +1795,7 @@ fn text_known(name: &str, args: &[Value]) -> Option<Value> {
             let chars: Vec<char> = text.chars().collect();
             let end = end.unwrap_or(chars.len()).min(chars.len());
             let start = start.min(end);
-            Value::Str(chars[start..end].iter().collect())
+            Value::Str(chars[start..end].iter().collect::<String>().into())
         }
         "tonumber" => value_at(args, 0)
             .and_then(Value::number)
@@ -1805,10 +1806,10 @@ fn text_known(name: &str, args: &[Value]) -> Option<Value> {
             let text = args.first()?.text()?;
             let separator = args.get(1).and_then(Value::text).unwrap_or("");
             let parts: Vec<Value> = if separator.is_empty() {
-                text.chars().map(|part| Value::Str(part.to_string())).collect()
+                text.chars().map(|part| Value::Str(part.to_string().into())).collect()
             } else {
                 text.split(separator)
-                    .map(|part| Value::Str(part.to_owned()))
+                    .map(|part| Value::Str(Arc::from(part)))
                     .collect()
             };
             Value::array_of(parts)
@@ -1831,20 +1832,20 @@ fn text_known(name: &str, args: &[Value]) -> Option<Value> {
                 (false, true) => text.trim_end(),
                 (false, false) => text,
             };
-            Value::Str(trimmed.to_owned())
+            Value::Str(Arc::from(trimmed))
         }
         "repeat" => {
             let text = args.first()?.text()?;
             let count = arg(args, 1).unwrap_or(0.0).max(0.0).min(1_000.0) as usize;
             // Clamp: a stray large count would allocate gigabytes.
             let text: String = text.chars().take(1_000).collect();
-            Value::Str(text.repeat(count))
+            Value::Str(text.repeat(count).into())
         }
         "replace_all" => {
             let text = args.first()?.text()?;
             let from = args.get(1).and_then(Value::text)?;
             let to = args.get(2).and_then(Value::text).unwrap_or("");
-            Value::Str(text.replace(from, to))
+            Value::Str(text.replace(from, to).into())
         }
         "replace" => {
             let text = args.first()?.text()?;
@@ -1852,11 +1853,12 @@ fn text_known(name: &str, args: &[Value]) -> Option<Value> {
             let to = args.get(2).and_then(Value::text).unwrap_or("");
             // Pine replaces every occurrence unless a one-based one is named.
             let occurrence = arg(args, 3).unwrap_or(0.0).max(0.0) as usize;
-            Value::Str(if occurrence == 0 {
+            Value::Str((if occurrence == 0 {
                 text.replace(from, to)
             } else {
                 replace_nth(text, from, to, occurrence)
             })
+            .into())
         }
         "format_time" => {
             let millis = args.first().and_then(Value::number)?;
@@ -1872,7 +1874,8 @@ fn text_known(name: &str, args: &[Value]) -> Option<Value> {
             Value::Str(
                 time.with_timezone(&zone)
                     .format(&pine_time_format(pattern))
-                    .to_string(),
+                    .to_string()
+                    .into(),
             )
         }
         _ => return None,
@@ -2067,7 +2070,7 @@ pub fn display(value: &Value) -> String {
             }
         }
         Value::Bool(flag) => flag.to_string(),
-        Value::Str(text) => text.clone(),
+        Value::Str(text) => text.to_string(),
         Value::Color(color) => format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b()),
         Value::Num(_) | Value::Na | Value::Array(_) | Value::Object(_) | Value::Lambda(_) | Value::Matrix(_) | Value::Map(_) | Value::Plot(_) => {
             "NaN".to_owned()
@@ -2310,7 +2313,8 @@ fn array_known(name: &str, args: &[Value]) -> Option<Value> {
                     .iter()
                     .map(display)
                     .collect::<Vec<_>>()
-                    .join(separator),
+                    .join(separator)
+                    .into(),
             )
         }
         "abs" => {
@@ -2379,7 +2383,7 @@ fn array_known(name: &str, args: &[Value]) -> Option<Value> {
         "sort" => {
             let items = target()?;
             let descending = match args.get(1) {
-                Some(Value::Str(order)) => order == "descending",
+                Some(Value::Str(order)) => order.as_ref() == "descending",
                 Some(value) => value.number().is_some_and(|order| order == 0.0),
                 None => false,
             };

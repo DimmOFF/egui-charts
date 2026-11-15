@@ -138,8 +138,13 @@ impl PineScripts {
         factory
     }
 
+    /// Keeps the terminal's frame context before the terminal draws, so a script added from the
+    /// study list runs on a thread of its own: the factory is built before the first frame.
+    pub fn attach(&mut self, ctx: &egui::Context) {
+        self.ctx = Some(ctx.clone());
+    }
+
     /// Draws the editor. Returns whether the scripts changed, so the caller rebuilds its factory.
-    ///
     /// A pinned editor claims its width from `ui` before the terminal draws its frame, which
     /// docks it to the right of the terminal's right rail; otherwise it floats in a window.
     /// `on_chart` is the series of the selected script the chart already carries.
@@ -1023,6 +1028,39 @@ mod tests {
         assert_eq!(
             pine.chart_action(Some(SeriesId(7))),
             Some(ChartAction::Update)
+        );
+    }
+
+    /// A script added from the study list runs on a thread of its own, not in the frame that
+    /// adds it: the factory is built before the editor is ever opened.
+    #[test]
+    fn a_script_from_the_study_list_runs_off_the_frame() {
+        let source = "//@version=6\nindicator(\"T\")\nplot(close)\n".to_owned();
+        let mut pine = PineScripts {
+            scripts: vec![SavedScript {
+                name: "T".to_owned(),
+                source,
+            }],
+            ..PineScripts::default()
+        };
+        pine.attach(&egui::Context::default());
+        let mut study = pine.factory().create("T").unwrap();
+        let bars: Vec<_> = (0..1200)
+            .map(|at| {
+                egui_charts::model::Bar::new(
+                    chrono::DateTime::UNIX_EPOCH + chrono::Duration::minutes(at),
+                    1.0,
+                    2.0,
+                    0.5,
+                    1.5,
+                    10.0,
+                )
+            })
+            .collect();
+        study.update_data(&bars, 0, &[]);
+        assert!(
+            study.values().is_empty(),
+            "the run still happens in the frame that adds the study"
         );
     }
 

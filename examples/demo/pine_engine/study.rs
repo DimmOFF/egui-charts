@@ -227,7 +227,6 @@ impl Indicator for PineStudy {
             self.values.clear();
             return;
         }
-        let sources = security_sources(sources);
         let version = state_of(self.generation, data);
         if self.settle {
             // Export, a snapshot or an undo step reads the values at once.
@@ -235,7 +234,7 @@ impl Indicator for PineStudy {
             if let Some(task) = self.task.take() {
                 task.cancel.store(true, Ordering::Relaxed);
             }
-            self.sources = sources;
+            self.sources = security_sources(sources);
             self.calculate(data);
             return;
         }
@@ -263,7 +262,7 @@ impl Indicator for PineStudy {
             }
         }
         let Some(ctx) = self.ctx.clone() else {
-            self.sources = sources;
+            self.sources = security_sources(sources);
             self.calculate(data);
             return;
         };
@@ -271,6 +270,7 @@ impl Indicator for PineStudy {
         if from == 0 {
             self.clear_output();
         }
+        let sources = security_sources(sources);
         let script = self.script.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let mut context = self.context.clone();

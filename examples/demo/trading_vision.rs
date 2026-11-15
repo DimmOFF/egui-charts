@@ -87,6 +87,9 @@ fn main() -> eframe::Result {
         "TradingVision: Deriv + Binance + MT5",
         options,
         move |ui, _frame| {
+            // The factory captures the frame context when it is built, and scripts added from
+            // the study list must run off the frame, before the editor was ever opened.
+            pine.attach(ui.ctx());
             if terminal.is_none() {
                 if !catalog.is_ready() && started.elapsed() < LOAD_LIMIT {
                     ui.centered_and_justified(|ui| {

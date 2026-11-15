@@ -58,8 +58,10 @@ impl Terminal {
         self.commands_poll(&ctx);
 
         let panel_bg = ui.style().visuals.panel_fill;
+        // The frame colour behind the panels, not the whole `max_rect`: a host may have reserved a
+        // side panel out of `ui` before calling this, and painting over it hid its contents.
         ui.painter()
-            .rect_filled(ui.max_rect(), 0.0, self.theme.ui.border);
+            .rect_filled(ui.available_rect_before_wrap(), 0.0, self.theme.ui.border);
         // Dialogs take their keys before the chart's shortcuts.
         if self.keyboard_dialog_open() {
             self.chart_mut().suppress_shortcuts(&ctx);

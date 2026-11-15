@@ -622,17 +622,20 @@ fn paint_line_numbers(ui: &egui::Ui, gutter: egui::Rect, output: &egui::text_edi
     let color = ui.active_theme().ui.text_muted;
     let painter = ui.painter();
     let mut line = 1;
+    // A wrapped line spans several rows; only its first row carries the number.
+    let mut starts_line = true;
     for row in &output.galley.rows {
-        painter.text(
-            egui::pos2(gutter.right() - 4.0, output.galley_pos.y + row.pos.y),
-            egui::Align2::RIGHT_TOP,
-            line.to_string(),
-            font.clone(),
-            color,
-        );
-        if row.ends_with_newline {
+        if starts_line {
+            painter.text(
+                egui::pos2(gutter.right() - 4.0, output.galley_pos.y + row.pos.y),
+                egui::Align2::RIGHT_TOP,
+                line.to_string(),
+                font.clone(),
+                color,
+            );
             line += 1;
         }
+        starts_line = row.ends_with_newline;
     }
 }
 

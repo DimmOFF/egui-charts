@@ -627,6 +627,18 @@ pub trait Indicator: Send {
         self.calculate(data);
     }
 
+    /// Whether a calculation this study started in the background has finished, so that the
+    /// chart collects it on this frame and recalculates the study. The default is `false`: a
+    /// study that computes in [`update`](Self::update) never leaves work behind.
+    fn update_ready(&mut self) -> bool {
+        false
+    }
+
+    /// Finishes a calculation running in the background, so the caller may read current values
+    /// outside the live frame, as for export, snapshots and undo steps. The chart settles every
+    /// study before it recalculates them all. The default does nothing.
+    fn settle(&mut self) {}
+
     /// Whether live updates avoid recomputing unaffected history. Causal studies do work
     /// independent of the series length; studies that redraw earlier legs or periods also
     /// revisit the bars whose output changes. Earlier corrections may recompute in full.

@@ -1,20 +1,41 @@
 //! A parsed Pine script as a chart study: its plots become lines, `fill` becomes a band and
 //! `plotshape` becomes text labels.
 
+use std::sync::{Arc, Mutex};
+
 use egui::Color32;
 use egui_charts::drawings::{ChartPoint, Drawing, DrawingToolType};
 use egui_charts::model::{Bar, Instrument, Timeframe};
 use egui_charts::studies::{
     CrossDirection, Indicator, IndicatorMarker, IndicatorValues, InputKind, InputValue, PlotType,
-    StudyData, StudyDataRequest, StudyError, StudyFill, StudyInput, StudyTable, StudyCandle,
+    StudyCandle, StudyData, StudyDataRequest, StudyError, StudyFill, StudyInput, StudyTable,
 };
 
 use crate::pine_engine::Script;
 use crate::pine_engine::ast::InputDecl;
-use crate::pine_engine::runtime::{Context, DrawingKind, DrawingOutput, SecurityData, ShapeMark};
+use crate::pine_engine::runtime::{
+    Context, DrawingKind, DrawingOutput, RunOutput, SecurityData, ShapeMark,
+};
 use crate::pine_engine::value::Value;
 
-/// A Pine script that the chart calculates and draws.
+/// A script run for one state of the bars.
+#[derive(Clone)]
+struct RunTask {
+    /// The finished run, once its thread has put it here.
+    result: Arc<Mutex<Option<RunOutput>>>,
+    /// The script, context and bars the run was given.
+    version: Version,
+}
+
+/// What a run was calculated from, so a finished run is only applied to the same state.
+type Version = (u64, usize, Option<i64>, Option<i64>);
+
+/// The script with a calculation running on a thread of its own.
+///
+/// A run over a long history takes seconds, and the chart asks for it in the middle of a frame:
+/// a pan that pages older bars in would stop the window. The chart keeps the previous picture
+/// while the thread works and collects the result through
+/// [`update_ready`](Indicator::update_ready) on a later frame.
 #[derive(Clone)]
 pub struct PineStudy {
     script: Script,
@@ -41,6 +62,15 @@ pub struct PineStudy {
     requests: Vec<(String, Timeframe)>,
     inputs: Vec<StudyInput>,
     visible: bool,
+    /// Where the next frame is drawn: a finished run asks it to repaint so it is collected.
+    ctx: Option<egui::Context>,
+    task: Option<RunTask>,
+    /// Counts edits of the script and of its chart context, so a run from before one is dropped.
+    generation: u64,
+    /// Whether the next update must finish in the calling thread, for export and snapshots.
+    settle: bool,
+    /// Whether a run has finished, so the values and styles are known.
+    started: bool,
 }
 
 impl PineStudy {
@@ -73,25 +103,26 @@ impl PineStudy {
             requests: Vec::new(),
             inputs,
             visible: true,
+            ctx: None,
+            task: None,
+            generation: 0,
+            settle: false,
+            started: false,
         })
     }
 
-    /// What the last run could not do, with source lines, for the editor.
-    pub fn diagnostics(&self) -> &[crate::pine_engine::ast::Diagnostic] {
-        self.script.diagnostics()
-    }
-}
-
-impl Indicator for PineStudy {
-    fn name(&self) -> &str {
-        &self.name
+    /// Draws the finished runs and asks for frames on `ctx`; without it every run is finished
+    /// in the calling thread, as before.
+    pub fn set_context(&mut self, ctx: Option<egui::Context>) {
+        self.ctx = ctx;
     }
 
-    fn calculate(&mut self, data: &[Bar]) {
-        let output = self.script.run(data, &self.context, &self.sources);
+    /// Takes `output`, a run over `bars` bars, as the values and drawings to draw.
+    fn store(&mut self, output: RunOutput, bars: usize) {
+        self.started = true;
         self.values = IndicatorValues::new();
         let mut row = vec![f64::NAN; output.plots.len()];
-        for bar in 0..data.len() {
+        for bar in 0..bars {
             for (line, plot) in output.plots.iter().enumerate() {
                 row[line] = plot.values.get(bar).copied().unwrap_or(f64::NAN);
             }
@@ -148,6 +179,33 @@ impl Indicator for PineStudy {
             .collect();
     }
 
+    /// Drops the outputs that belong to bars this run does not have, keeping the styles.
+    fn clear_output(&mut self) {
+        self.values.clear();
+        self.per_bar_colors.clear();
+        self.candles.clear();
+        self.fills.clear();
+        self.markers.clear();
+        self.drawings.clear();
+        self.tables.clear();
+    }
+
+    /// What the last run could not do, with source lines, for the editor.
+    pub fn diagnostics(&self) -> &[crate::pine_engine::ast::Diagnostic] {
+        self.script.diagnostics()
+    }
+}
+
+impl Indicator for PineStudy {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn calculate(&mut self, data: &[Bar]) {
+        let output = self.script.run(data, &self.context, &self.sources);
+        self.store(output, data.len());
+    }
+
     fn values(&self) -> &IndicatorValues {
         &self.values
     }
@@ -163,16 +221,85 @@ impl Indicator for PineStudy {
             .collect()
     }
 
-    fn update_data(&mut self, data: &[Bar], _from: usize, sources: &[StudyData<'_>]) {
-        self.sources = sources
-            .iter()
-            .map(|source| SecurityData {
-                symbol: source.request.symbol.clone(),
-                timeframe: source.timeframe,
-                bars: source.bars.to_vec(),
-            })
-            .collect();
-        self.calculate(data);
+    fn update_data(&mut self, data: &[Bar], from: usize, sources: &[StudyData<'_>]) {
+        let sources = security_sources(sources);
+        let version = state_of(self.generation, data);
+        if self.settle {
+            // Export, a snapshot or an undo step reads the values at once.
+            self.settle = false;
+            self.task = None;
+            self.sources = sources;
+            self.calculate(data);
+            return;
+        }
+        if let Some(task) = self.task.take() {
+            let output = take_result(&task.result);
+            match output {
+                Some(output) if task.version == version => {
+                    self.store(output, data.len());
+                    return;
+                }
+                // A run for other bars is stale; the newer bars below start another.
+                Some(_) => {}
+                // Still running: the picture stays until it lands.
+                None => {
+                    self.task = Some(task);
+                    if from == 0 {
+                        self.clear_output();
+                    }
+                    return;
+                }
+            }
+        }
+        if !self.started {
+            // The first run, at add: the chart draws the study at once.
+            self.sources = sources;
+            self.calculate(data);
+            return;
+        }
+        let Some(ctx) = self.ctx.clone() else {
+            self.sources = sources;
+            self.calculate(data);
+            return;
+        };
+        // Values of other bars must not stay on these: a prepend moves every one of them.
+        if from == 0 {
+            self.clear_output();
+        }
+        let script = self.script.clone();
+        let context = self.context.clone();
+        let bars = data.to_vec();
+        let result: Arc<Mutex<Option<RunOutput>>> = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&result);
+        std::thread::spawn(move || {
+            let output = script.run(&bars, &context, &sources);
+            *slot.lock().unwrap_or_else(|error| error.into_inner()) = Some(output);
+            ctx.request_repaint();
+        });
+        self.task = Some(RunTask { result, version });
+    }
+
+    fn update_ready(&mut self) -> bool {
+        self.task.as_ref().is_some_and(|task| {
+            task.result
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_some()
+        })
+    }
+
+    fn settle(&mut self) {
+        self.settle = true;
+    }
+
+    fn update(&mut self, data: &[Bar], from: usize) {
+        if data.is_empty() {
+            // The chart drops the values of bars it no longer has before it recalculates. The
+            // styles and drawings stay until the next run replaces them.
+            self.values.clear();
+            return;
+        }
+        self.update_data(data, from, &[]);
     }
 
     fn inputs(&self) -> Vec<StudyInput> {
@@ -201,6 +328,7 @@ impl Indicator for PineStudy {
         self.script.set_input(decl.id, pine_value(&decl, &value));
         self.inputs[index].value = value;
         self.values.clear();
+        self.generation += 1;
         Ok(())
     }
 
@@ -285,6 +413,9 @@ impl Indicator for PineStudy {
     }
 
     fn set_timeframe(&mut self, timeframe: Timeframe) {
+        if self.context.timeframe != timeframe {
+            self.generation += 1;
+        }
         self.context.timeframe = timeframe;
     }
 
@@ -316,6 +447,9 @@ impl Indicator for PineStudy {
         self.context.exchange = exchange;
         self.context.root = root;
         self.context.symbol_type = symbol_type;
+        if changed {
+            self.generation += 1;
+        }
         changed
     }
 
@@ -324,10 +458,43 @@ impl Indicator for PineStudy {
     }
 }
 
+/// The histories a run reads besides its own bars.
+fn security_sources(sources: &[StudyData<'_>]) -> Vec<SecurityData> {
+    sources
+        .iter()
+        .map(|source| SecurityData {
+            symbol: source.request.symbol.clone(),
+            timeframe: source.timeframe,
+            bars: source.bars.to_vec(),
+        })
+        .collect()
+}
+
+/// What a run was calculated from: the script and context generation and the ends of the bars.
+fn state_of(generation: u64, bars: &[Bar]) -> Version {
+    (
+        generation,
+        bars.len(),
+        bars.first().map(|bar| bar.time.timestamp_millis()),
+        bars.last().map(|bar| bar.time.timestamp_millis()),
+    )
+}
+
+/// The finished output of `result`, if its thread has put one there.
+fn take_result(result: &Arc<Mutex<Option<RunOutput>>>) -> Option<RunOutput> {
+    result
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+}
+
 /// One Pine drawing as a chart drawing: a trend line, a text label or a rectangle.
 fn study_drawing(output: &DrawingOutput) -> Drawing {
     let (tool, points) = match output.kind {
-        DrawingKind::Line => (DrawingToolType::TrendLine, vec![output.first, output.second]),
+        DrawingKind::Line => (
+            DrawingToolType::TrendLine,
+            vec![output.first, output.second],
+        ),
         DrawingKind::Label => (DrawingToolType::TextLabel, vec![output.first]),
         DrawingKind::Box => (DrawingToolType::Rect, vec![output.first, output.second]),
         // A `linefill` is the polygon through both lines' ends.
@@ -348,12 +515,8 @@ fn study_drawing(output: &DrawingOutput) -> Drawing {
     drawing.stroke_width = output.width;
     drawing.line_style = output.style;
     drawing.font_size = output.font_size;
-    drawing.fill_color = output
-        .fill_color
-        .map(|color| color.to_srgba_unmultiplied());
-    drawing.text_color = output
-        .text_color
-        .map(|color| color.to_srgba_unmultiplied());
+    drawing.fill_color = output.fill_color.map(|color| color.to_srgba_unmultiplied());
+    drawing.text_color = output.text_color.map(|color| color.to_srgba_unmultiplied());
     drawing.text_anchor = output.text_anchor;
     if !output.text.is_empty() {
         drawing.text = Some(output.text.clone());
@@ -542,10 +705,9 @@ mod tests {
 
     #[test]
     fn another_symbol_becomes_a_study_data_request() {
-        let mut study = PineStudy::new(
-            "indicator(\"T\")\nplot(request.security(\"BTCUSDT\", \"5\", close))\n",
-        )
-        .unwrap();
+        let mut study =
+            PineStudy::new("indicator(\"T\")\nplot(request.security(\"BTCUSDT\", \"5\", close))\n")
+                .unwrap();
         assert!(study.data_requests().is_empty());
         study.calculate(&bars(&[1.0, 2.0]));
         let requests = study.data_requests();
@@ -556,14 +718,16 @@ mod tests {
 
     #[test]
     fn another_symbol_history_reaches_the_plot() {
-        let mut study = PineStudy::new(
-            "indicator(\"T\")\nplot(request.security(\"OTHER\", \"2\", close))\n",
-        )
-        .unwrap();
+        let mut study =
+            PineStudy::new("indicator(\"T\")\nplot(request.security(\"OTHER\", \"2\", close))\n")
+                .unwrap();
         let chart = bars(&[1.0, 2.0, 3.0, 4.0, 5.0]);
         study.calculate(&chart);
         let request = study.data_requests().pop().expect("another symbol");
-        assert_eq!(request.timeframe, Some(Timeframe::Custom(120.try_into().unwrap())));
+        assert_eq!(
+            request.timeframe,
+            Some(Timeframe::Custom(120.try_into().unwrap()))
+        );
         let source: Vec<Bar> = [100.0, 200.0, 300.0, 400.0, 500.0]
             .iter()
             .enumerate()
@@ -693,12 +857,55 @@ mod tests {
     }
 
     #[test]
-    fn plotshape_becomes_markers() {        let mut study = PineStudy::new(
+    fn plotshape_becomes_markers() {
+        let mut study = PineStudy::new(
             "//@version=4\nstudy(\"Fractals\", overlay=true)\nn = input(title=\"Periods\", defval=2, type=input.integer)\ndn = high[2] > high[1] and high[2] > high[0]\nplotshape(dn, location=location.abovebar, color=color.white)\n",
         )
         .unwrap();
         let data = bars(&[1.0, 2.0, 5.0, 2.0, 1.0]);
         study.calculate(&data);
         assert!(!study.markers().is_empty());
+    }
+
+    /// A prepend over a long history runs on its own thread and lands on a later update.
+    #[test]
+    fn a_background_run_lands_after_the_bars_it_ran_on() {
+        let mut study =
+            PineStudy::new("//@version=6\nindicator(\"T\")\nplot(ta.ema(close, 3))").unwrap();
+        study.set_context(Some(egui::Context::default()));
+        let tail = bars(&[1.0, 2.0, 3.0, 4.0]);
+        study.calculate(&tail);
+        let mut longer = bars(&[0.5; 1200]);
+        longer.extend(tail.iter().cloned());
+        study.update_data(&longer, 0, &[]);
+        assert!(
+            study.values().is_empty(),
+            "the values of the old bars are gone until the run lands"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !study.update_ready() {
+            assert!(std::time::Instant::now() < deadline, "the run finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        study.update_data(&longer, 0, &[]);
+        assert_eq!(study.values().len(), longer.len());
+        assert!(study.values().value(0, longer.len() - 1).is_some());
+    }
+
+    /// Export and undo settle a running script, so their values belong to the bars they hold.
+    #[test]
+    fn settling_calculates_without_waiting_for_a_frame() {
+        let mut study =
+            PineStudy::new("//@version=6\nindicator(\"T\")\nplot(ta.ema(close, 3))").unwrap();
+        study.set_context(Some(egui::Context::default()));
+        let tail = bars(&[1.0, 2.0, 3.0, 4.0]);
+        study.calculate(&tail);
+        let mut longer = bars(&[0.5; 1200]);
+        longer.extend(tail.iter().cloned());
+        study.update_data(&longer, 0, &[]);
+        study.settle();
+        study.update_data(&longer, 0, &[]);
+        assert_eq!(study.values().len(), longer.len());
+        assert!(!study.update_ready());
     }
 }

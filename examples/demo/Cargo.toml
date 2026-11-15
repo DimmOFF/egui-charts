@@ -55,7 +55,7 @@ ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] 
 egui-charts-terminal = { path = "../../terminal" }
 # MetaTrader 5 over the terminal's local named pipe, without the Python package.
 mt5-rs = "0.1"
-eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "glow", "links", "x11", "wayland"] }
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "glow", "links", "system_fonts", "x11", "wayland"] }
 
 # The icon that goes on the Windows executables.
 [target.'cfg(windows)'.build-dependencies]

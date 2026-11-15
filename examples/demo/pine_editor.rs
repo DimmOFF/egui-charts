@@ -25,6 +25,8 @@ struct SavedScript {
 #[derive(Default)]
 pub struct PineScripts {
     path: PathBuf,
+    /// Where the editor's own state, the pin, lives.
+    state_path: PathBuf,
     scripts: Vec<SavedScript>,
     /// Whether the editor window is open.
     pub open: bool,
@@ -41,6 +43,8 @@ pub struct PineScripts {
     rename_draft: String,
     /// Whether the rename field still has to take the focus.
     rename_focus: bool,
+    /// The frame context of the terminal, so a script's finished background run asks for a frame.
+    ctx: Option<egui::Context>,
 }
 
 /// A compiled script for the host to add to the chart.
@@ -70,10 +74,22 @@ enum MenuAction {
     Update,
 }
 
+/// The editor state kept beside the scripts.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct EditorState {
+    pinned: bool,
+}
+
 impl PineScripts {
     /// Reads the saved scripts, importing the development copies on the first run.
     pub fn load() -> Self {
         let path = crate::deriv_services::default_path().with_file_name("pine_scripts.json");
+        let state_path = path.with_file_name("pine_editor.json");
+        let pinned = std::fs::read(&state_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<EditorState>(&bytes).ok())
+            .is_some_and(|state| state.pinned);
         let scripts = std::fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -91,9 +107,11 @@ impl PineScripts {
         let editing = (!scripts.is_empty()).then_some(0);
         Self {
             path,
+            state_path,
             scripts,
             draft,
             editing,
+            pinned,
             ..Self::default()
         }
     }
@@ -104,9 +122,13 @@ impl PineScripts {
         for script in &self.scripts {
             let source = script.source.clone();
             let fallback = script.name.clone();
+            let ctx = self.ctx.clone();
             factory.register_in(IndicatorFactory::PERSONAL, script.name.clone(), move || {
                 match PineStudy::new(&source) {
-                    Ok(study) => Box::new(study),
+                    Ok(mut study) => {
+                        study.set_context(ctx.clone());
+                        Box::new(study)
+                    }
                     // A saved script that no longer parses stays listed instead of taking the
                     // terminal down; the editor reports the syntax error when it is opened.
                     Err(_) => Box::new(CustomIndicator::new(fallback.clone(), |_| Vec::new())),
@@ -125,6 +147,7 @@ impl PineScripts {
         if !self.open {
             return false;
         }
+        self.ctx = Some(ui.ctx().clone());
         if self.pinned {
             self.show_docked(ui, on_chart)
         } else {
@@ -216,6 +239,7 @@ impl PineScripts {
                     .clicked()
                 {
                     self.pinned = !self.pinned;
+                    self.save_state();
                 }
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.add(
@@ -234,8 +258,9 @@ impl PineScripts {
         ui.horizontal(|ui| {
             let (menu, _) = egui::containers::menu::MenuButton::from_button(
                 icons::MENU
-                    .as_button(egui::Vec2::splat(16.0))
-                    .frame_when_inactive(false),
+                    .as_button_square(20.0)
+                    .frame_when_inactive(false)
+                    .min_size(egui::Vec2::splat(ButtonSize::MD.pixels())),
             )
             .ui(ui, |ui| {
                 ui.menu_button("Create new", |ui| {
@@ -437,6 +462,8 @@ impl PineScripts {
         let Ok(study) = PineStudy::new(&script.source) else {
             return false;
         };
+        let mut study = study;
+        study.set_context(self.ctx.clone());
         self.pending = Some(ChartPush {
             replace,
             indicator: Box::new(study),
@@ -559,6 +586,32 @@ impl PineScripts {
     fn save(&self) {
         if let Err(error) = write_scripts(&self.path, &self.scripts) {
             eprintln!("Pine scripts: {error}");
+        }
+    }
+
+    /// Writes the pin state, so the editor docks the way it was left.
+    fn save_state(&self) {
+        let state = EditorState {
+            pinned: self.pinned,
+        };
+        let json = match serde_json::to_vec_pretty(&state) {
+            Ok(json) => json,
+            Err(error) => {
+                eprintln!("Pine editor state: {error}");
+                return;
+            }
+        };
+        if let Some(parent) = self
+            .state_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            eprintln!("Pine editor state: {error}");
+            return;
+        }
+        if let Err(error) = std::fs::write(&self.state_path, json) {
+            eprintln!("Pine editor state: {error}");
         }
     }
 }

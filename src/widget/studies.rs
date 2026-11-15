@@ -274,7 +274,8 @@ impl Chart {
             let instrument_changed = study.set_instrument(instrument.as_ref());
             let clock_changed = study.set_bar_clock(&clock);
             let events_changed = study.set_time_scale_events(events);
-            if instrument_changed || clock_changed || events_changed {
+            let background = study.update_ready();
+            if instrument_changed || clock_changed || events_changed || background {
                 self.pending_from[at] = Some(0);
                 self.element_studies.dirty = true;
                 self.readout_revision = crate::model::next_revision();
@@ -335,6 +336,11 @@ impl Chart {
 
     pub(super) fn recalculate_studies(&mut self) {
         self.readout_revision = crate::model::next_revision();
+        // A study that calculates in the background finishes first, so the recalculated values
+        // belong to these bars, not to those of its last finished run.
+        for study in self.studies.indicators_mut() {
+            study.settle();
+        }
         let requests = self
             .studies
             .indicators()

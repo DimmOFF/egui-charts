@@ -83,24 +83,73 @@ fn width_picker(ui: &mut egui::Ui, width: &mut f32) {
 /// A section heading above a group of inputs, as the settings dialog of TradingView draws it.
 fn section_heading(ui: &mut egui::Ui, title: &str, first: bool) {
     let theme = ui.active_theme();
-    if first {
-        ui.add_space(theme.spacing.xs);
-    } else {
-        ui.add_space(theme.spacing.sm);
-        ui.separator();
-        ui.add_space(theme.spacing.sm);
+    if !first {
+        ui.add_space(theme.spacing.xxl);
     }
-    ui.add(egui::Label::new(
-        egui::RichText::new(l10n::text(ui.ctx(), title)).strong(),
-    ));
-    ui.add_space(theme.spacing.xs);
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(l10n::text(ui.ctx(), title).to_uppercase())
+                .size(theme.text.small)
+                .color(theme.ui.text_muted),
+        )
+        .truncate(),
+    );
+    ui.add_space(theme.spacing.md);
+}
+
+/// A checkbox as TradingView draws it: an outlined box that fills with the accent when checked.
+fn checkbox(
+    ui: &mut egui::Ui,
+    checked: &mut bool,
+    label: impl Into<egui::WidgetText>,
+) -> egui::Response {
+    let theme = ui.active_theme();
+    let surface = ui.visuals().window_fill;
+    let border = surface.lerp_to_gamma(theme.ui.text, 0.25);
+    let hover = surface.lerp_to_gamma(theme.ui.text, 0.08);
+    let previous = ui.visuals().widgets.clone();
+    {
+        let widgets = &mut ui.visuals_mut().widgets;
+        for state in [&mut widgets.inactive, &mut widgets.open] {
+            state.bg_fill = if *checked {
+                theme.ui.accent
+            } else {
+                egui::Color32::TRANSPARENT
+            };
+            state.bg_stroke = egui::Stroke::new(
+                crate::tokens::DESIGN_TOKENS.stroke.hairline,
+                if *checked { theme.ui.accent } else { border },
+            );
+        }
+        widgets.hovered.bg_fill = if *checked {
+            theme.ui.accent_hover
+        } else {
+            hover
+        };
+        widgets.hovered.bg_stroke = egui::Stroke::new(
+            crate::tokens::DESIGN_TOKENS.stroke.hairline,
+            if *checked {
+                theme.ui.accent
+            } else {
+                theme.ui.text_muted
+            },
+        );
+        widgets.active.bg_fill = theme.ui.accent_active;
+    }
+    let response = ui.checkbox(checked, label);
+    ui.visuals_mut().widgets = previous;
+    response
 }
 
 /// The question mark through which TradingView shows an input's tooltip.
 fn tooltip_mark(ui: &mut egui::Ui, tooltip: &str) {
+    let theme = ui.active_theme();
     let response = ui.add(
-        egui::Label::new(egui::RichText::new("?").weak()).sense(egui::Sense::hover()),
+        crate::icons::icons::WIDGET_BAR_HELP
+            .as_image_tinted(egui::vec2(14.0, 14.0), theme.ui.text_muted)
+            .sense(egui::Sense::hover()),
     );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), "?"));
     response.on_hover_text(l10n::text(ui.ctx(), tooltip));
 }
 
@@ -119,7 +168,7 @@ impl IndicatorSettingsDialog {
             settings: study.settings(),
         });
         self.inputs = study.inputs();
-        self.title = format!("{} settings", study.name());
+        self.title = study.name().to_owned();
         self.line_names = study.line_names();
         self.gradient_names = study.gradients().iter().map(|fill| fill.name).collect();
         self.levels = study
@@ -268,8 +317,8 @@ impl IndicatorSettingsDialog {
         let mut apply = false;
         let mut cancel = false;
         Modal::new("indicator_settings", &self.title)
-            .width(620.0)
-            .height(560.0)
+            .width(560.0)
+            .min_height(180.0)
             .top(120.0)
             .show(ctx, &mut open, |ui| {
                 crate::ui_kit::tab_bar::TabBar::new(
@@ -278,7 +327,22 @@ impl IndicatorSettingsDialog {
                 )
                 .show(ui);
                 ui.separator();
-                egui::ScrollArea::vertical()
+                // TradingView's fields are outlined boxes on the dialog surface, with
+                // roomier rows than the panels around them.
+                let theme = ui.active_theme();
+                let surface = ui.visuals().window_fill;
+                let widgets = &mut ui.visuals_mut().widgets;
+                for state in [&mut widgets.inactive, &mut widgets.open] {
+                    state.bg_fill = egui::Color32::TRANSPARENT;
+                    state.weak_bg_fill = egui::Color32::TRANSPARENT;
+                    state.bg_stroke = egui::Stroke::new(
+                        crate::tokens::DESIGN_TOKENS.stroke.hairline,
+                        surface.lerp_to_gamma(theme.ui.text, 0.25),
+                    );
+                }
+                ui.spacing_mut().item_spacing.y = theme.spacing.md;
+                ui.spacing_mut().interact_size.y = 22.0;
+                egui::ScrollArea::both()
                     .max_height((ui.available_height() - 72.0).max(0.0))
                     .show(ui, |ui| match self.tab {
                         Tab::Inputs => {
@@ -358,7 +422,8 @@ impl IndicatorSettingsDialog {
                                                 else {
                                                     continue;
                                                 };
-                                                ui.checkbox(
+                                                checkbox(
+                                                    ui,
                                                     toggle,
                                                     l10n::text(ui.ctx(), &input.label),
                                                 );
@@ -396,6 +461,20 @@ impl IndicatorSettingsDialog {
                                     let input = &mut self.inputs[at];
                                     let before = input.value.clone();
                                     ui.horizontal(|ui| {
+                                        if let (InputKind::Toggle, InputValue::Toggle(toggle)) =
+                                            (&input.kind, &mut input.value)
+                                        {
+                                            // A switch reads as its own row, not as a field.
+                                            checkbox(
+                                                ui,
+                                                toggle,
+                                                l10n::text(ui.ctx(), &input.label),
+                                            );
+                                            if let Some(tooltip) = &input.tooltip {
+                                                tooltip_mark(ui, tooltip);
+                                            }
+                                            return;
+                                        }
                                         // Leave the fields a fixed part of the row, so a long
                                         // title is shortened instead of pushing them out.
                                         let fields =
@@ -477,7 +556,7 @@ impl IndicatorSettingsDialog {
                                     .to_owned();
                                 ui.push_id(line, |ui| {
                                     ui.horizontal(|ui| {
-                                        let shown = ui.checkbox(&mut plot.visible, "");
+                                        let shown = checkbox(ui, &mut plot.visible, "");
                                         ui.color_edit_button_srgba(&mut plot.color)
                                             .labelled_by(shown.id);
                                         let label = ui.add(
@@ -537,12 +616,12 @@ impl IndicatorSettingsDialog {
                                             .accessible_name(l10n::text(ui.ctx(), "Plot type"));
                                         let mut tagged =
                                             !edit.settings.untagged_plots.contains(&line);
-                                        if ui
-                                            .checkbox(
-                                                &mut tagged,
-                                                l10n::text(ui.ctx(), "Value on scale"),
-                                            )
-                                            .changed()
+                                        if checkbox(
+                                            ui,
+                                            &mut tagged,
+                                            l10n::text(ui.ctx(), "Value on scale"),
+                                        )
+                                        .changed()
                                         {
                                             edit.settings
                                                 .untagged_plots
@@ -553,12 +632,12 @@ impl IndicatorSettingsDialog {
                                         }
                                         let mut price_line =
                                             edit.settings.price_line_plots.contains(&line);
-                                        if ui
-                                            .checkbox(
-                                                &mut price_line,
-                                                l10n::text(ui.ctx(), "Latest value line"),
-                                            )
-                                            .changed()
+                                        if checkbox(
+                                            ui,
+                                            &mut price_line,
+                                            l10n::text(ui.ctx(), "Latest value line"),
+                                        )
+                                        .changed()
                                         {
                                             edit.settings
                                                 .price_line_plots
@@ -595,7 +674,7 @@ impl IndicatorSettingsDialog {
                                     .unwrap_or((f64::NAN, "Level"));
                                 ui.push_id(("level", index), |ui| {
                                     ui.horizontal_wrapped(|ui| {
-                                        let shown = ui.checkbox(&mut level.visible, "");
+                                        let shown = checkbox(ui, &mut level.visible, "");
                                         ui.color_edit_button_srgba(&mut level.color)
                                             .accessible_name(l10n::text(ui.ctx(), "Level colour"));
                                         let label = ui.label(l10n::text(ui.ctx(), caption));
@@ -610,7 +689,8 @@ impl IndicatorSettingsDialog {
                                         }
                                         pattern_combo(ui, &mut level.pattern);
                                         width_picker(ui, &mut level.width);
-                                        ui.checkbox(
+                                        checkbox(
+                                            ui,
                                             &mut level.price_line,
                                             l10n::text(ui.ctx(), "Latest value line"),
                                         );
@@ -619,7 +699,8 @@ impl IndicatorSettingsDialog {
                             }
                             if edit.settings.levels.len() >= 2 {
                                 ui.horizontal_wrapped(|ui| {
-                                    ui.checkbox(
+                                    checkbox(
+                                        ui,
                                         &mut edit.settings.fill_between_levels,
                                         l10n::text(ui.ctx(), "Fill between levels"),
                                     );
@@ -638,9 +719,12 @@ impl IndicatorSettingsDialog {
                             ui.horizontal_wrapped(|ui| {
                                 let mut enabled = edit.settings.background.is_some()
                                     && edit.settings.background_visible;
-                                if ui
-                                    .checkbox(&mut enabled, l10n::text(ui.ctx(), "Pane tint"))
-                                    .changed()
+                                if checkbox(
+                                    ui,
+                                    &mut enabled,
+                                    l10n::text(ui.ctx(), "Pane tint"),
+                                )
+                                .changed()
                                 {
                                     edit.settings.background_visible = enabled;
                                     if enabled && edit.settings.background.is_none() {
@@ -658,7 +742,8 @@ impl IndicatorSettingsDialog {
                             for (index, fill) in edit.settings.fills.iter_mut().enumerate() {
                                 ui.push_id(("fill", index), |ui| {
                                     ui.horizontal_wrapped(|ui| {
-                                        ui.checkbox(
+                                        checkbox(
+                                            ui,
                                             &mut fill.visible,
                                             format!(
                                                 "{} {}",
@@ -669,12 +754,12 @@ impl IndicatorSettingsDialog {
                                         ui.color_edit_button_srgba(&mut fill.color)
                                             .accessible_name(l10n::text(ui.ctx(), "Band colour"));
                                         let mut separate = fill.inverted_color.is_some();
-                                        if ui
-                                            .checkbox(
-                                                &mut separate,
-                                                l10n::text(ui.ctx(), "Alternate below"),
-                                            )
-                                            .changed()
+                                        if checkbox(
+                                            ui,
+                                            &mut separate,
+                                            l10n::text(ui.ctx(), "Alternate below"),
+                                        )
+                                        .changed()
                                         {
                                             fill.inverted_color = separate.then_some(fill.color);
                                         }
@@ -689,7 +774,8 @@ impl IndicatorSettingsDialog {
                             for (index, fill) in edit.settings.gradients.iter_mut().enumerate() {
                                 ui.push_id(("gradient", index), |ui| {
                                     ui.horizontal_wrapped(|ui| {
-                                        ui.checkbox(
+                                        checkbox(
+                                            ui,
                                             &mut fill.visible,
                                             l10n::text(
                                                 ui.ctx(),
@@ -717,9 +803,12 @@ impl IndicatorSettingsDialog {
                             section_heading(ui, "Precision", first);
                             ui.horizontal_wrapped(|ui| {
                                 let mut automatic = edit.settings.precision.is_none();
-                                if ui
-                                    .checkbox(&mut automatic, l10n::text(ui.ctx(), "Automatic"))
-                                    .changed()
+                                if checkbox(
+                                    ui,
+                                    &mut automatic,
+                                    l10n::text(ui.ctx(), "Automatic"),
+                                )
+                                .changed()
                                 {
                                     edit.settings.precision =
                                         if automatic { None } else { Some(2) };
@@ -733,7 +822,8 @@ impl IndicatorSettingsDialog {
                                     .accessible_name(l10n::text(ui.ctx(), "Precision"));
                                 }
                             });
-                            ui.checkbox(
+                            checkbox(
+                                ui,
                                 &mut edit.settings.show_legend_values,
                                 l10n::text(ui.ctx(), "Values in status line"),
                             );
@@ -754,12 +844,12 @@ impl IndicatorSettingsDialog {
                                 for interval in intervals {
                                     let mut visible =
                                         !edit.settings.hidden_intervals.contains(&interval);
-                                    if ui
-                                        .checkbox(
-                                            &mut visible,
-                                            l10n::text(ui.ctx(), interval.to_string()),
-                                        )
-                                        .changed()
+                                    if checkbox(
+                                        ui,
+                                        &mut visible,
+                                        l10n::text(ui.ctx(), interval.to_string()),
+                                    )
+                                    .changed()
                                     {
                                         edit.settings.hidden_intervals.retain(|tf| *tf != interval);
                                         if !visible {
@@ -2480,7 +2570,7 @@ mod tests {
                 dialog.show(ui.ctx(), &Theme::dark());
             });
         harness.run();
-        for heading in ["EMA", "Alerts"] {
+        for heading in ["EMA", "ALERTS"] {
             assert_eq!(harness.query_all_by_label(heading).count(), 1, "{heading}");
         }
         let fast = harness.get_by_label("Fast").rect();
@@ -2489,7 +2579,7 @@ mod tests {
             (fast.center().y - show.center().y).abs() < 1.0,
             "{fast:?} {show:?}"
         );
-        let heading = harness.get_by_label("Alerts").rect();
+        let heading = harness.get_by_label("ALERTS").rect();
         assert!(heading.top() >= fast.bottom(), "{heading:?} {fast:?}");
         let alerts = harness.get_by_label("Enable alerts").rect();
         let mark = harness.get_by_label("?").rect();

@@ -636,7 +636,7 @@ fn dialogs_expose_titles_and_label_their_fields() {
             ],
         ),
         (
-            "SMA settings",
+            "SMA",
             |ctx| {
                 let mut dialog = IndicatorSettingsDialog::default();
                 let mut study =

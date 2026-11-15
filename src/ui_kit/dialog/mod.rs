@@ -27,7 +27,8 @@ const FIXED_HEIGHT_TAG: &str = "egui_charts::dialog_frame::fixed_height";
 /// The dialog surface, with room for its title and right-aligned footer actions.
 pub(crate) fn dialog_frame(ctx: &Context) -> Frame {
     let theme = ctx.active_theme();
-    let mut frame = Frame::window(&ctx.global_style()).fill(ctx.global_style().visuals.panel_fill);
+    // Dialogs sit one elevation step above the panels, as floating windows do.
+    let mut frame = Frame::window(&ctx.global_style()).fill(ctx.global_style().visuals.window_fill);
     if !theme.dark {
         frame.stroke = Stroke::NONE;
         frame.shadow.blur = (2.0 * theme.spacing.sm) as u8;

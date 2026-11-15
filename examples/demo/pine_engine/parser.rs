@@ -19,7 +19,7 @@ const TYPES: &[&str] = &[
 
 /// Constructs that are parsed and skipped, with the reason the editor shows.
 fn unsupported(reason: &str) -> String {
-    format!("{reason}: разобрано, но не выполняется")
+    format!("{reason}: parsed but not executed")
 }
 
 pub struct Parser {
@@ -216,7 +216,7 @@ impl Parser {
             let _ = self.parse_declaration()?;
             return Ok(Stmt::Unsupported {
                 line,
-                message: unsupported("Второе объявление indicator/study"),
+                message: unsupported("Second indicator/study declaration"),
             });
         }
         if self.at_ident("if") {

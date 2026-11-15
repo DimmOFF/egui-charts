@@ -80,7 +80,7 @@ impl PineScripts {
         let mut open = self.open;
         let mut close = false;
         let mut changed = false;
-        egui::Window::new("Pine-скрипты")
+        egui::Window::new("Pine scripts")
             .open(&mut open)
             .default_size([860.0, 640.0])
             .min_size([420.0, 320.0])
@@ -94,7 +94,7 @@ impl PineScripts {
                         .map(|script| script.name.as_str())
                         .unwrap_or("—");
                     let mut pick = None;
-                    egui::ComboBox::from_label("Скрипт")
+                    egui::ComboBox::from_label("Script")
                         .selected_text(current)
                         .show_ui(ui, |ui| {
                             for (at, script) in self.scripts.iter().enumerate() {
@@ -111,12 +111,12 @@ impl PineScripts {
                         self.draft = self.scripts[at].source.clone();
                         self.status.clear();
                     }
-                    if ui.button("Новый").clicked() {
+                    if ui.button("New").clicked() {
                         self.editing = None;
                         self.draft.clear();
                         self.status.clear();
                     }
-                    if ui.button("Удалить").clicked()
+                    if ui.button("Delete").clicked()
                         && let Some(at) = self.editing.take()
                         && at < self.scripts.len()
                     {
@@ -146,15 +146,15 @@ impl PineScripts {
                         );
                     });
                 ui.horizontal(|ui| {
-                    if ui.button("Применить").clicked() {
+                    if ui.button("Apply").clicked() {
                         changed = true;
                         self.apply();
                     }
-                    if ui.button("Импорт temp/pine").clicked() {
+                    if ui.button("Import temp/pine").clicked() {
                         changed = true;
                         self.import();
                     }
-                    if ui.button("Закрыть").clicked() {
+                    if ui.button("Close").clicked() {
                         close = true;
                     }
                 });
@@ -201,10 +201,10 @@ impl PineScripts {
         }
         for note in study.diagnostics() {
             self.status
-                .push(format!("строка {}: {}", note.line, note.message));
+                .push(format!("line {}: {}", note.line, note.message));
         }
         if self.status.is_empty() {
-            self.status.push(format!("«{name}» скомпилирован"));
+            self.status.push(format!("`{name}` compiled"));
         }
         self.save();
     }
@@ -219,7 +219,7 @@ impl PineScripts {
             self.scripts.push(script);
             added += 1;
         }
-        self.status = vec![format!("Импортировано скриптов: {added}")];
+        self.status = vec![format!("Scripts imported: {added}")];
         self.save();
     }
 

@@ -799,7 +799,7 @@ impl<'a> Evaluator<'a> {
     }
 
     fn loop_limit(&mut self, line: usize) {
-        let message = "цикл остановлен: превышен лимит итераций".to_owned();
+        let message = "loop stopped: iteration limit exceeded".to_owned();
         if self.reported.insert((line, message.clone())) {
             self.diagnostics.push(Diagnostic { line, message });
         }
@@ -811,7 +811,7 @@ impl<'a> Evaluator<'a> {
         self.steps += 1;
         if !self.out_of_budget && self.steps > MAX_RUN_STEPS {
             self.out_of_budget = true;
-            let message = "скрипт остановлен: превышен лимит вычислений".to_owned();
+            let message = "script stopped: calculation limit exceeded".to_owned();
             if self.reported.insert((line, message.clone())) {
                 self.diagnostics.push(Diagnostic { line, message });
             }
@@ -3104,7 +3104,7 @@ impl<'a> Evaluator<'a> {
     }
 
     fn unsupported(&mut self, line: usize, name: &str) -> Value {
-        let message = format!("`{name}` не поддерживается интерпретатором");
+        let message = format!("`{name}` is not supported by the interpreter");
         if self.reported.insert((line, message.clone())) {
             self.diagnostics.push(Diagnostic { line, message });
         }
@@ -5041,7 +5041,7 @@ alertcondition(bull, "Bull", "Bull signal")
             output
                 .diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.message.contains("превышен лимит вычислений")),
+                .any(|diagnostic| diagnostic.message.contains("calculation limit exceeded")),
             "{:?}",
             output.diagnostics
         );

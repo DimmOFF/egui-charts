@@ -99,6 +99,11 @@ fn main() -> eframe::Result {
                 terminal = Some(build_terminal(catalog.clone(), pine.factory()));
             }
             let terminal = terminal.as_mut().expect("the terminal was built above");
+            // A docked editor takes its width from the window before the terminal draws its
+            // frame, so the terminal's right rail ends up to its left, as in the reference.
+            if pine.show(ui) {
+                terminal.set_indicator_factory(pine.factory());
+            }
             // Actions the terminal leaves to its host: host entries and those without a default.
             for action in terminal.show(ui) {
                 match &action {
@@ -118,10 +123,6 @@ fn main() -> eframe::Result {
                 if let Err(error) = settings.apply_to_chart(terminal.chart_mut()) {
                     eprintln!("Could not turn auto-scale off: {error}");
                 }
-            }
-            // A recompiled script replaces the one the indicator dialog lists.
-            if pine.show(ui.ctx()) {
-                terminal.set_indicator_factory(pine.factory());
             }
             // The rail entry stays lit exactly while the editor is open, however it was closed.
             terminal.widget_bar_mut().active_widget = pine.open.then_some(PINE_WIDGET);

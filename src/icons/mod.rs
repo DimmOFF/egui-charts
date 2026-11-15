@@ -611,6 +611,8 @@ pub mod icons {
     pub const MOVE_PANE: Icon = crate::icon_from_path!("ui/move-pane.svg");
     /// An arrow into a price axis, for pinning a study to a scale.
     pub const PIN_TO_SCALE: Icon = crate::icon_from_path!("ui/pin-scale.svg");
+    /// A thumbtack, for docking a panel to the window.
+    pub const PIN: Icon = crate::icon_from_path!("ui/pin.svg");
     /// Watchlist SVG icon.
     pub const WATCHLIST: Icon = crate::icon_from_path!("ui/watchlist.svg");
     /// Ui drag handle SVG icon.

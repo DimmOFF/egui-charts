@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 
+use egui_charts::icons::icons;
 use egui_charts::studies::{CustomIndicator, Indicator, IndicatorFactory};
+use egui_charts::ui_kit::buttons::{ButtonSize, IconButton};
 
 use crate::pine_engine::PineStudy;
 
@@ -19,6 +21,8 @@ pub struct PineScripts {
     scripts: Vec<SavedScript>,
     /// Whether the editor window is open.
     pub open: bool,
+    /// Whether the editor is docked beside the terminal's right rail instead of floating.
+    pinned: bool,
     draft: String,
     /// The index of the selected script, or `None` while a new one is edited.
     editing: Option<usize>,
@@ -48,6 +52,7 @@ impl PineScripts {
             path,
             scripts,
             open: false,
+            pinned: false,
             draft,
             editing,
             status: Vec::new(),
@@ -73,97 +78,180 @@ impl PineScripts {
     }
 
     /// Draws the editor. Returns whether the scripts changed, so the caller rebuilds its factory.
-    pub fn show(&mut self, ctx: &egui::Context) -> bool {
+    ///
+    /// A pinned editor claims its width from `ui` before the terminal draws its frame, which
+    /// docks it to the right of the terminal's right rail; otherwise it floats in a window.
+    pub fn show(&mut self, ui: &mut egui::Ui) -> bool {
         if !self.open {
             return false;
         }
-        let mut open = self.open;
-        let mut close = false;
+        if self.pinned {
+            self.show_docked(ui)
+        } else {
+            self.show_window(ui.ctx())
+        }
+    }
+
+    fn show_window(&mut self, ctx: &egui::Context) -> bool {
         let mut changed = false;
-        egui::Window::new("Pine scripts")
-            .open(&mut open)
+        let mut close = false;
+        // The window's own title bar has no room for the pin, so the editor draws the row.
+        egui::Window::new("Pine Editor")
+            .title_bar(false)
             .default_size([860.0, 640.0])
             .min_size([420.0, 320.0])
             .max_size([1100.0, 900.0])
             .resizable(true)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    let current = self
-                        .editing
-                        .and_then(|at| self.scripts.get(at))
-                        .map(|script| script.name.as_str())
-                        .unwrap_or("—");
-                    let mut pick = None;
-                    egui::ComboBox::from_label("Script")
-                        .selected_text(current)
-                        .show_ui(ui, |ui| {
-                            for (at, script) in self.scripts.iter().enumerate() {
-                                if ui
-                                    .selectable_label(self.editing == Some(at), &script.name)
-                                    .clicked()
-                                {
-                                    pick = Some(at);
-                                }
-                            }
-                        });
-                    if let Some(at) = pick {
-                        self.editing = Some(at);
-                        self.draft = self.scripts[at].source.clone();
-                        self.status.clear();
-                    }
-                    if ui.button("New").clicked() {
-                        self.editing = None;
-                        self.draft.clear();
-                        self.status.clear();
-                    }
-                    if ui.button("Delete").clicked()
-                        && let Some(at) = self.editing.take()
-                        && at < self.scripts.len()
-                    {
-                        self.scripts.remove(at);
-                        self.save();
-                        self.draft.clear();
-                        self.status.clear();
-                        changed = true;
-                    }
-                });
-                ui.separator();
-                // Without a bounded height the editor asks for every row it holds, the window grows
-                // past the screen and its close button goes with it. The width is passed in too:
-                // left to itself the field shrinks to a few characters inside the scroll area.
-                let width = ui.available_width();
-                let height = (ui.available_height() - 60.0).clamp(160.0, 900.0);
-                egui::ScrollArea::vertical()
-                    .id_salt("pine-code")
-                    .max_height(height)
-                    .show(ui, |ui| {
-                        ui.set_min_width(width);
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.draft)
-                                .code_editor()
-                                .desired_rows(24)
-                                .desired_width(width),
-                        );
-                    });
-                ui.horizontal(|ui| {
-                    if ui.button("Apply").clicked() {
-                        changed = true;
-                        self.apply();
-                    }
-                    if ui.button("Import temp/pine").clicked() {
-                        changed = true;
-                        self.import();
-                    }
-                    if ui.button("Close").clicked() {
-                        close = true;
-                    }
-                });
-                for line in &self.status {
-                    ui.label(line);
-                }
+                self.title_row(ui, &mut close);
+                let (body_changed, body_close) = self.body(ui);
+                changed = body_changed;
+                close |= body_close;
             });
-        self.open = open && !close;
+        if close {
+            self.open = false;
+        }
         changed
+    }
+
+    fn show_docked(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut changed = false;
+        let mut close = false;
+        let max_width = (ui.available_width() * 0.6).max(320.0);
+        egui::Panel::right("egui_charts_pine_editor")
+            .resizable(true)
+            .default_size(480.0)
+            .min_size(320.0)
+            .max_size(max_width)
+            .frame(
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::symmetric(8, 8)),
+            )
+            .show(ui, |ui| {
+                self.title_row(ui, &mut close);
+                let (body_changed, body_close) = self.body(ui);
+                changed = body_changed;
+                close |= body_close;
+            });
+        if close {
+            self.open = false;
+        }
+        changed
+    }
+
+    /// The title row: the title, the pin that docks the editor and the close button.
+    fn title_row(&mut self, ui: &mut egui::Ui, close: &mut bool) {
+        // The buttons first, so a long title is elided in the width left rather than pushing
+        // them out of a narrow panel.
+        let row = egui::Vec2::new(ui.available_width(), ButtonSize::MD.pixels());
+        ui.allocate_ui_with_layout(
+            row,
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                *close |= IconButton::new(&icons::CLOSE)
+                    .size(ButtonSize::SM)
+                    .tooltip("Close")
+                    .show(ui)
+                    .clicked();
+                if IconButton::new(&icons::PIN)
+                    .size(ButtonSize::SM)
+                    .selected(self.pinned)
+                    .tooltip(if self.pinned { "Undock" } else { "Dock" })
+                    .show(ui)
+                    .clicked()
+                {
+                    self.pinned = !self.pinned;
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new("Pine Editor").strong()).truncate(),
+                    );
+                });
+            },
+        );
+        ui.separator();
+    }
+
+    /// The script picker, the code and the actions. Returns `(scripts changed, close clicked)`.
+    fn body(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
+        let mut changed = false;
+        let mut close = false;
+        ui.horizontal(|ui| {
+            let current = self
+                .editing
+                .and_then(|at| self.scripts.get(at))
+                .map(|script| script.name.as_str())
+                .unwrap_or("—");
+            let mut pick = None;
+            egui::ComboBox::from_label("Script")
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    for (at, script) in self.scripts.iter().enumerate() {
+                        if ui
+                            .selectable_label(self.editing == Some(at), &script.name)
+                            .clicked()
+                        {
+                            pick = Some(at);
+                        }
+                    }
+                });
+            if let Some(at) = pick {
+                self.editing = Some(at);
+                self.draft = self.scripts[at].source.clone();
+                self.status.clear();
+            }
+            if ui.button("New").clicked() {
+                self.editing = None;
+                self.draft.clear();
+                self.status.clear();
+            }
+            if ui.button("Delete").clicked()
+                && let Some(at) = self.editing.take()
+                && at < self.scripts.len()
+            {
+                self.scripts.remove(at);
+                self.save();
+                self.draft.clear();
+                self.status.clear();
+                changed = true;
+            }
+        });
+        ui.separator();
+        // Without a bounded height the editor asks for every row it holds, the window grows
+        // past the screen and its close button goes with it. The width is passed in too:
+        // left to itself the field shrinks to a few characters inside the scroll area.
+        let width = ui.available_width();
+        let height = (ui.available_height() - 60.0).clamp(160.0, 900.0);
+        egui::ScrollArea::vertical()
+            .id_salt("pine-code")
+            .max_height(height)
+            .show(ui, |ui| {
+                ui.set_min_width(width);
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.draft)
+                        .code_editor()
+                        .desired_rows(24)
+                        .desired_width(width),
+                );
+            });
+        ui.horizontal(|ui| {
+            if ui.button("Apply").clicked() {
+                changed = true;
+                self.apply();
+            }
+            if ui.button("Import temp/pine").clicked() {
+                changed = true;
+                self.import();
+            }
+            if ui.button("Close").clicked() {
+                close = true;
+            }
+        });
+        for line in &self.status {
+            ui.label(line);
+        }
+        (changed, close)
     }
 
     /// Compiles the draft, stores it and reports what it could not run.
@@ -273,4 +361,46 @@ fn import_folder() -> Vec<SavedScript> {
         .collect();
     scripts.sort_by(|first, second| first.name.cmp(&second.name));
     scripts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A docked editor takes its width before the terminal draws, a floating one takes none.
+    #[test]
+    fn a_pinned_editor_claims_the_width_before_the_terminal() {
+        for pinned in [false, true] {
+            let ctx = egui::Context::default();
+            let screen =
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0));
+            let mut pine = PineScripts {
+                path: PathBuf::new(),
+                scripts: Vec::new(),
+                open: true,
+                pinned,
+                draft: String::new(),
+                editing: None,
+                status: Vec::new(),
+            };
+            let mut width = screen.width();
+            for _ in 0..2 {
+                let _ = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        pine.show(ui);
+                        width = ui.available_rect_before_wrap().width();
+                    },
+                );
+            }
+            if pinned {
+                assert!(width < screen.width() - 300.0, "{width}");
+            } else {
+                assert_eq!(width, screen.width());
+            }
+        }
+    }
 }

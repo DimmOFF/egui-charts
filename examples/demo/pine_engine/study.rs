@@ -8,8 +8,8 @@ use egui::Color32;
 use egui_charts::drawings::{ChartPoint, Drawing, DrawingToolType, TextAnchor};
 use egui_charts::model::{Bar, Instrument, Timeframe};
 use egui_charts::studies::{
-    CrossDirection, Indicator, IndicatorMarker, IndicatorValues, InputKind, InputValue, PlotType,
-    StudyCandle, StudyData, StudyDataRequest, StudyError, StudyFill, StudyInput, StudyTable,
+    Indicator, IndicatorMarker, IndicatorValues, InputKind, InputValue, PlotType, StudyCandle,
+    StudyData, StudyDataRequest, StudyError, StudyFill, StudyInput, StudyTable,
 };
 
 use crate::pine_engine::Script;
@@ -56,7 +56,6 @@ pub struct PineStudy {
     per_bar_colors: Vec<Vec<Option<Color32>>>,
     candles: Vec<StudyCandle>,
     fills: Vec<StudyFill>,
-    markers: Vec<IndicatorMarker>,
     drawings: Vec<Drawing>,
     tables: Vec<StudyTable>,
     /// Histories the last run read for `request.security` on other series.
@@ -102,7 +101,6 @@ impl PineStudy {
             per_bar_colors: Vec::new(),
             candles: Vec::new(),
             fills: Vec::new(),
-            markers: Vec::new(),
             drawings: Vec::new(),
             tables: Vec::new(),
             sources: Vec::new(),
@@ -170,19 +168,6 @@ impl PineStudy {
         );
         self.tables = output.tables;
         self.requests = output.security_requests;
-        self.markers = output
-            .shapes
-            .iter()
-            .map(|shape| IndicatorMarker {
-                bar: shape.bar,
-                value: shape.value,
-                direction: if shape.above {
-                    CrossDirection::Down
-                } else {
-                    CrossDirection::Up
-                },
-            })
-            .collect();
     }
 
     /// Drops the outputs that belong to bars this run does not have, keeping the styles.
@@ -193,7 +178,6 @@ impl PineStudy {
         self.per_bar_colors.clear();
         self.candles.clear();
         self.fills.clear();
-        self.markers.clear();
         self.drawings.clear();
         self.tables.clear();
     }
@@ -427,7 +411,9 @@ impl Indicator for PineStudy {
     }
 
     fn markers(&self) -> &[IndicatorMarker] {
-        &self.markers
+        // `plotshape` marks are drawn as the glyph labels in `drawings`; the chart's own marker
+        // triangles would draw a second, differently sized and coloured set.
+        &[]
     }
 
     fn drawings(&self) -> &[Drawing] {
@@ -578,12 +564,15 @@ fn study_shape(mark: &ShapeMark) -> Drawing {
     if mark.pinned {
         // The chart pins this label to the pane edge `above` names instead of to its price.
         drawing.screen_anchor = Some([0.5, if mark.above { 0.0 } else { 1.0 }]);
-        drawing.text_anchor = if mark.above {
-            TextAnchor::Below
-        } else {
-            TextAnchor::Above
-        };
     }
+    // The glyph sits just outside the point: above the high an `abovebar` mark names, or below
+    // its low. A mark pinned to the pane edge keeps its text inside the pane instead.
+    drawing.text_anchor = match (mark.pinned, mark.above) {
+        (true, true) => TextAnchor::Below,
+        (true, false) => TextAnchor::Above,
+        (false, true) => TextAnchor::Above,
+        (false, false) => TextAnchor::Below,
+    };
     if mark.auto_size {
         // `size.auto`: the mark is as wide as a bar, so its point size tracks the bar spacing.
         drawing.text_follows_zoom = true;
@@ -926,14 +915,18 @@ mod tests {
     }
 
     #[test]
-    fn plotshape_becomes_markers() {
+    fn a_plotshape_mark_is_one_label_and_no_chart_marker() {
         let mut study = PineStudy::new(
             "//@version=4\nstudy(\"Fractals\", overlay=true)\nn = input(title=\"Periods\", defval=2, type=input.integer)\ndn = high[2] > high[1] and high[2] > high[0]\nplotshape(dn, location=location.abovebar, color=color.white)\n",
         )
         .unwrap();
         let data = bars(&[1.0, 2.0, 5.0, 2.0, 1.0]);
         study.calculate(&data);
-        assert!(!study.markers().is_empty());
+        let drawings = study.drawings();
+        assert_eq!(drawings.len(), 1, "{drawings:?}");
+        // The glyph sits above the high, and the chart draws no second, red or green, triangle.
+        assert_eq!(drawings[0].text_anchor, TextAnchor::Above);
+        assert!(study.markers().is_empty());
     }
 
     /// A prepend over a long history runs on its own thread and lands on a later update.

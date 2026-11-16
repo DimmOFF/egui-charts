@@ -1224,8 +1224,9 @@ impl<'a> Evaluator<'a> {
                 return Value::Bool(self.context.timeframe.duration_ms() < 60_000);
             }
             "timeframe.isminutes" => {
+                // Pine spells every intraday interval in minutes — "60", "240" — so it counts.
                 let duration = self.context.timeframe.duration_ms();
-                return Value::Bool((60_000..3_600_000).contains(&duration));
+                return Value::Bool((60_000..86_400_000).contains(&duration));
             }
             "timeframe.isintraday" => {
                 return Value::Bool(self.context.timeframe.duration_ms() < 86_400_000);
@@ -3566,7 +3567,7 @@ fn drawing_output(object: &value::ObjectRef) -> Option<DrawingOutput> {
 
 /// Where a Pine label's `style` puts its box around the point: the label sits opposite the arrow
 /// its style names, so `style_label_down` keeps it above the point and `style_label_up` below.
-/// `style_none` centres it on the point.
+/// `style_none` keeps its text just above and right of the point, as TradingView draws it.
 fn label_anchor(style: &str) -> egui_charts::drawings::TextAnchor {
     use egui_charts::drawings::TextAnchor;
     match style {
@@ -3578,6 +3579,7 @@ fn label_anchor(style: &str) -> egui_charts::drawings::TextAnchor {
         "style_label_upper_right" => TextAnchor::BelowLeft,
         "style_label_lower_left" => TextAnchor::AboveRight,
         "style_label_lower_right" => TextAnchor::AboveLeft,
+        "style_none" => TextAnchor::AboveRight,
         _ => TextAnchor::Centered,
     }
 }
@@ -4056,8 +4058,11 @@ mod tests {
     }
 
     fn run_bars(source: &str, bars: Vec<Bar>) -> RunOutput {
+        run_in(source, bars, Context::default())
+    }
+
+    fn run_in(source: &str, bars: Vec<Bar>, context: Context) -> RunOutput {
         let program = Parser::parse(source).unwrap();
-        let context = Context::default();
         Evaluator::new(&program, &bars, &context, &HashMap::new(), &[]).run()
     }
 
@@ -4962,6 +4967,48 @@ plot(g(2))
         assert_eq!(at(5), 4.0);
         assert_eq!(at(6), -1.0);
         assert!(at(7).is_nan());
+    }
+
+    #[test]
+    fn an_hourly_chart_reads_its_interval_as_minutes_and_intraday() {
+        let output = run_in(
+            "indicator(\"T\")\nplot(timeframe.isminutes ? 1 : 0)\nplot(timeframe.isintraday ? 1 : 0)\nplot(timeframe.multiplier)\nplot(str.tonumber(timeframe.period))\n",
+            bars(&[1.0, 2.0]),
+            Context {
+                timeframe: egui_charts::model::Timeframe::Hour1,
+                ..Context::default()
+            },
+        );
+        assert_eq!(output.plots[0].values[1], 1.0, "Pine spells an hour as 60");
+        assert_eq!(output.plots[1].values[1], 1.0);
+        assert_eq!(output.plots[2].values[1], 60.0);
+        assert_eq!(output.plots[3].values[1], 60.0);
+    }
+
+    #[test]
+    fn a_new_month_starts_at_the_first_bar_of_the_month() {
+        let start = Utc.with_ymd_and_hms(2024, 1, 30, 23, 0, 0).unwrap();
+        let bars: Vec<Bar> = [0, 1, 24, 25]
+            .into_iter()
+            .map(|at| {
+                Bar::new(
+                    start + chrono::Duration::hours(at),
+                    10.0,
+                    11.0,
+                    9.0,
+                    10.0,
+                    1.0,
+                )
+            })
+            .collect();
+        let output = run_bars(
+            "indicator(\"T\")\nplot(timeframe.change(\"M\") ? 1 : 0)\nplot(timeframe.change(\"D\") ? 1 : 0)\n",
+            bars,
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        // The first bar and the first bar of February: January 31st starts a day but no month.
+        assert_eq!(output.plots[0].values, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(output.plots[1].values, [1.0, 1.0, 0.0, 1.0]);
     }
 
     #[test]

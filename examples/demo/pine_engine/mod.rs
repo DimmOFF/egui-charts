@@ -256,6 +256,23 @@ mod tests {
                 .any(|&[red, _, blue, alpha]| red > 200 && blue < 40 && alpha < 40),
             "the orange session tint: {tints:?}"
         );
+        // `plotchar` weekday names, pinned to the pane edge. The bars span a Monday and part of
+        // a Tuesday, so the Monday label is the one the day change puts on them.
+        let monday = output
+            .shapes
+            .iter()
+            .find(|shape| shape.text == "MONDAY")
+            .unwrap_or_else(|| {
+                panic!(
+                    "{:?}",
+                    output
+                        .shapes
+                        .iter()
+                        .map(|shape| (&shape.text, shape.bar))
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert!(monday.pinned, "the weekday mark sits on the pane edge");
         // Each session keeps its own name, since every call site has its own `var`s.
         for name in ["Asia", "London", "New-York"] {
             assert!(
@@ -289,6 +306,80 @@ mod tests {
         assert!(
             daily_open.first.0 > 1499.0,
             "the DO label stays offset past the last bar: {daily_open:?}"
+        );
+    }
+
+    /// The monthly high and low wait for `timeframe.change("M")`, so they hold the extremes of
+    /// the bars before the new month started.
+    #[test]
+    fn the_sessions_script_keeps_the_previous_months_extremes() {
+        let Ok(source) = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../temp/pine/Trading Toolkit X Sessions.pine"
+        )) else {
+            return;
+        };
+        let script = Script::parse(&source).unwrap();
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 31)
+            .unwrap()
+            .and_hms_opt(20, 0, 0)
+            .unwrap()
+            .and_utc();
+        let bars: Vec<_> = (0..120)
+            .map(|at| {
+                let close = 100.0 + (at as f64 * 0.7).sin() * 5.0;
+                let open = 100.0 + ((at as f64 - 1.0) * 0.7).sin() * 5.0;
+                egui_charts::model::Bar::new(
+                    start + chrono::Duration::minutes(at * 5),
+                    open,
+                    close.max(open) + 1.0,
+                    close.min(open) - 1.0,
+                    close,
+                    10.0,
+                )
+            })
+            .collect();
+        let before_february: Vec<_> = bars
+            .iter()
+            .filter(|bar| bar.time.format("%Y-%m").to_string() == "2026-01")
+            .collect();
+        let january_high = before_february
+            .iter()
+            .map(|bar| bar.high)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let january_low = before_february
+            .iter()
+            .map(|bar| bar.low)
+            .fold(f64::INFINITY, f64::min);
+        let context = Context {
+            timeframe: egui_charts::model::Timeframe::Min5,
+            ..Context::default()
+        };
+        let output = script.run(&bars, &context, &[]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let price_of = |name: &str| {
+            output
+                .drawings
+                .iter()
+                .find(|drawing| drawing.text == name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{name}: {:?}",
+                        output.drawings.iter().map(|d| &d.text).collect::<Vec<_>>()
+                    )
+                })
+                .first
+                .1
+        };
+        assert!(
+            (price_of("PMH") - january_high).abs() < 1e-6,
+            "PMH is the January high {january_high}, not {}",
+            price_of("PMH")
+        );
+        assert!(
+            (price_of("PML") - january_low).abs() < 1e-6,
+            "PML is the January low {january_low}, not {}",
+            price_of("PML")
         );
     }
 

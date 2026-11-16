@@ -71,6 +71,8 @@ pub struct PineStudy {
     /// The bars the drawn values belong to, so a run for other bars clears them and a run for
     /// these keeps the picture until it lands.
     stored: Option<Version>,
+    /// The last bar of that picture, which tells an added bar from bars replaced by others.
+    stored_tail: Option<Bar>,
     /// Counts edits of the script and of its chart context, so a run from before one is dropped.
     generation: u64,
     /// Whether the next update must finish in the calling thread, for export and snapshots.
@@ -110,6 +112,7 @@ impl PineStudy {
             ctx: None,
             task: None,
             stored: None,
+            stored_tail: None,
             generation: 0,
             settle: false,
         })
@@ -185,6 +188,7 @@ impl PineStudy {
     /// Drops the outputs that belong to bars this run does not have, keeping the styles.
     fn clear_output(&mut self) {
         self.stored = None;
+        self.stored_tail = None;
         self.values.clear();
         self.per_bar_colors.clear();
         self.candles.clear();
@@ -192,6 +196,20 @@ impl PineStudy {
         self.markers.clear();
         self.drawings.clear();
         self.tables.clear();
+    }
+
+    /// Whether the drawn picture still belongs to `data`: the same script and first bar, with
+    /// no bars lost, and either the same count or the last drawn bar still the same one. A new
+    /// bar or a tick then keeps the picture until its run lands instead of blanking the chart.
+    fn keeps_picture(&self, version: Version, data: &[Bar]) -> bool {
+        let (Some(stored), Some(tail)) = (self.stored, self.stored_tail.as_ref()) else {
+            return false;
+        };
+        if stored.0 != version.0 || stored.2 != version.2 || stored.1 > version.1 {
+            return false;
+        }
+        // A tick updates the last drawn bar in place; an added bar leaves it as it was drawn.
+        stored.1 == version.1 || data.get(stored.1.saturating_sub(1)) == Some(tail)
     }
 
     /// What the last run could not do, with source lines, for the editor.
@@ -209,6 +227,7 @@ impl Indicator for PineStudy {
         let output = self.script.run(data, &self.context, &self.sources);
         self.store(output, data.len());
         self.stored = Some(state_of(self.generation, data));
+        self.stored_tail = data.last().cloned();
     }
 
     fn values(&self) -> &IndicatorValues {
@@ -252,6 +271,7 @@ impl Indicator for PineStudy {
                 Some(output) if task.version == version => {
                     self.store(output, data.len());
                     self.stored = Some(version);
+                    self.stored_tail = data.last().cloned();
                     return;
                 }
                 // A run for other bars is stale; the newer bars below start another.
@@ -260,7 +280,7 @@ impl Indicator for PineStudy {
                 // until it lands.
                 None if task.version == version => {
                     self.task = Some(task);
-                    if self.stored != Some(version) {
+                    if !self.keeps_picture(version, data) {
                         self.clear_output();
                     }
                     return;
@@ -277,7 +297,7 @@ impl Indicator for PineStudy {
         };
         // Values of other bars must not stay on these: a prepend moves every one of them. Values
         // for these bars are the picture the run replaces, so they stay while it runs.
-        if self.stored != Some(version) {
+        if !self.keeps_picture(version, data) {
             self.clear_output();
         }
         let sources = security_sources(sources);
@@ -939,6 +959,39 @@ mod tests {
         study.update_data(&longer, 0, &[]);
         assert_eq!(study.values().len(), longer.len());
         assert!(study.values().value(0, longer.len() - 1).is_some());
+    }
+
+    /// A new bar keeps the drawn picture until the run for it lands, so the chart does not blink.
+    #[test]
+    fn a_new_bar_keeps_the_picture_until_its_run_lands() {
+        let mut study = PineStudy::new(
+            "//@version=6\nindicator(\"L\", overlay=true)\nplot(close)\nif barstate.islast\n    line.new(0, low, bar_index, high)\n",
+        )
+        .unwrap();
+        study.set_context(Some(egui::Context::default()));
+        let data = bars(&[1.0; 8]);
+        study.calculate(&data);
+        assert_eq!(study.values().len(), 8);
+        assert_eq!(study.drawings().len(), 1);
+        // A bar on the end leaves every drawn bar at its index.
+        let longer = bars(&[1.0; 9]);
+        study.update_data(&longer, 8, &[]);
+        assert_eq!(
+            study.values().len(),
+            8,
+            "the picture stays while the new run is in flight"
+        );
+        assert_eq!(study.drawings().len(), 1);
+        wait_for_run(&mut study);
+        study.update_data(&longer, 8, &[]);
+        assert_eq!(study.values().len(), 9);
+        assert_eq!(study.drawings()[0].chart_points[1].bar_idx, 8.0);
+        // A tick rewrites the last drawn bar in place, and the picture still lines up.
+        let mut ticked = longer.clone();
+        ticked[8].close = 1.5;
+        study.update_data(&ticked, 8, &[]);
+        assert_eq!(study.values().len(), 9, "a tick must not blank the chart");
+        assert_eq!(study.drawings().len(), 1);
     }
 
     /// Export and undo settle a running script, so their values belong to the bars they hold.

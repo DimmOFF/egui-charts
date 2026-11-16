@@ -5582,6 +5582,7 @@ plot(color.r(base), "r")
 plot(color.g(base), "g")
 plot(color.b(base), "b")
 plot(color.a(base), "a")
+plot(color.t(color.new(base, 70)), "stacked")
 tone = color.from_gradient(0.5, 0, 1, color.black, color.white)
 plot(color.t(color.new(tone, 50)), "t")
 plot(array.range(values), "range")
@@ -5605,7 +5606,14 @@ fill(p1, p2, color=color.new(color.blue, 90), title="between")
         assert_eq!(at("indexed"), 140.0);
         assert_eq!(at("summed"), 3.0);
         assert_eq!(at("range"), 20.0);
+        // `color.new` sets the transparency instead of stacking it on the base colour's own.
+        assert_eq!(at("stacked"), 70.0);
         assert_eq!(at("t"), 50.0);
+        // Channels are the colour as written, not dimmed by its transparency.
+        assert_eq!(at("r"), 255.0);
+        assert_eq!(at("g"), 0.0);
+        assert_eq!(at("b"), 0.0);
+        assert_eq!(at("a"), 204.0);
         assert_eq!(output.fills.len(), 1);
     }
 

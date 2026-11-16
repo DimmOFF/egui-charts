@@ -120,17 +120,22 @@ mod tests {
     #[test]
     fn legacy_and_modern_inputs_keep_their_defaults() {
         let script = Script::parse(
-            "//@version=4\nstudy(\"W\")\nn = input(title=\"Periods\", defval=2, minval=2, type=input.integer)\nmode = input(title=\"Mode\", defval=\"3\", options=[\"3\", \"5\"])\nlen = input.int(14, \"Length\")\ncolor = input.color(color.red, \"Color\")\n",
+            "//@version=4\nstudy(\"W\")\nn = input(title=\"Periods\", defval=2, minval=2, type=input.integer)\nmode = input(title=\"Mode\", defval=\"3\", options=[\"3\", \"5\"])\nlen = input.int(14, \"Length\")\ncolor = input.color(color.red, \"Color\")\ntint = input.color(color.new(color.gray, 85), \"Tint\")\n",
         )
         .unwrap();
         let inputs = script.inputs();
-        assert_eq!(inputs.len(), 4);
+        assert_eq!(inputs.len(), 5);
         assert_eq!(inputs[0].title, "Periods");
         assert_eq!(inputs[0].default, Value::Num(2.0));
         assert!(matches!(inputs[1].kind, ast::InputKind::Choice(_)));
         assert_eq!(inputs[2].title, "Length");
         assert_eq!(inputs[2].default, Value::Num(14.0));
         assert!(matches!(inputs[3].default, Value::Color(_)));
+        // The default keeps the grey it names, at the transparency it names.
+        assert_eq!(
+            inputs[4].default,
+            Value::Color(egui::Color32::from_rgba_unmultiplied(160, 160, 160, 38))
+        );
     }
 
     #[test]
@@ -229,6 +234,27 @@ mod tests {
                 .iter()
                 .any(|box_| box_.second.0 > box_.first.0 + 10.0),
             "a session box spans the session: {boxes:?}"
+        );
+        // The `input.color` defaults reach the boxes: the grey session tint and the orange one,
+        // both at the 10% opacity the background setting asks for.
+        let tints: Vec<[u8; 4]> = boxes
+            .iter()
+            .filter_map(|box_| box_.fill_color.map(|color| color.to_srgba_unmultiplied()))
+            .collect();
+        assert!(
+            tints
+                .iter()
+                .any(|&[red, green, blue, alpha]| red == green
+                    && green == blue
+                    && (150..=170).contains(&red)
+                    && alpha < 40),
+            "the grey session tint: {tints:?}"
+        );
+        assert!(
+            tints
+                .iter()
+                .any(|&[red, _, blue, alpha]| red > 200 && blue < 40 && alpha < 40),
+            "the orange session tint: {tints:?}"
         );
         // Each session keeps its own name, since every call site has its own `var`s.
         for name in ["Asia", "London", "New-York"] {

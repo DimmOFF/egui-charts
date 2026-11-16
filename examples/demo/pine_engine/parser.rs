@@ -1538,20 +1538,21 @@ fn default_value(expr: &Expr) -> Value {
     {
         let base = args
             .first()
-            .and_then(|arg| literal(&arg.value))
+            .map(|arg| default_value(&arg.value))
             .and_then(|value| value.color())
             .unwrap_or(egui::Color32::WHITE);
         let transparency = args
             .get(1)
             .and_then(|arg| const_number(&arg.value))
             .unwrap_or(0.0);
+        // `color.new` sets the transparency, replacing the base colour's own.
         let factor = 1.0 - (transparency / 100.0).clamp(0.0, 1.0);
-        let alpha = (f64::from(base.a()) * factor).round() as u8;
+        let [red, green, blue, _] = base.to_srgba_unmultiplied();
         return Value::Color(egui::Color32::from_rgba_unmultiplied(
-            base.r(),
-            base.g(),
-            base.b(),
-            alpha,
+            red,
+            green,
+            blue,
+            (255.0 * factor).round() as u8,
         ));
     }
     Value::Na

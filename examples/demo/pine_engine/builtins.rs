@@ -1681,14 +1681,15 @@ fn color_known(name: &str, args: &[Value]) -> Option<Value> {
     };
     Some(match name {
         "new" => {
-            let color = base(0);
+            let [red, green, blue, _] = base(0).to_srgba_unmultiplied();
+            // `color.new` sets the colour's transparency, replacing the one it came with.
             let transparent = transparency();
             let factor = 1.0 - transparent / 100.0;
             Value::Color(Color32::from_rgba_unmultiplied(
-                color.r(),
-                color.g(),
-                color.b(),
-                (f64::from(color.a()) * factor).round() as u8,
+                red,
+                green,
+                blue,
+                (255.0 * factor).round() as u8,
             ))
         }
         "rgb" => Value::Color(Color32::from_rgba_unmultiplied(
@@ -1697,9 +1698,10 @@ fn color_known(name: &str, args: &[Value]) -> Option<Value> {
             channel(2, 255),
             channel(3, 255),
         )),
-        "r" => Value::Num(base(0).r() as f64),
-        "g" => Value::Num(base(0).g() as f64),
-        "b" => Value::Num(base(0).b() as f64),
+        // Pine's channels are the colour as it was written, not scaled by its transparency.
+        "r" => Value::Num(base(0).to_srgba_unmultiplied()[0] as f64),
+        "g" => Value::Num(base(0).to_srgba_unmultiplied()[1] as f64),
+        "b" => Value::Num(base(0).to_srgba_unmultiplied()[2] as f64),
         "a" => Value::Num(base(0).a() as f64),
         // `color.t` is the transparency in percent that `color.new` takes.
         "t" => Value::Num(
@@ -1719,10 +1721,12 @@ fn color_known(name: &str, args: &[Value]) -> Option<Value> {
             let mix = |first: u8, second: u8| {
                 (first as f64 + (second as f64 - first as f64) * at).round() as u8
             };
+            let [from_red, from_green, from_blue, _] = from.to_srgba_unmultiplied();
+            let [to_red, to_green, to_blue, _] = to.to_srgba_unmultiplied();
             Value::Color(Color32::from_rgba_unmultiplied(
-                mix(from.r(), to.r()),
-                mix(from.g(), to.g()),
-                mix(from.b(), to.b()),
+                mix(from_red, to_red),
+                mix(from_green, to_green),
+                mix(from_blue, to_blue),
                 mix(from.a(), to.a()),
             ))
         }

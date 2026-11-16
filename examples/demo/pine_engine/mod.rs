@@ -383,6 +383,63 @@ mod tests {
         );
     }
 
+    /// One `request.security` call site asked for several intervals — `updatePeriodData` is
+    /// called with each — still answers each interval from its own higher bars.
+    #[test]
+    fn the_sessions_script_opens_each_level_from_its_own_period() {
+        let Ok(source) = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../temp/pine/Trading Toolkit X Sessions.pine"
+        )) else {
+            return;
+        };
+        let script = Script::parse(&source).unwrap();
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 26)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc();
+        let bars: Vec<_> = (0..240)
+            .map(|at| {
+                // Every hour opens a cent above the last, so each day, week and month opens at
+                // its own price.
+                let open = 100.0 + at as f64 * 0.01;
+                egui_charts::model::Bar::new(
+                    start + chrono::Duration::hours(at),
+                    open,
+                    open + 0.5,
+                    open + 1.5,
+                    open - 1.0,
+                    10.0,
+                )
+            })
+            .collect();
+        let context = Context {
+            timeframe: egui_charts::model::Timeframe::Hour1,
+            ..Context::default()
+        };
+        let output = script.run(&bars, &context, &[]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let price_of = |name: &str| {
+            output
+                .drawings
+                .iter()
+                .find(|drawing| drawing.text == name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{name}: {:?}",
+                        output.drawings.iter().map(|d| &d.text).collect::<Vec<_>>()
+                    )
+                })
+                .first
+                .1
+        };
+        // The last bar is February 4th 23:00, its day, week and month each starting earlier.
+        assert!((price_of("DO") - (100.0 + 216.0 * 0.01)).abs() < 1e-6, "{}", price_of("DO"));
+        assert!((price_of("WO") - (100.0 + 168.0 * 0.01)).abs() < 1e-6, "{}", price_of("WO"));
+        assert!((price_of("MO") - (100.0 + 144.0 * 0.01)).abs() < 1e-6, "{}", price_of("MO"));
+    }
+
     #[test]
     fn every_script_in_temp_pine_parses_and_runs() {
         let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/../../temp/pine");

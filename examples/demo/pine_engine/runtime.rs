@@ -258,7 +258,7 @@ pub struct Evaluator<'a> {
     fill_at: HashMap<NodeId, usize>,
     shapes: Vec<ShapeSlot>,
     shape_at: HashMap<NodeId, usize>,
-    security: HashMap<NodeId, SecuritySlot>,
+    security: HashMap<(NodeId, Bucket), SecuritySlot>,
     /// The value a call site answered on each bar, kept only for call sites a script indexes
     /// with `[n]`, so `time(tf)[1]` and `ta.sma(...)[1]` read what the earlier bars saw.
     /// The call sites' names, resolved once: a bar would otherwise rebuild each path.
@@ -2191,20 +2191,28 @@ impl<'a> Evaluator<'a> {
             return Value::Na;
         };
         let key = bucket.key(bar.time.timestamp_millis());
-        let mut slot = self.security.remove(&id).unwrap_or_else(|| SecuritySlot {
-            bars: Vec::new(),
-            values: Vec::new(),
-            bucket,
-            key: None,
-            ta: HashMap::new(),
-            referenced: None,
-        });
+        let mut slot = self
+            .security
+            .remove(&(id, bucket))
+            .unwrap_or_else(|| SecuritySlot {
+                bars: Vec::new(),
+                values: Vec::new(),
+                bucket,
+                key: None,
+                ta: HashMap::new(),
+                referenced: None,
+            });
         if lookahead {
             if slot.key != Some(key) {
                 // The higher bar is known whole from the first chart bar of its bucket, which is
-                // what `lookahead_on` repaints.
-                let mut whole = bar.clone();
-                let mut ahead = self.bar + 1;
+                // what `lookahead_on` repaints: `open` and `time` belong to that first bar.
+                let mut first = self.bar;
+                while first > 0 && bucket.key(self.bars[first - 1].time.timestamp_millis()) == key
+                {
+                    first -= 1;
+                }
+                let mut whole = self.bars[first].clone();
+                let mut ahead = first + 1;
                 while let Some(next) = self.bars.get(ahead) {
                     if bucket.key(next.time.timestamp_millis()) != key {
                         break;
@@ -2236,7 +2244,7 @@ impl<'a> Evaluator<'a> {
             live.volume += bar.volume;
         }
         let value = slot.values.last().cloned().unwrap_or(Value::Na);
-        self.security.insert(id, slot);
+        self.security.insert((id, bucket), slot);
         value
     }
 
@@ -2372,14 +2380,17 @@ impl<'a> Evaluator<'a> {
         } else {
             closed_bars(&source.bars, timeframe, now)
         };
-        let mut slot = self.security.remove(&id).unwrap_or_else(|| SecuritySlot {
-            bars: Vec::new(),
-            values: Vec::new(),
-            bucket,
-            key: Some(first),
-            ta: HashMap::new(),
-            referenced: None,
-        });
+        let mut slot = self
+            .security
+            .remove(&(id, bucket))
+            .unwrap_or_else(|| SecuritySlot {
+                bars: Vec::new(),
+                values: Vec::new(),
+                bucket,
+                key: Some(first),
+                ta: HashMap::new(),
+                referenced: None,
+            });
         // A changed interval or a deeper history re-reads the series from its start.
         if slot.bucket != bucket || slot.key != Some(first) {
             slot = SecuritySlot {
@@ -2399,7 +2410,7 @@ impl<'a> Evaluator<'a> {
             slot.values.push(value);
         }
         let value = slot.values.last().cloned().unwrap_or(Value::Na);
-        self.security.insert(id, slot);
+        self.security.insert((id, bucket), slot);
         value
     }
 
@@ -3897,7 +3908,7 @@ fn plot_color(index: usize) -> Color32 {
 }
 
 /// How chart bars group into a higher timeframe, in UTC.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Bucket {
     Fixed(i64),
     Day,

@@ -308,9 +308,107 @@ pub(crate) fn paint(
     bounds
 }
 
+/// Paints the tables of one or more studies into a pane: each table sits in the corner it asks
+/// for, and tables asking for the same corner stack above one another. A table asking for another
+/// corner gets the whole rect again, so a checklist in one corner does not push a watermark in
+/// another up the pane.
+#[cfg(feature = "widget")]
+#[derive(Default)]
+pub(crate) struct TableStack {
+    corners: Vec<(StudyTablePosition, egui::Rect)>,
+}
+
+#[cfg(feature = "widget")]
+impl TableStack {
+    pub(crate) fn paint(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        tables: &[&StudyTable],
+        salt: impl std::hash::Hash + std::fmt::Debug,
+    ) -> Vec<egui::Rect> {
+        tables
+            .iter()
+            .enumerate()
+            .map(|(index, table)| {
+                let slot = self
+                    .corners
+                    .iter()
+                    .position(|(corner, _)| *corner == table.position)
+                    .unwrap_or_else(|| {
+                        self.corners.push((table.position, rect));
+                        self.corners.len() - 1
+                    });
+                let cursor = &mut self.corners[slot].1;
+                let bounds = paint(ui, *cursor, table, ui.scope_id().with((&salt, index)));
+                // The next table in this corner goes above this one.
+                cursor.max.y = bounds.top() - 8.0;
+                bounds
+            })
+            .collect()
+    }
+}
+
 #[cfg(all(test, feature = "widget"))]
 mod tests {
     use super::*;
+
+    /// A bottom-centre table sits at the bottom of the pane even when a taller table in another
+    /// corner is painted first, while two tables in one corner still stack.
+    #[test]
+    fn tables_in_different_corners_do_not_stack() {
+        use egui::{RawInput, Rect, Shape, pos2, vec2};
+
+        let table = |text: &str, rows: usize, position| StudyTable {
+            columns: vec![String::new()],
+            rows: (0..rows)
+                .map(|row| vec![StudyCell::Text(format!("{text} {row}"))])
+                .collect(),
+            position,
+            ..StudyTable::default()
+        };
+        let checklist = table("checklist", 8, StudyTablePosition::BottomRight);
+        let watermark = table("watermark", 2, StudyTablePosition::BottomCenter);
+        let stacked = table("stacked", 2, StudyTablePosition::BottomRight);
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(rect),
+                ..Default::default()
+            },
+            |ui| {
+                TableStack::default().paint(
+                    ui,
+                    rect,
+                    &[&checklist, &watermark, &stacked],
+                    "tables",
+                );
+            },
+        );
+        let bottom = |text: &str| {
+            output
+                .shapes
+                .iter()
+                .flat_map(|clipped| match &clipped.shape {
+                    Shape::Text(shape) if shape.galley.text() == text => Some(shape.pos.y),
+                    _ => None,
+                })
+                .fold(f32::MIN, f32::max)
+        };
+        let watermark = bottom("watermark 1");
+        assert!(
+            watermark > rect.bottom() - 40.0,
+            "the watermark must stay at the pane bottom: {watermark}"
+        );
+        assert!(
+            bottom("stacked 1") < bottom("checklist 4"),
+            "tables in one corner must stack: {} vs {}",
+            bottom("stacked 1"),
+            bottom("checklist 4")
+        );
+        output.drop_without_applying_deltas();
+    }
 
     /// A narrow or short pane keeps overflowing columns and years within a scrollable table.
     #[test]

@@ -3240,19 +3240,14 @@ impl Chart {
                 self.cursor_modes.render(ui, price_rect);
             }
         }
-        let mut table_rect = price_rect;
+        let mut tables = crate::studies::table::TableStack::default();
         for (id, study) in self
             .study_ids
             .iter()
             .zip(self.rendered_studies().indicators())
             .filter(|(id, study)| study.is_visible() && self.series_pane(**id) == Some(main_pane))
         {
-            for table in study.tables() {
-                table_rect.max.y =
-                    crate::studies::table::paint(ui, table_rect, table, ui.scope_id().with(id))
-                        .top()
-                        - 8.0;
-            }
+            tables.paint(ui, price_rect, &study.tables(), id);
         }
         let hover_pos = if touch_readout.touch_input
             && self.chart_options.tooltip.enabled

@@ -674,6 +674,7 @@ fn pine_value(decl: &InputDecl, value: &InputValue) -> Value {
 mod tests {
     use super::*;
     use chrono::DateTime;
+    use egui_charts::studies::StudyCell;
 
     fn bars(closes: &[f64]) -> Vec<Bar> {
         closes
@@ -838,12 +839,12 @@ mod tests {
                 )
             })
             .collect();
-        let trend_cell = |study: &PineStudy| study.tables()[0].columns[1].clone();
+        let trend_cell = |study: &PineStudy| study.tables()[0].rows[0][1].clone();
 
         study.calculate(&chart);
         let request = study.data_requests().pop().expect("the finer timeframe");
         assert_eq!(request.timeframe, Some(Timeframe::Min1));
-        assert_eq!(trend_cell(&study), "Loading");
+        assert_eq!(trend_cell(&study), StudyCell::Text("Loading".into()));
 
         let source: Vec<Bar> = (0..480)
             .map(|minute| {
@@ -865,7 +866,7 @@ mod tests {
             timeframe: Timeframe::Min1,
         };
         study.update_data(&chart, 0, &[data]);
-        assert_eq!(trend_cell(&study), "UP");
+        assert_eq!(trend_cell(&study), StudyCell::Text("UP".into()));
     }
 
     #[test]

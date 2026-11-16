@@ -467,7 +467,7 @@ impl<'a> Evaluator<'a> {
                     .get(&format!("{prefix}:{column}:{row}"))
                     .and_then(Value::color)
             };
-            let mut cells: Vec<Vec<StudyCell>> = (0..rows)
+            let cells: Vec<Vec<StudyCell>> = (0..rows)
                 .map(|row| {
                     (0..columns)
                         .map(|column| StudyCell::Text(text(column, row)))
@@ -479,6 +479,29 @@ impl<'a> Evaluator<'a> {
                 .collect();
             let mut cell_text: Vec<Vec<Option<Color32>>> = (0..rows)
                 .map(|row| (0..columns).map(|column| color("t", column, row)).collect())
+                .collect();
+            // Pine centres a cell's text unless the script says otherwise.
+            let align = |column: usize, row: usize| {
+                let pick = |prefix: &str| {
+                    fields
+                        .get(&format!("{prefix}:{column}:{row}"))
+                        .and_then(|value| value.text())
+                        .map(|name| name.rsplit('.').next().unwrap_or(name).to_owned())
+                };
+                let x = match pick("h").as_deref() {
+                    Some("align_left") => egui::Align::LEFT,
+                    Some("align_right") => egui::Align::RIGHT,
+                    _ => egui::Align::Center,
+                };
+                let y = match pick("v").as_deref() {
+                    Some("align_top") => egui::Align::TOP,
+                    Some("align_bottom") => egui::Align::BOTTOM,
+                    _ => egui::Align::Center,
+                };
+                egui::Align2::new(x, y)
+            };
+            let cell_align: Vec<Vec<egui::Align2>> = (0..rows)
+                .map(|row| (0..columns).map(|column| align(column, row)).collect())
                 .collect();
             let filled = cells
                 .iter()
@@ -503,30 +526,9 @@ impl<'a> Evaluator<'a> {
                     ))
                 })
                 .collect();
-            let headings = if columns > 1 && cells.len() > 1 {
-                let first = cells.remove(0);
-                cell_bg.remove(0);
-                cell_text.remove(0);
-                first
-                    .into_iter()
-                    .map(|cell| match cell {
-                        StudyCell::Text(text) => text,
-                        StudyCell::Percent(_) => String::new(),
-                    })
-                    .collect()
-            } else {
-                vec![String::new(); columns]
-            };
-            // `table.merge_cells` spans rows of the script's table; the heading row taken above
-            // shifts them, and the range then takes its start cell's colours.
-            let shift = rows - cells.len();
+            // `table.merge_cells` spans rows of the script's table, and the range then takes its
+            // start cell's colours.
             for (start_column, start_row, end_column, end_row) in merges {
-                let (Some(start_row), Some(end_row)) = (
-                    start_row.checked_sub(shift),
-                    end_row.checked_sub(shift),
-                ) else {
-                    continue;
-                };
                 let Some(bg) = cell_bg
                     .get(start_row)
                     .and_then(|row| row.get(start_column))
@@ -556,10 +558,13 @@ impl<'a> Evaluator<'a> {
             }
             let table = StudyTable {
                 title: String::new(),
-                columns: headings,
+                columns: Vec::new(),
                 rows: cells,
                 cell_bg,
                 cell_text,
+                cell_align,
+                border_color: fields.get("__border").and_then(Value::color),
+                bg: fields.get("__bg").and_then(Value::color),
                 position: table_position(fields.get("__position").and_then(Value::text)),
             };
             built.push((filled, table));
@@ -3021,6 +3026,21 @@ impl<'a> Evaluator<'a> {
                 .or_else(|| args.first().and_then(|arg| dotted(&arg.value)))
                 .unwrap_or_else(|| "position.top_right".into());
             fields.insert("__position".into(), Value::Str(position.into()));
+            // `table.new(position, columns, rows, bgcolor, frame_color, frame_width,
+            // border_color, border_width)`: the cell fill and the grid lines are the two the
+            // canvas can show.
+            let mut color = |name: &str, at: usize| {
+                named(args, name)
+                    .or_else(|| args.get(at))
+                    .map(|arg| self.eval(&arg.value))
+                    .and_then(|value| value.color())
+            };
+            if let Some(bg) = color("bgcolor", 3) {
+                fields.insert("__bg".into(), Value::Color(bg));
+            }
+            if let Some(border) = color("border_color", 6) {
+                fields.insert("__border".into(), Value::Color(border));
+            }
             drop(fields);
             self.tables.push(shared);
             return object;
@@ -3051,6 +3071,19 @@ impl<'a> Evaluator<'a> {
                 };
                 let bg = style("bgcolor", 10);
                 let ink = style("text_color", 6);
+                // `text.align_left` and its siblings read as their member name, like `position.*`.
+                let mut member = |name: &str, at: usize| {
+                    named(args, name)
+                        .or_else(|| args.get(at))
+                        .and_then(|arg| {
+                            self.eval(&arg.value)
+                                .text()
+                                .map(str::to_owned)
+                                .or_else(|| dotted(&arg.value))
+                        })
+                };
+                let halign = member("text_halign", 7);
+                let valign = member("text_valign", 8);
                 let mut fields = value::lock_object(&shared);
                 match text {
                     Some(text) if !text.is_empty() => {
@@ -3066,11 +3099,18 @@ impl<'a> Evaluator<'a> {
                                 }
                             }
                         }
+                        for (prefix, align) in [("h", halign), ("v", valign)] {
+                            let key = format!("{prefix}:{column}:{row}");
+                            if let Some(align) = align {
+                                fields.insert(key, Value::Str(align.into()));
+                            }
+                        }
                     }
                     _ => {
                         fields.remove(&key);
-                        fields.remove(&format!("b:{column}:{row}"));
-                        fields.remove(&format!("t:{column}:{row}"));
+                        for prefix in ["b", "t", "h", "v"] {
+                            fields.remove(&format!("{prefix}:{column}:{row}"));
+                        }
                     }
                 }
             }
@@ -4381,17 +4421,49 @@ mod tests {
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         assert_eq!(output.plots[0].values, [1.0]);
         let table = output.tables.first().expect("a table with cells");
-        assert_eq!(table.columns, ["A", "B"]);
+        // A Pine table has no heading row; every row is the script's own.
+        assert!(table.columns.is_empty());
         assert_eq!(
             table.rows,
-            vec![vec![
-                StudyCell::Text("1".into()),
-                StudyCell::Text(String::new())
-            ]]
+            vec![
+                vec![StudyCell::Text("A".into()), StudyCell::Text("B".into())],
+                vec![
+                    StudyCell::Text("1".into()),
+                    StudyCell::Text(String::new())
+                ]
+            ]
         );
-        assert_eq!(table.cell_bg, vec![vec![Some(Color32::RED), None]]);
-        assert_eq!(table.cell_text, vec![vec![Some(Color32::WHITE), None]]);
+        assert_eq!(
+            table.cell_bg,
+            vec![vec![None, None], vec![Some(Color32::RED), None]]
+        );
+        assert_eq!(
+            table.cell_text,
+            vec![vec![None, None], vec![Some(Color32::WHITE), None]]
+        );
+        // A cell centres its text unless the script asks for another alignment.
+        assert!(table
+            .cell_align
+            .iter()
+            .flatten()
+            .all(|align| *align == egui::Align2::CENTER_CENTER));
         assert_eq!(table.position, StudyTablePosition::TopRight);
+    }
+
+    #[test]
+    fn a_table_cell_keeps_its_own_alignment() {
+        let output = run(
+            "indicator(\"T\")\nvar table t = table.new(position.bottom_center, 2, 1, bgcolor=color.white, border_color=color.gray)\ntable.cell(t, 0, 0, \"l\", text_halign=text.align_left, text_valign=text.align_top)\ntable.cell(t, 1, 0, \"r\", text_halign=text.align_right)\nplot(close)\n",
+            &[1.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let table = output.tables.first().expect("a table with cells");
+        assert_eq!(
+            table.cell_align[0],
+            [egui::Align2::LEFT_TOP, egui::Align2::RIGHT_CENTER]
+        );
+        assert_eq!(table.bg, Some(Color32::WHITE));
+        assert_eq!(table.border_color, Some(Color32::GRAY));
     }
 
     /// A script may keep its corner in a variable, as CISD does with its position input.
@@ -4411,7 +4483,10 @@ mod tests {
             &[1.0],
         );
         assert_eq!(output.tables.len(), 2);
-        assert_eq!(output.tables[0].columns, ["A", "B"]);
+        assert_eq!(
+            output.tables[0].rows[0],
+            [StudyCell::Text("A".into()), StudyCell::Text("B".into())]
+        );
         assert_eq!(output.tables[1].rows, vec![vec![StudyCell::Text("wm".into())]]);
     }
 
@@ -4433,9 +4508,9 @@ mod tests {
             &[1.0],
         );
         let table = output.tables.first().expect("a table with cells");
-        assert_eq!(table.rows.len(), 1);
-        assert_eq!(table.cell_bg[0][1], Some(Color32::RED));
-        assert_eq!(table.cell_text[0][1], Some(Color32::WHITE));
+        assert_eq!(table.rows.len(), 2);
+        assert_eq!(table.cell_bg[1][1], Some(Color32::RED));
+        assert_eq!(table.cell_text[1][1], Some(Color32::WHITE));
     }
 
     #[test]
@@ -5887,15 +5962,37 @@ plot(close)
         assert_eq!(table.position, StudyTablePosition::BottomLeft);
         assert_eq!(
             table.rows,
-            [vec![
-                StudyCell::Text("B".into()),
-                StudyCell::Text("upd".into()),
-                StudyCell::Text(String::new())
-            ]]
+            [
+                vec![
+                    StudyCell::Text("A".into()),
+                    StudyCell::Text("x 1.23".into()),
+                    StudyCell::Text(String::new())
+                ],
+                vec![
+                    StudyCell::Text("B".into()),
+                    StudyCell::Text("upd".into()),
+                    StudyCell::Text(String::new())
+                ]
+            ]
         );
         let olive = Some(Color32::from_rgb(128, 128, 0));
-        assert_eq!(table.cell_bg, [vec![olive; 3]]);
-        assert_eq!(table.cell_text, [vec![Some(Color32::YELLOW); 3]]);
+        assert_eq!(
+            table.cell_bg,
+            [
+                vec![Some(Color32::BLUE), None, None],
+                vec![olive; 3]
+            ]
+        );
+        assert_eq!(
+            table.cell_text,
+            [
+                vec![Some(Color32::WHITE), None, None],
+                vec![Some(Color32::YELLOW); 3]
+            ]
+        );
+        // `table.new` carries the table's own fill and the lines between its cells.
+        assert!(table.bg.is_some());
+        assert!(table.border_color.is_some());
         let line = output
             .drawings
             .iter()

@@ -22,6 +22,12 @@ pub struct StudyTable {
     pub cell_bg: Vec<Vec<Option<egui::Color32>>>,
     /// Optional text colour per cell, aligned with `rows`; empty or `None` uses the theme.
     pub cell_text: Vec<Vec<Option<egui::Color32>>>,
+    /// How each cell places its text, aligned with `rows`; missing cells read as left centred.
+    pub cell_align: Vec<Vec<egui::Align2>>,
+    /// The lines between cells, from a Pine table's `border_color`; `None` draws no grid.
+    pub border_color: Option<egui::Color32>,
+    /// The table's own fill, from a Pine table's `bgcolor`; `None` uses the theme.
+    pub bg: Option<egui::Color32>,
     /// The pane corner or edge the table sits in.
     pub position: StudyTablePosition,
 }
@@ -81,17 +87,20 @@ pub(crate) fn paint(
         StudyCell::Percent(Some(value)) if value.is_finite() => format!("{value:+.2}%"),
         StudyCell::Percent(_) => "N/A".into(),
     };
-    let mut widths: Vec<_> = table
-        .columns
-        .iter()
-        .map(|column| {
-            painter
-                .layout_no_wrap(column.clone(), font.clone(), theme.ui.text)
-                .size()
-                .x
-                + 16.0
-        })
-        .collect();
+    let mut widths = vec![
+        0.0;
+        table
+            .columns
+            .len()
+            .max(table.rows.iter().map(Vec::len).max().unwrap_or(0))
+    ];
+    for (width, column) in widths.iter_mut().zip(&table.columns) {
+        *width = painter
+            .layout_no_wrap(column.clone(), font.clone(), theme.ui.text)
+            .size()
+            .x
+            + 16.0;
+    }
     for row in &table.rows {
         for (width, cell) in widths.iter_mut().zip(row) {
             *width = width.max(
@@ -108,7 +117,9 @@ pub(crate) fn paint(
     // so it leaves the chart readable. A Pine table is sized by its script, so it may fill the
     // room the legend leaves.
     let caption = if table.title.is_empty() { 0.0 } else { 22.0 };
-    let height = 22.0 * (table.rows.len() + 1) as f32 + caption;
+    // A Pine table declares no heading row; a built-in one names its columns instead.
+    let headings = usize::from(!table.columns.is_empty());
+    let height = 22.0 * (table.rows.len() + headings) as f32 + caption;
     let mut available = rect.shrink(8.0);
     available.min.y += 24.0;
     if !available.is_positive() || rect.height() < 44.0 {
@@ -152,20 +163,29 @@ pub(crate) fn paint(
         size,
     );
     let painter = painter.with_clip_rect(bounds.intersect(ui.clip_rect()));
-    painter.rect_filled(bounds, 3.0, theme.ui.panel_bg_floating);
-    painter.rect_stroke(
+    painter.rect_filled(
         bounds,
         3.0,
-        Stroke::new(
-            if rating_table { 2.0 } else { 1.0 },
-            if rating_table {
-                egui::Color32::WHITE
-            } else {
-                theme.ui.border
-            },
-        ),
-        StrokeKind::Inside,
+        table.bg.unwrap_or(theme.ui.panel_bg_floating),
     );
+    let border = table
+        .border_color
+        .or((!table.title.is_empty()).then_some(theme.ui.border));
+    if let Some(color) = border {
+        painter.rect_stroke(
+            bounds,
+            3.0,
+            Stroke::new(
+                if rating_table { 2.0 } else { 1.0 },
+                if rating_table {
+                    egui::Color32::WHITE
+                } else {
+                    color
+                },
+            ),
+            StrokeKind::Inside,
+        );
+    }
     if caption > 0.0 {
         painter.text(
             bounds.min + vec2(8.0, 11.0),
@@ -188,20 +208,17 @@ pub(crate) fn paint(
                 ui.allocate_exact_size(vec2(width, height - caption), egui::Sense::hover());
             let painter = ui.painter();
             let mut y = content.top();
-            for (row_index, row) in std::iter::once(
-                table
-                    .columns
-                    .iter()
-                    .cloned()
-                    .map(StudyCell::Text)
-                    .collect::<Vec<_>>(),
-            )
-            .chain(table.rows.iter().cloned())
-            .enumerate()
-            {
+            let heading: Vec<StudyCell> = table
+                .columns
+                .iter()
+                .cloned()
+                .map(StudyCell::Text)
+                .collect();
+            let heading = (!heading.is_empty()).then_some(heading);
+            for (row_index, row) in heading.iter().chain(table.rows.iter()).enumerate() {
                 let mut x = content.left();
                 // The heading row is synthesised above `rows`, so data colours shift by one.
-                let data_row = row_index.checked_sub(1);
+                let data_row = row_index.checked_sub(headings);
                 for (column, (cell, width)) in row.iter().zip(&widths).enumerate() {
                     let cell_rect = Rect::from_min_size(pos2(x, y), vec2(*width, 22.0));
                     let own = |colors: &Vec<Vec<Option<egui::Color32>>>| {
@@ -293,9 +310,14 @@ pub(crate) fn paint(
                     if let Some(ink) = ink {
                         color = ink;
                     }
+                    let align = data_row
+                        .and_then(|row| table.cell_align.get(row))
+                        .and_then(|cells| cells.get(column))
+                        .copied()
+                        .unwrap_or(Align2::LEFT_CENTER);
                     painter.text(
-                        pos2(x + 8.0, y + 11.0),
-                        Align2::LEFT_CENTER,
+                        align.pos_in_rect(&cell_rect.shrink2(vec2(8.0, 0.0))),
+                        align,
                         text(cell),
                         font.clone(),
                         color,
@@ -303,6 +325,18 @@ pub(crate) fn paint(
                     x += width;
                 }
                 y += 22.0;
+            }
+            // shortcut: every grid line is one pixel, until a script asks for a wider border.
+            if let Some(color) = table.border_color {
+                let stroke = Stroke::new(1.0, color);
+                let mut x = content.left();
+                for width in widths.iter().take(widths.len().saturating_sub(1)) {
+                    x += width;
+                    painter.vline(x, content.y_range(), stroke);
+                }
+                for row in 1..(table.rows.len() + headings) {
+                    painter.hline(content.x_range(), content.top() + 22.0 * row as f32, stroke);
+                }
             }
         });
     bounds

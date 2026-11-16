@@ -263,6 +263,10 @@ pub struct MarginsSettings {
     /// [`ScalesAppearanceSettings::font_family`], as saved when this held whole bars, keep the
     /// chart's margin when this equals its whole bars.
     pub right_bars: f32,
+    /// Keep the right margin the chart has when a new bar arrives instead of moving the view back
+    /// to `right_bars`, so the last bar stays the same distance from the right edge.
+    #[serde(default)]
+    pub keep_right_margin_on_new_bar: bool,
 }
 
 impl Default for MarginsSettings {
@@ -273,6 +277,7 @@ impl Default for MarginsSettings {
             top_percent: (price.top * 100.0) as f32,
             bottom_percent: (price.bottom * 100.0) as f32,
             right_bars: crate::config::TimeScaleOptions::default().right_offset,
+            keep_right_margin_on_new_bar: false,
         }
     }
 }

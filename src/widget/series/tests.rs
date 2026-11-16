@@ -312,73 +312,78 @@ fn appended_bars_keep_the_view() {
 fn bar_updates_obey_live_edge_policies() {
     for (replace, rolling) in [(false, false), (true, false), (true, true)] {
         for shift in [false, true] {
-            for allow_whitespace in [false, true] {
-                for offset in [19.0, -1.5, -2.0, -30.0] {
-                    for (name, old_whitespace, new_whitespace, close, append) in [
-                        ("close rises", false, false, 11.0, false),
-                        ("close falls", false, false, 9.0, false),
-                        ("close unchanged", false, false, 10.0, false),
-                        ("whitespace unchanged", true, true, 10.0, false),
-                        ("whitespace filled", true, false, 11.0, false),
-                        ("value removed", false, true, 10.0, false),
-                        ("value appended", false, false, 11.0, true),
-                        ("whitespace appended", true, true, 10.0, true),
-                    ] {
-                        let options = crate::config::ChartOptions {
-                            time_scale: crate::config::TimeScaleOptions {
-                                right_offset: 20.0,
-                                shift_visible_range_on_new_bar: shift,
-                                allow_shift_visible_range_on_whitespace_replacement:
-                                    allow_whitespace,
+            for keep in [false, true] {
+                for allow_whitespace in [false, true] {
+                    for offset in [19.0, -1.5, -2.0, -30.0] {
+                        for (name, old_whitespace, new_whitespace, close, append) in [
+                            ("close rises", false, false, 11.0, false),
+                            ("close falls", false, false, 9.0, false),
+                            ("close unchanged", false, false, 10.0, false),
+                            ("whitespace unchanged", true, true, 10.0, false),
+                            ("whitespace filled", true, false, 11.0, false),
+                            ("value removed", false, true, 10.0, false),
+                            ("value appended", false, false, 11.0, true),
+                            ("whitespace appended", true, true, 10.0, true),
+                        ] {
+                            let options = crate::config::ChartOptions {
+                                time_scale: crate::config::TimeScaleOptions {
+                                    right_offset: 20.0,
+                                    shift_visible_range_on_new_bar: shift,
+                                    keep_right_offset_on_new_bar: keep,
+                                    allow_shift_visible_range_on_whitespace_replacement:
+                                        allow_whitespace,
+                                    ..Default::default()
+                                },
                                 ..Default::default()
-                            },
-                            ..Default::default()
-                        };
-                        let mut bars: Vec<_> = (0..100).map(|i| bar(i * 60, 10.0)).collect();
-                        if old_whitespace {
-                            bars[99] = Bar::whitespace(bars[99].time);
-                        }
-                        let mut chart = Chart::new(BarData::from_bars(bars.clone()))
-                            .with_chart_options(options);
-                        chart.scroll_to_position(offset, false);
-                        chart.set_start_idx(40);
-                        let mut incoming = bar(if append { 6000 } else { 5940 }, close);
-                        if new_whitespace {
-                            incoming = Bar::whitespace(incoming.time);
-                        }
-                        if replace {
-                            if append {
-                                if rolling {
-                                    bars.remove(0);
-                                }
-                                bars.push(incoming);
-                            } else {
-                                bars[99] = incoming;
+                            };
+                            let mut bars: Vec<_> = (0..100).map(|i| bar(i * 60, 10.0)).collect();
+                            if old_whitespace {
+                                bars[99] = Bar::whitespace(bars[99].time);
                             }
-                            chart.set_data(SeriesId::MAIN, bars);
-                        } else {
-                            chart.update(SeriesId::MAIN, incoming);
+                            let mut chart = Chart::new(BarData::from_bars(bars.clone()))
+                                .with_chart_options(options);
+                            chart.scroll_to_position(offset, false);
+                            chart.set_start_idx(40);
+                            let mut incoming = bar(if append { 6000 } else { 5940 }, close);
+                            if new_whitespace {
+                                incoming = Bar::whitespace(incoming.time);
+                            }
+                            if replace {
+                                if append {
+                                    if rolling {
+                                        bars.remove(0);
+                                    }
+                                    bars.push(incoming);
+                                } else {
+                                    bars[99] = incoming;
+                                }
+                                chart.set_data(SeriesId::MAIN, bars);
+                            } else {
+                                chart.update(SeriesId::MAIN, incoming);
+                            }
+                            let follow = shift
+                                && offset >= -1.5
+                                && (append
+                                    || old_whitespace && !new_whitespace && allow_whitespace);
+                            let expected = if follow {
+                                // A kept margin stays where the view left it.
+                                if keep { offset } else { 20.0 }
+                            } else if append {
+                                offset - 1.0
+                            } else {
+                                offset
+                            };
+                            assert_eq!(
+                                chart.state.time_scale().right_offset(),
+                                expected,
+                                "{name}: replace {replace}, rolling {rolling}, shift {shift}, keep {keep}, whitespace {allow_whitespace}, offset {offset}"
+                            );
+                            assert_eq!(
+                                chart.pending_start_idx,
+                                (!follow).then_some(40),
+                                "{name}: pending start"
+                            );
                         }
-                        let follow = shift
-                            && offset >= -1.5
-                            && (append || old_whitespace && !new_whitespace && allow_whitespace);
-                        let expected = if follow {
-                            20.0
-                        } else if append {
-                            offset - 1.0
-                        } else {
-                            offset
-                        };
-                        assert_eq!(
-                            chart.state.time_scale().right_offset(),
-                            expected,
-                            "{name}: replace {replace}, rolling {rolling}, shift {shift}, whitespace {allow_whitespace}, offset {offset}"
-                        );
-                        assert_eq!(
-                            chart.pending_start_idx,
-                            (!follow).then_some(40),
-                            "{name}: pending start"
-                        );
                     }
                 }
             }

@@ -1,7 +1,7 @@
 //! Canvas tab of the chart settings dialog.
 
 use super::super::SettingsDialog;
-use super::{styled_dropdown, styled_text_input};
+use super::{styled_checkbox, styled_dropdown, styled_text_input};
 use crate::localization as l10n;
 use crate::model::LineStyle;
 use crate::theme::Theme;
@@ -311,6 +311,13 @@ impl SettingsDialog {
                             dialog.settings.margins.right_bars = v;
                         }
                     },
+                );
+
+                styled_checkbox(
+                    ui,
+                    &mut self.settings.margins.keep_right_margin_on_new_bar,
+                    "Keep right margin on a new bar",
+                    theme.ui.text,
                 );
 
                 ui.add_space(ui.active_theme().spacing.xxl);

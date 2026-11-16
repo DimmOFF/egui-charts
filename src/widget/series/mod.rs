@@ -956,7 +956,11 @@ impl Chart {
     }
 
     fn scroll_to_live_edge(&mut self) {
-        self.state.time_scale_mut().scroll_to_realtime();
+        // The offset is measured from the last bar, so leaving it alone keeps the last bar the
+        // same distance from the right edge. A panned margin stays when the option says so.
+        if !self.chart_options.time_scale.keep_right_offset_on_new_bar {
+            self.state.time_scale_mut().scroll_to_realtime();
+        }
         // A pending start index would move the view away from the edge again.
         self.pending_start_idx = None;
     }

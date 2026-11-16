@@ -58,6 +58,13 @@ pub struct TimeScaleOptions {
     /// Default: true
     pub shift_visible_range_on_new_bar: bool,
 
+    /// Keep the right offset the view has when new data is added instead of restoring
+    /// [`right_offset`](Self::right_offset). A view panned to leave more room on the right keeps
+    /// it, and the last bar stays at the same distance from the right edge.
+    /// Default: false
+    #[serde(default)]
+    pub keep_right_offset_on_new_bar: bool,
+
     /// Allow the visible range to be shifted to the right when a new bar is added which
     /// is replacing an existing whitespace time point on the chart.
     /// Default: false
@@ -136,6 +143,7 @@ impl Default for TimeScaleOptions {
             lock_visible_time_range_on_resize: false,
             right_bar_stays_on_scroll: false,
             shift_visible_range_on_new_bar: true,
+            keep_right_offset_on_new_bar: false,
             allow_shift_visible_range_on_whitespace_replacement: false,
             ignore_whitespace_indices: false,
             ignore_hidden_indices: false,

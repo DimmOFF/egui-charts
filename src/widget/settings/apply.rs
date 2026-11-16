@@ -315,6 +315,8 @@ impl ChartSettingsState {
         settings.margins.bottom_percent =
             (chart.state().price_scale().options().scale_margins.bottom * 100.0) as f32;
         settings.margins.right_bars = right_margin_bars(chart);
+        settings.margins.keep_right_margin_on_new_bar =
+            chart.chart_options().time_scale.keep_right_offset_on_new_bar;
         let scale = chart.state().price_scale();
         settings.scales_and_lines.auto_scale = !scale.is_manual();
         settings.scales_and_lines.log_scale = scale.options().mode == PriceScaleMode::Logarithmic;
@@ -669,6 +671,8 @@ impl ChartSettingsState {
         if self.margins.right_bars != right_margin_bars(chart) && !saved_unedited {
             chart.set_right_margin(self.margins.right_bars);
         }
+        chart.chart_options.time_scale.keep_right_offset_on_new_bar =
+            self.margins.keep_right_margin_on_new_bar;
         let mode = if self.scales_and_lines.log_scale {
             PriceScaleMode::Logarithmic
         } else if self.scales_and_lines.percentage_scale {
@@ -2827,5 +2831,42 @@ mod tests {
                 Err(ChartSettingsError::RightMargin(-1.0))
             );
         }
+    }
+
+    /// The "Keep right margin on a new bar" row reads and writes the chart option, and settings
+    /// saved without it keep the view following the configured margin.
+    #[test]
+    fn keep_right_margin_on_a_new_bar_round_trips() {
+        use crate::widget::test_frames::chart;
+        let mut chart = chart(&[100.0], &[110.0]);
+        assert!(
+            !chart
+                .chart_options()
+                .time_scale
+                .keep_right_offset_on_new_bar
+        );
+        let mut settings = ChartSettingsState::from_chart(&chart);
+        settings.margins.keep_right_margin_on_new_bar = true;
+        settings.apply_to_chart(&mut chart).unwrap();
+        assert!(
+            chart
+                .chart_options()
+                .time_scale
+                .keep_right_offset_on_new_bar
+        );
+        assert!(
+            ChartSettingsState::from_chart(&chart)
+                .margins
+                .keep_right_margin_on_new_bar
+        );
+
+        let mut saved = serde_json::to_value(&settings).unwrap();
+        saved["margins"]
+            .as_object_mut()
+            .unwrap()
+            .remove("keep_right_margin_on_new_bar")
+            .unwrap();
+        let saved: ChartSettingsState = serde_json::from_value(saved).unwrap();
+        assert!(!saved.margins.keep_right_margin_on_new_bar);
     }
 }

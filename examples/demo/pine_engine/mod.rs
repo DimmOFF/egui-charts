@@ -138,6 +138,22 @@ mod tests {
         );
     }
 
+    /// A function body on its own line may start with `not`: the word negates the expression
+    /// instead of being read as a type in front of a name. `not` binds looser than `==`.
+    #[test]
+    fn a_negated_function_body_keeps_its_not() {
+        let script = Script::parse(
+            "indicator(\"T\")\nf(string s) =>\n    not na(s)\nplot(f(\"x\") ? 1 : 0)\ng(string s) =>\n    not s == \"\"\nplot(g(\"x\") ? 1 : 0)\n",
+        )
+        .unwrap();
+        let bar =
+            egui_charts::model::Bar::new(chrono::DateTime::UNIX_EPOCH, 1.0, 2.0, 0.5, 1.5, 1.0);
+        let output = script.run(&[bar], &Context::default(), &[]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let values: Vec<f64> = output.plots.iter().map(|plot| plot.values[0]).collect();
+        assert_eq!(values, vec![1.0, 1.0]);
+    }
+
     #[test]
     fn inputs_keep_their_group_inline_and_tooltip() {
         let script = Script::parse(

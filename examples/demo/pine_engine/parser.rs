@@ -270,8 +270,13 @@ impl Parser {
             self.advance();
         }
         // A type word starts a declaration only before a name, not before `line.new`'s `.`.
-        // A script's own lowercase type (`hz _hz`) is two identifiers; `switch x` is not.
-        if self.starts_with_type() || (self.at_pair_of_idents() && !self.at_ident("switch")) {
+        // A script's own lowercase type (`hz _hz`) is two identifiers; `switch x` is not, and
+        // neither is `not x`, which negates the expression that follows.
+        if self.starts_with_type()
+            || (self.at_pair_of_idents()
+                && !self.at_ident("switch")
+                && !self.at_ident("not"))
+        {
             self.advance();
             if self.at_op("<") {
                 self.skip_type_arguments()?;
@@ -843,9 +848,9 @@ impl Parser {
     }
 
     fn parse_and(&mut self) -> Result<Expr, String> {
-        let mut left = self.parse_equality()?;
+        let mut left = self.parse_not()?;
         while self.eat_ident("and") {
-            let right = self.parse_equality()?;
+            let right = self.parse_not()?;
             left = Expr::Binary {
                 op: "and",
                 left: Box::new(left),
@@ -853,6 +858,17 @@ impl Parser {
             };
         }
         Ok(left)
+    }
+
+    /// `not` binds looser than `==`: `not a == b` negates the comparison.
+    fn parse_not(&mut self) -> Result<Expr, String> {
+        if !self.eat_ident("not") {
+            return self.parse_equality();
+        }
+        Ok(Expr::Unary {
+            op: "not",
+            value: Box::new(self.parse_not()?),
+        })
     }
 
     fn parse_equality(&mut self) -> Result<Expr, String> {

@@ -115,6 +115,10 @@ pub struct ShapeMark {
     pub bar: usize,
     pub value: f64,
     pub above: bool,
+    /// `location.top`/`location.bottom`: the mark sits at that edge of the pane, not by its bar.
+    pub pinned: bool,
+    /// `size=size.auto`: the mark is as wide as a bar, so it follows the bar spacing.
+    pub auto_size: bool,
     pub color: Color32,
     /// The glyph or label the study paints, since the library marker carries no text.
     pub text: String,
@@ -193,6 +197,8 @@ struct FillSlot {
 #[derive(Clone, Debug)]
 struct ShapeSlot {
     above: bool,
+    pinned: bool,
+    auto_size: bool,
     color: Color32,
     text: String,
     text_color: Option<Color32>,
@@ -262,6 +268,15 @@ pub struct Evaluator<'a> {
     call_history: HashMap<NodeId, Vec<Value>>,
     /// The call sites whose value `call_history` keeps.
     indexed: &'a HashSet<NodeId>,
+    /// The variables `indexed_names` keeps a history for.
+    indexed_names: &'a HashSet<String>,
+    /// The user functions a method call can reach, by receiver type and then method name.
+    methods: HashMap<&'a str, HashMap<&'a str, &'a Function>>,
+    /// The user functions and methods still running, innermost last.
+    call_sites: Vec<NodeId>,
+    /// What one call site's function locals hold between bars: its `var`s and the series it
+    /// indexes by name, which Pine keeps per call site.
+    local_vars: HashMap<NodeId, HashMap<String, Var>>,
     /// The values one lower-timeframe `request.security` read from the series the host supplied.
     lower: HashMap<(NodeId, egui_charts::model::Timeframe), LowerSeries>,
     /// Whether this run evaluates the script on a lower-timeframe series for `request.security`,
@@ -295,12 +310,23 @@ impl<'a> Evaluator<'a> {
         sources: &'a [SecurityData],
     ) -> Self {
         let mut functions = HashMap::new();
+        let mut methods = HashMap::new();
         let mut types = HashMap::new();
         for statement in &program.body {
             match statement {
-                Stmt::Function(function) => {
-                    functions.insert(function.name.as_str(), function);
-                }
+                Stmt::Function(function) => match &function.method_of {
+                    // `bump(obj, x)` may also call a method as a plain function.
+                    Some(receiver) => {
+                        functions.insert(function.name.as_str(), function);
+                        methods
+                            .entry(receiver.as_str())
+                            .or_insert_with(HashMap::new)
+                            .insert(function.name.as_str(), function);
+                    }
+                    None => {
+                        functions.insert(function.name.as_str(), function);
+                    }
+                },
                 Stmt::Type(decl) => {
                     types.insert(decl.name.as_str(), decl);
                 }
@@ -315,6 +341,9 @@ impl<'a> Evaluator<'a> {
             vars: HashMap::new(),
             locals: Vec::new(),
             functions,
+            methods,
+            call_sites: Vec::new(),
+            local_vars: HashMap::new(),
             types,
             ta: HashMap::new(),
             plots: Vec::new(),
@@ -329,6 +358,7 @@ impl<'a> Evaluator<'a> {
             member_path: String::new(),
             call_history: HashMap::new(),
             indexed: &program.indexed,
+            indexed_names: &program.indexed_names,
             lower: HashMap::new(),
             nested: false,
             sampling: None,
@@ -377,6 +407,8 @@ impl<'a> Evaluator<'a> {
                     bar,
                     value,
                     above: shape.above,
+                    pinned: shape.pinned,
+                    auto_size: shape.auto_size,
                     color: shape.color,
                     text: shape.text.clone(),
                     text_color: shape.text_color,
@@ -541,6 +573,14 @@ impl<'a> Evaluator<'a> {
             // A bar that does not run an assignment keeps the previous value, as Pine does.
             var.history.push(var.value.clone());
         }
+        let indexed = self.indexed_names;
+        for vars in self.local_vars.values_mut() {
+            for (name, var) in vars.iter_mut() {
+                if indexed.contains(name.as_str()) {
+                    var.history.push(var.value.clone());
+                }
+            }
+        }
     }
 
     fn run_block(&mut self, block: &[Stmt]) -> Value {
@@ -601,24 +641,55 @@ impl<'a> Evaluator<'a> {
                 reassign,
             } => {
                 // `var x = …` runs on the first bar only; a missing one is `na` until assigned.
-                // A `var` in a function keeps its value between bars too, so it lives with the
-                // script's own variables.
-                // shortcut: it lives under its bare name, so two functions cannot each declare the
-                // same `var`; namespace it by function if a script ever needs that.
+                // A `var` in a function belongs to its call site and keeps its value between
+                // bars there, as Pine does.
                 if *sticky {
-                    if let Some(var) = self.vars.get(name)
-                        && var.initialized
-                    {
-                        return var.value.clone();
+                    let site = self.call_sites.last().copied();
+                    let existing = match site {
+                        Some(site) => self
+                            .local_vars
+                            .get(&site)
+                            .and_then(|vars| vars.get(name))
+                            .filter(|var| var.initialized)
+                            .map(|var| var.value.clone()),
+                        None => self
+                            .vars
+                            .get(name)
+                            .filter(|var| var.initialized)
+                            .map(|var| var.value.clone()),
+                    };
+                    if let Some(value) = existing {
+                        return value;
                     }
                     let value = self.eval(value);
-                    let var = self.vars.entry(name.to_owned()).or_insert_with(|| Var {
-                        value: Value::Na,
-                        history: Vec::new(),
-                        initialized: false,
-                    });
-                    var.value = value.clone();
-                    var.initialized = true;
+                    match site {
+                        Some(site) => {
+                            let var = self
+                                .local_vars
+                                .entry(site)
+                                .or_insert_with(HashMap::new)
+                                .entry(name.to_owned())
+                                .or_insert_with(|| Var {
+                                    value: Value::Na,
+                                    history: Vec::new(),
+                                    initialized: false,
+                                });
+                            var.value = value.clone();
+                            var.initialized = true;
+                            if let Some(scope) = self.locals.last_mut() {
+                                scope.insert(name.to_owned(), value.clone());
+                            }
+                        }
+                        None => {
+                            let var = self.vars.entry(name.to_owned()).or_insert_with(|| Var {
+                                value: Value::Na,
+                                history: Vec::new(),
+                                initialized: false,
+                            });
+                            var.value = value.clone();
+                            var.initialized = true;
+                        }
+                    }
                     return value;
                 }
                 let value = self.eval(value);
@@ -1220,14 +1291,18 @@ impl<'a> Evaluator<'a> {
                 "ismonthly" => Value::Bool(self.context.timeframe.duration_ms() >= 2_592_000_000),
                 _ => Value::Bool(false),
             },
-            "size" => Value::Num(match name {
-                "tiny" => 8.0,
-                "small" => 10.0,
-                "normal" => 12.0,
-                "large" => 16.0,
-                "huge" => 20.0,
-                _ => 12.0,
-            }),
+            "size" => match name {
+                // `size.auto` sizes a mark to its bar rather than to a font.
+                "auto" => Value::Str("auto".into()),
+                _ => Value::Num(match name {
+                    "tiny" => 8.0,
+                    "small" => 10.0,
+                    "normal" => 12.0,
+                    "large" => 16.0,
+                    "huge" => 20.0,
+                    _ => 12.0,
+                }),
+            },
             // `shape.*`, `location.*`, `plot.*` and the like: the names the plot and input
             // calls read back as strings.
             _ if !namespace.is_empty() => Value::Str(name.into()),
@@ -1634,6 +1709,29 @@ impl<'a> Evaluator<'a> {
         let Expr::Ident(name) = target else {
             return Value::Na;
         };
+        if offset == 0
+            && let Some(value) = self.locals.iter().rev().find_map(|scope| scope.get(name))
+        {
+            return value.clone();
+        }
+        // A function's own local is a series of its call site, indexed by name.
+        if let Some(var) = self
+            .call_sites
+            .last()
+            .and_then(|site| self.local_vars.get(site))
+            .and_then(|vars| vars.get(name))
+        {
+            if offset == 0 {
+                return var.value.clone();
+            }
+            return var
+                .history
+                .len()
+                .checked_sub(offset)
+                .and_then(|at| var.history.get(at))
+                .cloned()
+                .unwrap_or(Value::Na);
+        }
         if let Some(var) = self.vars.get(name) {
             if offset == 0 {
                 return var.value.clone();
@@ -1880,6 +1978,8 @@ impl<'a> Evaluator<'a> {
                 };
                 fields.insert(field.name.clone(), default);
             }
+            // Method calls dispatch on this, so two types may declare the same method name.
+            fields.insert("__type".to_owned(), Value::Str(decl.name.clone().into()));
             for (at, arg) in args.iter().enumerate() {
                 let value = self.eval(&arg.value);
                 let name = arg
@@ -1933,10 +2033,21 @@ impl<'a> Evaluator<'a> {
             if matches!(value, Value::Na) {
                 return Value::Na;
             }
-            if matches!(value, Value::Object(_))
-                && let Some(function) = self.functions.get(method.as_str()).copied()
+            // A user method, dispatched on the type of the object it is called on.
+            let mut receiver_type = None;
+            if let Some(object) = value.object() {
+                receiver_type = value::lock_object(&object)
+                    .get("__type")
+                    .and_then(Value::text)
+                    .map(str::to_owned);
+            }
+            if let Some(function) = receiver_type
+                .as_deref()
+                .and_then(|receiver| self.methods.get(receiver))
+                .and_then(|methods| methods.get(method.as_str()))
+                .copied()
             {
-                return self.call_function(function, args, Some(value), line);
+                return self.call_function(function, id, args, Some(value), line);
             }
         }
         if let Some(rest) = name.strip_prefix("timeframe.") {
@@ -2002,7 +2113,7 @@ impl<'a> Evaluator<'a> {
         if callee.len() == 1
             && let Some(function) = self.functions.get(name).copied()
         {
-            return self.call_function(function, args, None, line);
+            return self.call_function(function, id, args, None, line);
         }
         self.unsupported(line, &name)
     }
@@ -2508,6 +2619,7 @@ impl<'a> Evaluator<'a> {
     fn call_function(
         &mut self,
         function: &'a Function,
+        site: NodeId,
         args: &[Arg],
         receiver: Option<Value>,
         line: usize,
@@ -2546,6 +2658,12 @@ impl<'a> Evaluator<'a> {
                 slots[at].clone().unwrap_or(Value::Na),
             );
         }
+        // A `var` in a function starts each bar with the value this call site left it with.
+        if let Some(saved) = self.local_vars.get(&site) {
+            for (name, var) in saved.iter().filter(|(_, var)| var.initialized) {
+                scope.insert(name.clone(), var.value.clone());
+            }
+        }
         self.locals.push(scope);
         // A parameter the caller left out takes the default the script declared for it.
         for (at, default) in function.defaults.iter().enumerate() {
@@ -2560,10 +2678,26 @@ impl<'a> Evaluator<'a> {
         }
         self.depth += 1;
         let control = std::mem::replace(&mut self.control, Control::None);
+        self.call_sites.push(site);
         let value = self.run_block(&function.body);
+        self.call_sites.pop();
         self.control = control;
         self.depth -= 1;
-        self.locals.pop();
+        let scope = self.locals.pop().unwrap_or_default();
+        // A call site keeps its `var`s and the locals it indexes by name, with their values.
+        let saved = self.local_vars.entry(site).or_insert_with(HashMap::new);
+        for (name, value) in scope {
+            let keep = saved.contains_key(&name) || self.indexed_names.contains(&name);
+            if !keep {
+                continue;
+            }
+            let var = saved.entry(name).or_insert_with(|| Var {
+                value: Value::Na,
+                history: Vec::new(),
+                initialized: false,
+            });
+            var.value = value;
+        }
         value
     }
 
@@ -3060,10 +3194,12 @@ impl<'a> Evaluator<'a> {
             return Value::Na;
         };
         let condition = self.eval(&first.value);
-        let above = positional(args, "location", 3)
+        let location = positional(args, "location", 3)
             .map(|arg| self.eval(&arg.value))
             .and_then(|value| value.text().map(str::to_owned))
-            .is_none_or(|location| !location.contains("below"));
+            .unwrap_or_default();
+        let above = !(location.contains("below") || location.contains("bottom"));
+        let pinned = location == "top" || location == "bottom";
         let color = positional(args, "color", 4)
             .map(|arg| self.eval(&arg.value))
             .and_then(|value| value.color());
@@ -3074,10 +3210,10 @@ impl<'a> Evaluator<'a> {
         let text_color = positional(args, "textcolor", 7)
             .map(|arg| self.eval(&arg.value))
             .and_then(|value| value.color());
-        let font_size = positional(args, "size", 9)
-            .map(|arg| self.eval(&arg.value))
-            .and_then(|value| value.text().map(shape_font_size))
-            .unwrap_or(12.0);
+        let size = positional(args, "size", 9).map(|arg| self.eval(&arg.value));
+        let font_size = size.as_ref().map(font_size_of).unwrap_or(12.0);
+        // `size.auto` draws the mark as wide as a bar, so the chart scales it with the bars.
+        let auto_size = size.as_ref().and_then(Value::text) == Some("auto");
         let slot = match self.shape_at.get(&id) {
             Some(slot) => *slot,
             None => {
@@ -3103,6 +3239,8 @@ impl<'a> Evaluator<'a> {
                 };
                 self.shapes.push(ShapeSlot {
                     above,
+                    pinned,
+                    auto_size,
                     color,
                     text,
                     text_color,
@@ -3120,18 +3258,21 @@ impl<'a> Evaluator<'a> {
             _ => false,
         };
         if fires {
-            let Some(bar) = self.bars.get(self.bar) else {
+            // `offset` moves the mark along the bars, and `location` places it on the bar it
+            // lands on, as Pine draws it there.
+            let Some(target) = self
+                .bar
+                .checked_add_signed(self.shapes[slot].offset)
+                .filter(|target| *target < self.bars.len())
+            else {
                 return Value::Na;
             };
+            let bar = &self.bars[target];
             let value = condition
                 .number()
                 .filter(|number| *number > 1.0)
                 .unwrap_or(if above { bar.high } else { bar.low });
-            if let Some(target) = self.bar.checked_add_signed(self.shapes[slot].offset)
-                && target < self.bars.len()
-            {
-                self.shapes[slot].marks.push((target, value));
-            }
+            self.shapes[slot].marks.push((target, value));
         }
         Value::Na
     }
@@ -3526,6 +3667,19 @@ pub(crate) fn indexed_calls(body: &[Stmt]) -> HashSet<NodeId> {
     ids
 }
 
+/// The variables a script reads with `[n]`, whose history a function's locals keep by call site.
+pub(crate) fn indexed_names(body: &[Stmt]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    ast::visit_stmts(body, &mut |expr| {
+        if let Expr::Index { target, .. } = expr
+            && let Expr::Ident(name) = &**target
+        {
+            names.insert(name.clone());
+        }
+    });
+    names
+}
+
 /// The script variables an expression can read, including through the functions it calls. A
 /// `request.security` request hands the chart's values only for these, so a request that reads
 /// bars alone copies nothing and stays cheap on a long history.
@@ -3678,17 +3832,6 @@ fn shape_glyph(style: &str) -> String {
         _ => "✕",
     }
     .to_owned()
-}
-
-/// Pine's `size.*` constants as label point sizes.
-fn shape_font_size(size: &str) -> f32 {
-    match size {
-        "tiny" => 8.0,
-        "small" => 10.0,
-        "large" => 16.0,
-        "huge" => 24.0,
-        _ => 12.0,
-    }
 }
 
 /// Whether `text` matches a Pine regular expression; an invalid pattern matches nothing.
@@ -5101,8 +5244,11 @@ alertcondition(bull, "Bull", "Bull signal")
             &[1.0, 2.0, 3.0, 4.0],
         );
         assert_eq!(output.shapes.len(), 2);
+        // `offset` moves the mark back, and `abovebar` places it above the bar it lands on.
         assert_eq!(output.shapes[0].bar, 0);
-        assert_eq!(output.shapes[0].value, 4.0);
+        assert_eq!(output.shapes[0].value, 2.0);
+        assert_eq!(output.shapes[1].bar, 1);
+        assert_eq!(output.shapes[1].value, 3.0);
         assert!(output.shapes[0].above);
     }
 
@@ -6060,5 +6206,44 @@ plot(close)
             ),
             (0, 0, 51, 51)
         );
+    }
+
+    #[test]
+    fn a_function_local_keeps_its_series_and_var_per_call_site() {
+        let output = run(
+            "indicator(\"T\", overlay=true)\nstarts(bool inside) =>\n    bool start = inside and not inside[1]\n    if start\n        line.new(bar_index, high, bar_index, low)\n    start\nruns(bool inside) =>\n    var int count = 0\n    if inside and not inside[1]\n        count += 1\n    count\nplot(starts(close > 2) ? 1 : 0, \"a\")\nplot(starts(close > 3) ? 1 : 0, \"b\")\nplot(runs(close > 2), \"c\")\n",
+            &[1.0, 2.0, 3.0, 2.0, 4.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        // Each call site has its own series: `inside[1]` reads what that site saw last bar.
+        assert_eq!(output.plots[0].values, [0.0, 0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(output.plots[1].values, [0.0, 0.0, 0.0, 0.0, 1.0]);
+        // And its own `var`: the second call site does not see the first one's count.
+        assert_eq!(output.plots[2].values, [0.0, 0.0, 1.0, 1.0, 2.0]);
+        assert_eq!(output.drawings.len(), 3);
+    }
+
+    #[test]
+    fn methods_of_two_types_keep_their_own_body() {
+        let output = run(
+            "indicator(\"T\")\ntype A\n    int x\ntype B\n    int y\nmethod tag(A this) => 1 + this.x\nmethod tag(B this) => 2 + this.y\nplot(A.new(10).tag())\nplot(B.new(10).tag())\n",
+            &[1.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert_eq!(output.plots[0].values, [11.0]);
+        assert_eq!(output.plots[1].values, [12.0]);
+    }
+
+    #[test]
+    fn a_plotchar_reads_its_pane_edge_and_auto_size() {
+        let output = run(
+            "indicator(\"T\")\nplotchar(true, location=location.top, text=\"top\")\nplotchar(true, location=location.bottom, text=\"bottom\")\nplotshape(true, size=size.auto)\n",
+            &[1.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        assert!(output.shapes[0].pinned && output.shapes[0].above);
+        assert!(output.shapes[1].pinned && !output.shapes[1].above);
+        assert!(output.shapes[2].auto_size);
+        assert!(!output.shapes[0].auto_size);
     }
 }

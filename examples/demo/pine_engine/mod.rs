@@ -189,6 +189,72 @@ mod tests {
     }
 
     #[test]
+    fn the_sessions_script_draws_its_boxes_and_open_levels() {
+        let Ok(source) = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../temp/pine/Trading Toolkit X Sessions.pine"
+        )) else {
+            // The user's scripts are not part of the repository checkout.
+            return;
+        };
+        let script = Script::parse(&source).unwrap();
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 5)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc();
+        let bars: Vec<_> = (0..1500)
+            .map(|at| {
+                let close = 100.0 + (at as f64 * 0.7).sin() * 5.0;
+                let open = 100.0 + ((at as f64 - 1.0) * 0.7).sin() * 5.0;
+                egui_charts::model::Bar::new(
+                    start + chrono::Duration::minutes(at),
+                    open,
+                    close.max(open) + 1.0,
+                    close.min(open) - 1.0,
+                    close,
+                    10.0,
+                )
+            })
+            .collect();
+        let output = script.run(&bars, &Context::default(), &[]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let boxes: Vec<_> = output
+            .drawings
+            .iter()
+            .filter(|drawing| drawing.kind == crate::pine_engine::runtime::DrawingKind::Box)
+            .collect();
+        assert!(
+            boxes
+                .iter()
+                .any(|box_| box_.second.0 > box_.first.0 + 10.0),
+            "a session box spans the session: {boxes:?}"
+        );
+        // Each session keeps its own name, since every call site has its own `var`s.
+        for name in ["Asia", "London", "New-York"] {
+            assert!(
+                output
+                    .drawings
+                    .iter()
+                    .any(|drawing| drawing.text == name),
+                "{name} label: {:?}",
+                output.drawings.iter().map(|d| &d.text).collect::<Vec<_>>()
+            );
+        }
+        // The open levels draw once `isActive` dispatches on `Level` rather than on `PXHLLevel`.
+        for level in ["DO", "NYM"] {
+            assert!(
+                output
+                    .drawings
+                    .iter()
+                    .any(|drawing| drawing.text == level),
+                "{level} line: {:?}",
+                output.drawings.iter().map(|d| &d.text).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
     fn every_script_in_temp_pine_parses_and_runs() {
         let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/../../temp/pine");
         let Ok(entries) = std::fs::read_dir(directory) else {

@@ -316,6 +316,8 @@ pub enum Stmt {
 #[derive(Clone, Debug)]
 pub struct Function {
     pub name: String,
+    /// The receiver type of a `method` declaration, which a call dispatches on.
+    pub method_of: Option<String>,
     pub params: Vec<String>,
     /// The declared default of each parameter, by position; `None` when it has none.
     pub defaults: Vec<Option<Expr>>,
@@ -346,4 +348,6 @@ pub struct Program {
     pub diagnostics: Vec<Diagnostic>,
     /// The call sites the script reads with `[n]`: found once, since every run needs them.
     pub indexed: HashSet<NodeId>,
+    /// The variables a script reads with `[n]`, whose history a function's locals keep.
+    pub indexed_names: HashSet<String>,
 }

@@ -48,6 +48,7 @@ impl Parser {
         let body = parser.parse_body(&mut title, &mut overlay)?;
         inputs_of(&body, &mut parser.inputs);
         let indexed = crate::pine_engine::runtime::indexed_calls(&body);
+        let indexed_names = crate::pine_engine::runtime::indexed_names(&body);
         Ok(Program {
             title,
             overlay,
@@ -55,6 +56,7 @@ impl Parser {
             inputs: parser.inputs,
             diagnostics: parser.diagnostics,
             indexed,
+            indexed_names,
         })
     }
 
@@ -246,7 +248,7 @@ impl Parser {
         }
         if self.at_ident("method") {
             self.advance();
-            return Ok(Stmt::Function(self.parse_function()?));
+            return Ok(Stmt::Function(self.parse_function(true)?));
         }
         if self.at_ident("export") || self.at_ident("import") {
             self.skip_statement()?;
@@ -256,7 +258,7 @@ impl Parser {
             });
         }
         if self.looks_like_function() {
-            return Ok(Stmt::Function(self.parse_function()?));
+            return Ok(Stmt::Function(self.parse_function(false)?));
         }
 
         // `const` is a compile-time constant, which this engine reads as an ordinary value.
@@ -418,7 +420,7 @@ impl Parser {
             )
     }
 
-    fn parse_function(&mut self) -> Result<Function, String> {
+    fn parse_function(&mut self, method: bool) -> Result<Function, String> {
         // A declared return type is accepted and dropped: `float myAverage(...) =>`.
         if self.at_pair_of_idents()
             && self
@@ -432,9 +434,16 @@ impl Parser {
         self.expect_op("(")?;
         let mut params = Vec::new();
         let mut defaults = Vec::new();
+        let mut method_of = None;
         while !self.eat_op(")") {
-            // Parameter types are accepted and dropped: scripts are dynamically typed here.
+            // Parameter types are accepted and dropped: scripts are dynamically typed here. A
+            // method's first one names the type a call dispatches on.
+            let mut type_word = None;
             if self.starts_with_type() || self.at_pair_of_idents() {
+                type_word = match self.peek() {
+                    Token::Ident(word) => Some(word.clone()),
+                    _ => None,
+                };
                 self.advance();
                 if self.at_op("<") {
                     self.skip_type_arguments()?;
@@ -445,6 +454,9 @@ impl Parser {
                 self.expect_op("]")?;
             }
             params.push(self.ident()?);
+            if method && params.len() == 1 {
+                method_of = type_word;
+            }
             // A caller may leave out a parameter that declares a default.
             defaults.push(if self.eat_op("=") {
                 Some(self.parse_expr()?)
@@ -468,6 +480,7 @@ impl Parser {
         self.eat_newlines();
         Ok(Function {
             name,
+            method_of,
             params,
             defaults,
             body,

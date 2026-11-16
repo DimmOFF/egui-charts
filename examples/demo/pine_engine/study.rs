@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use egui::Color32;
-use egui_charts::drawings::{ChartPoint, Drawing, DrawingToolType};
+use egui_charts::drawings::{ChartPoint, Drawing, DrawingToolType, TextAnchor};
 use egui_charts::model::{Bar, Instrument, Timeframe};
 use egui_charts::studies::{
     CrossDirection, Indicator, IndicatorMarker, IndicatorValues, InputKind, InputValue, PlotType,
@@ -555,6 +555,20 @@ fn study_shape(mark: &ShapeMark) -> Drawing {
     let mut drawing = Drawing::new(0, DrawingToolType::TextLabel);
     drawing.chart_points = vec![ChartPoint::new(mark.bar as f32, mark.value)];
     drawing.completed = true;
+    if mark.pinned {
+        // The chart pins this label to the pane edge `above` names instead of to its price.
+        drawing.screen_anchor = Some([0.5, if mark.above { 0.0 } else { 1.0 }]);
+        drawing.text_anchor = if mark.above {
+            TextAnchor::Below
+        } else {
+            TextAnchor::Above
+        };
+    }
+    if mark.auto_size {
+        // `size.auto`: the mark is as wide as a bar, so its point size tracks the bar spacing.
+        drawing.text_follows_zoom = true;
+        drawing.text_zoom_spacing = Some(mark.font_size);
+    }
     drawing.color = mark.color.to_srgba_unmultiplied();
     drawing.font_size = mark.font_size;
     drawing.text_color = Some(

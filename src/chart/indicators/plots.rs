@@ -374,6 +374,15 @@ pub(crate) fn paint_drawings(
         finer: &[],
     };
     for drawing in mapped_drawings(study, coords, price_to_y) {
+        let mut drawing = drawing;
+        // A `plotshape`/`plotchar` with `location.top` or `location.bottom` sits at that edge of
+        // the pane, as Pine draws it, rather than at the price of its bar.
+        if let Some([_, edge]) = drawing.screen_anchor
+            && drawing.tool_type == crate::drawings::DrawingToolType::TextLabel
+            && let Some(point) = drawing.points.first_mut()
+        {
+            point.y = context.rect.top() + 2.0 + (context.rect.height() - 4.0) * edge;
+        }
         drawing.render(
             &context.painter.with_clip_rect(context.rect),
             context.rect,

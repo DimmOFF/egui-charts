@@ -1650,10 +1650,24 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    /// The bar nearest to a timestamp, so `xloc.bar_time` coordinates land on the chart.
+    /// The bar index of a timestamp, fractional past the bars on the chart, so `xloc.bar_time`
+    /// coordinates land where Pine draws them, including the empty space after the last bar.
     fn time_to_bar(&self, ms: f64) -> f64 {
         if self.bars.is_empty() {
             return 0.0;
+        }
+        let first = self.bars[0].time.timestamp_millis() as f64;
+        let last = self.bars[self.bars.len() - 1]
+            .time
+            .timestamp_millis() as f64;
+        let span = self.context.timeframe.duration_ms() as f64;
+        // `time + offset * timeframe.in_seconds() * 1000` asks for a bar after the last one, as
+        // Pine's `xloc.bar_time` allows; a clipped bar would drop the drawing's offset.
+        if span > 0.0 && ms > last {
+            return (self.bars.len() - 1) as f64 + (ms - last) / span;
+        }
+        if span > 0.0 && ms < first {
+            return -(first - ms) / span;
         }
         let after = self
             .bars
@@ -5346,6 +5360,34 @@ alertcondition(bull, "Bull", "Bull signal")
             .find(|drawing| drawing.kind == DrawingKind::Line && drawing.first.0 == 2.0)
             .unwrap();
         assert_eq!(timed.second.0, 2.0);
+    }
+
+    #[test]
+    fn a_bar_time_drawing_keeps_its_offset_past_the_last_bar() {
+        let output = run(
+            "indicator(\"T\", overlay=true)\nif barstate.islast\n    line.new(time, low, time + timeframe.in_seconds() * 1000 * 3, high, xloc=xloc.bar_time)\n    label.new(time + timeframe.in_seconds() * 1000 * 3, high, \"x\", xloc=xloc.bar_time)\n",
+            &[10.0, 11.0, 12.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let line = output
+            .drawings
+            .iter()
+            .find(|drawing| drawing.kind == DrawingKind::Line)
+            .unwrap();
+        assert_eq!(line.first.0, 2.0);
+        assert_eq!(
+            line.second.0, 5.0,
+            "the line ends three bars past the last one"
+        );
+        let label = output
+            .drawings
+            .iter()
+            .find(|drawing| drawing.kind == DrawingKind::Label)
+            .unwrap();
+        assert_eq!(
+            label.first.0, 5.0,
+            "the label sits three bars past the last one"
+        );
     }
 
     #[test]

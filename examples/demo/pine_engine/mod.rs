@@ -252,6 +252,18 @@ mod tests {
                 output.drawings.iter().map(|d| &d.text).collect::<Vec<_>>()
             );
         }
+        // `renderLevel` offsets the label by `offset * timeframe.in_seconds()` bars, which lands
+        // in the empty space past the last bar rather than on it. (`NYM` stops at its 18:00
+        // cutoff, which is before the last bar here.)
+        let daily_open = output
+            .drawings
+            .iter()
+            .find(|drawing| drawing.text == "DO")
+            .unwrap();
+        assert!(
+            daily_open.first.0 > 1499.0,
+            "the DO label stays offset past the last bar: {daily_open:?}"
+        );
     }
 
     #[test]

@@ -68,6 +68,9 @@ pub struct PineStudy {
     /// Where the next frame is drawn: a finished run asks it to repaint so it is collected.
     ctx: Option<egui::Context>,
     task: Option<RunTask>,
+    /// The bars the drawn values belong to, so a run for other bars clears them and a run for
+    /// these keeps the picture until it lands.
+    stored: Option<Version>,
     /// Counts edits of the script and of its chart context, so a run from before one is dropped.
     generation: u64,
     /// Whether the next update must finish in the calling thread, for export and snapshots.
@@ -106,6 +109,7 @@ impl PineStudy {
             visible: true,
             ctx: None,
             task: None,
+            stored: None,
             generation: 0,
             settle: false,
         })
@@ -180,6 +184,7 @@ impl PineStudy {
 
     /// Drops the outputs that belong to bars this run does not have, keeping the styles.
     fn clear_output(&mut self) {
+        self.stored = None;
         self.values.clear();
         self.per_bar_colors.clear();
         self.candles.clear();
@@ -203,6 +208,7 @@ impl Indicator for PineStudy {
     fn calculate(&mut self, data: &[Bar]) {
         let output = self.script.run(data, &self.context, &self.sources);
         self.store(output, data.len());
+        self.stored = Some(state_of(self.generation, data));
     }
 
     fn values(&self) -> &IndicatorValues {
@@ -220,11 +226,13 @@ impl Indicator for PineStudy {
             .collect()
     }
 
-    fn update_data(&mut self, data: &[Bar], from: usize, sources: &[StudyData<'_>]) {
+    fn update_data(&mut self, data: &[Bar], _from: usize, sources: &[StudyData<'_>]) {
         if data.is_empty() {
             // The chart drops the values of bars it no longer has. The styles and drawings stay
-            // until the next finished run replaces them.
-            self.values.clear();
+            // until the next finished run replaces them, and so do values for bars it still has.
+            if !self.update_ready() {
+                self.values.clear();
+            }
             return;
         }
         let version = state_of(self.generation, data);
@@ -243,6 +251,7 @@ impl Indicator for PineStudy {
             match output {
                 Some(output) if task.version == version => {
                     self.store(output, data.len());
+                    self.stored = Some(version);
                     return;
                 }
                 // A run for other bars is stale; the newer bars below start another.
@@ -251,7 +260,7 @@ impl Indicator for PineStudy {
                 // until it lands.
                 None if task.version == version => {
                     self.task = Some(task);
-                    if from == 0 {
+                    if self.stored != Some(version) {
                         self.clear_output();
                     }
                     return;
@@ -266,8 +275,9 @@ impl Indicator for PineStudy {
             self.calculate(data);
             return;
         };
-        // Values of other bars must not stay on these: a prepend moves every one of them.
-        if from == 0 {
+        // Values of other bars must not stay on these: a prepend moves every one of them. Values
+        // for these bars are the picture the run replaces, so they stay while it runs.
+        if self.stored != Some(version) {
             self.clear_output();
         }
         let sources = security_sources(sources);
@@ -971,5 +981,31 @@ mod tests {
         assert_eq!(study.values().len(), data.len(), "the lines blinked");
         study.update_data(&data, 0, &[]);
         assert_eq!(study.values().len(), data.len());
+    }
+
+    /// The chart asks for a full recompute whenever a history the script reads changes. The bars
+    /// are the same then, so the picture drawn stays until the new run lands instead of blinking.
+    #[test]
+    fn a_full_recompute_keeps_the_picture_of_the_same_bars() {
+        let mut study = PineStudy::new("//@version=6\nindicator(\"T\")\nplot(close)").unwrap();
+        study.set_context(Some(egui::Context::default()));
+        let data = bars(&[1.0; 1200]);
+        study.update_data(&data, 0, &[]);
+        wait_for_run(&mut study);
+        study.update_data(&data, 0, &[]);
+        assert_eq!(study.values().len(), data.len());
+        study.update_data(&data, 0, &[]);
+        assert_eq!(study.values().len(), data.len(), "the lines blinked");
+        wait_for_run(&mut study);
+        study.update_data(&data, 0, &[]);
+        assert_eq!(study.values().len(), data.len());
+        // A picture of other bars still goes: a prepend moves every value.
+        let mut longer = bars(&[0.5; 100]);
+        longer.extend(data);
+        study.update_data(&longer, 0, &[]);
+        assert!(
+            study.values().is_empty(),
+            "values of other bars stay on these"
+        );
     }
 }

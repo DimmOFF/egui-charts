@@ -1,6 +1,6 @@
 //! Study registration, settings and calculation order, including dependent studies.
 
-use super::{Chart, ChartElementId, SeriesId};
+use super::{Chart, ChartElementId, CursorDataPolicy, SeriesId};
 use crate::model::Bar;
 use crate::studies::{Indicator, InputValue, RefusedStudy, StudyError, StudySource};
 use web_time::Instant;
@@ -171,15 +171,26 @@ impl Chart {
         indicator
     }
 
-    /// Shows or hides the study `id`; a hidden study keeps its values. Returns `false` for an id
-    /// that is not a study of the chart.
+    /// Shows or hides the study `id`; a hidden study keeps its values and stops calculating
+    /// unless a visible study reads them or cursor payloads include hidden values
+    /// ([`CursorDataPolicy::IncludeHidden`]). Returns `false` for an id that is not a study of
+    /// the chart.
     pub fn set_indicator_visible(&mut self, id: SeriesId, visible: bool) -> bool {
         let Some(at) = self.study_ids.iter().position(|study| *study == id) else {
             return false;
         };
         self.record_study(id);
         self.readout_revision = crate::model::next_revision();
-        self.studies.indicators_mut()[at].set_visible(visible);
+        let study = &mut self.studies.indicators_mut()[at];
+        let changed = study.is_visible() != visible;
+        study.set_visible(visible);
+        // Hidden studies only run for visible readers, so one that appears catches up at once. Its
+        // copies on time-independent charts follow the new visibility when they rebuild.
+        self.element_studies.dirty |= changed;
+        if changed && visible {
+            self.pending_from[at] = Some(0);
+            self.next_refresh[at] = f64::NEG_INFINITY;
+        }
         true
     }
 
@@ -265,12 +276,19 @@ impl Chart {
     /// input's oldest bars or a live bar of a history it reads, keeps them and waits for its
     /// `next_refresh` like a tail update instead. Returns how long until the next waiting study
     /// is due, zero if one is due now.
+    ///
+    /// A hidden study whose values no visible study reads does not run and asks for no data.
     pub(super) fn refresh_studies(&mut self, now: f64) -> Option<f64> {
         let instrument = self.instrument().cloned();
         let clock = self.bar_clock();
         let bars = &self.state.data().bars;
         let events = held_events(&self.time_scale_events, self.frozen_source_events);
+        let include_hidden = self.host_events.cursor_data_policy == CursorDataPolicy::IncludeHidden;
+        let needed = needed(self.studies.indicators(), &self.study_ids, include_hidden);
         for (at, study) in self.studies.indicators_mut().iter_mut().enumerate() {
+            if !needed[at] {
+                continue;
+            }
             let instrument_changed = study.set_instrument(instrument.as_ref());
             let clock_changed = study.set_bar_clock(&clock);
             let events_changed = study.set_time_scale_events(events);
@@ -285,7 +303,9 @@ impl Chart {
             .studies
             .indicators()
             .iter()
-            .flat_map(|study| study.data_requests())
+            .zip(&needed)
+            .filter(|(_, needed)| **needed)
+            .flat_map(|(study, _)| study.data_requests())
             .collect();
         let sources =
             self.study_data
@@ -294,6 +314,7 @@ impl Chart {
             self.studies.indicators_mut(),
             &self.study_ids,
             bars,
+            &needed,
             &mut self.pending_from,
             &mut self.stale,
             &mut self.next_refresh,
@@ -304,9 +325,11 @@ impl Chart {
 
     pub(super) fn refresh_element_studies(&mut self, now: f64) -> Option<f64> {
         let cutoff = self.replay_time();
+        let include_hidden = self.host_events.cursor_data_policy == CursorDataPolicy::IncludeHidden;
         let cache = &mut self.element_studies;
+        let needed = needed(cache.studies.indicators(), &self.study_ids, include_hidden);
         for (at, study) in cache.studies.indicators_mut().iter_mut().enumerate() {
-            if study.update_ready() {
+            if needed[at] && study.update_ready() {
                 cache.pending_from[at] = Some(0);
                 cache.next_refresh[at] = f64::NEG_INFINITY;
             }
@@ -315,7 +338,9 @@ impl Chart {
             .studies
             .indicators()
             .iter()
-            .flat_map(|study| study.data_requests())
+            .zip(&needed)
+            .filter(|(_, needed)| **needed)
+            .flat_map(|(study, _)| study.data_requests())
             .collect();
         let sources = self
             .study_data
@@ -324,6 +349,7 @@ impl Chart {
             cache.studies.indicators_mut(),
             &self.study_ids,
             &cache.bars,
+            &needed,
             &mut cache.pending_from,
             &mut cache.stale,
             &mut cache.next_refresh,
@@ -496,10 +522,45 @@ pub(super) fn order(studies: &[Box<dyn Indicator>], ids: &[SeriesId]) -> Vec<usi
     ordered
 }
 
+/// The studies to run: the visible ones and the hidden ones their values come from, or all of
+/// them while cursor payloads include hidden values.
+pub(super) fn needed(
+    studies: &[Box<dyn Indicator>],
+    ids: &[SeriesId],
+    include_hidden: bool,
+) -> Vec<bool> {
+    if include_hidden {
+        return vec![true; studies.len()];
+    }
+    let mut needed: Vec<bool> = studies.iter().map(|study| study.is_visible()).collect();
+    for at in 0..studies.len() {
+        if !needed[at] {
+            continue;
+        }
+        let mut next = at;
+        for _ in 0..=studies.len() {
+            let Some(StudySource::Study { id, .. }) = studies[next].source() else {
+                break;
+            };
+            let Some(parent) = ids.iter().position(|candidate| candidate.0 == id) else {
+                break;
+            };
+            // A chain that meets a study already marked, or itself, ends here.
+            if needed[parent] {
+                break;
+            }
+            needed[parent] = true;
+            next = parent;
+        }
+    }
+    needed
+}
+
 pub(super) fn refresh_values(
     studies: &mut [Box<dyn Indicator>],
     ids: &[SeriesId],
     bars: &[Bar],
+    needed: &[bool],
     pending_from: &mut [Option<usize>],
     stale: &mut [bool],
     next_refresh: &mut [f64],
@@ -508,6 +569,12 @@ pub(super) fn refresh_values(
 ) -> Option<f64> {
     let order = super::studies::order(studies, ids);
     for at in 0..studies.len() {
+        // A study nothing visible reads keeps the values it has and is not run at all.
+        if !needed[at] {
+            pending_from[at] = None;
+            stale[at] = false;
+            continue;
+        }
         if !order.contains(&at) {
             studies[at].update_source(bars, 0, &[]);
             pending_from[at] = None;
@@ -516,6 +583,11 @@ pub(super) fn refresh_values(
     }
     let mut recomputed = false;
     for &at in &order {
+        if !needed[at] {
+            pending_from[at] = None;
+            stale[at] = false;
+            continue;
+        }
         let parent = match studies[at].source() {
             Some(crate::studies::StudySource::Study { id, .. }) => {
                 ids.iter().position(|candidate| candidate.0 == id)
@@ -542,6 +614,9 @@ pub(super) fn refresh_values(
                 .iter()
                 .copied()
                 .filter(|&at| {
+                    if !needed[at] {
+                        return false;
+                    }
                     let parent_ready = match studies[at].source() {
                         Some(crate::studies::StudySource::Study { id, .. }) => ids
                             .iter()
@@ -645,7 +720,7 @@ mod tests {
     use crate::studies::Indicator;
     use crate::studies::{InputValue, RSI, SMA, StudyError, StudySource};
     use crate::widget::test_frames::frame;
-    use crate::widget::{Chart, SeriesId, test_frames::shapes};
+    use crate::widget::{Chart, CursorDataPolicy, SeriesId, test_frames::shapes};
     use chrono::{DateTime, Duration, TimeDelta, Utc};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -963,6 +1038,9 @@ mod tests {
         fn set_visible(&mut self, visible: bool) {
             self.0.set_visible(visible);
         }
+        fn is_visible(&self) -> bool {
+            self.0.is_visible()
+        }
         fn clone_box(&self) -> Box<dyn Indicator> {
             Box::new(Counted(self.0.clone(), Arc::clone(&self.1), self.2))
         }
@@ -1063,6 +1141,81 @@ mod tests {
                 format!("{:?}", fresh.values())
             );
         }
+    }
+
+    /// A hidden study that no visible study reads runs nothing after new bars and asks for no
+    /// frame; it catches up when shown. A hidden one a visible study reads keeps running.
+    #[test]
+    fn a_hidden_study_runs_only_for_a_visible_reader() {
+        let mut chart = Chart::new(BarData::from_bars(
+            (0..40).map(|i| bar(i * 60, 100.0 + i as f64)).collect(),
+        ));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hidden = chart.add_indicator(Box::new(Counted(
+            RSI::new(2),
+            Arc::clone(&calls),
+            std::time::Duration::ZERO,
+        )));
+        for k in 0..3 {
+            chart.refresh_studies(k as f64);
+        }
+        assert!(calls.load(Ordering::Relaxed) > 0, "a shown study runs");
+        chart.set_indicator_visible(hidden, false);
+        calls.store(0, Ordering::Relaxed);
+        chart.update(SeriesId::MAIN, bar(40 * 60, 200.0));
+        assert_eq!(
+            chart.refresh_studies(3.0),
+            None,
+            "a hidden study asks for no frame"
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        chart.set_indicator_visible(hidden, true);
+        chart.refresh_studies(4.0);
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "shown again, it catches up");
+
+        // A visible study reads the hidden one's values, so that one keeps calculating.
+        let source_calls = Arc::new(AtomicUsize::new(0));
+        let parent = chart.add_indicator(Box::new(Counted(
+            RSI::new(2),
+            Arc::clone(&source_calls),
+            std::time::Duration::ZERO,
+        )));
+        let reader = chart.add_indicator(Box::new(SMA::new(1)));
+        chart
+            .set_indicator_source(
+                reader,
+                StudySource::Study {
+                    id: parent.0,
+                    plot: 0,
+                },
+            )
+            .unwrap();
+        for k in 0..4 {
+            chart.refresh_studies(5.0 + k as f64);
+        }
+        chart.set_indicator_visible(parent, false);
+        source_calls.store(0, Ordering::Relaxed);
+        chart.update(SeriesId::MAIN, bar(41 * 60, 300.0));
+        for k in 0..3 {
+            chart.refresh_studies(9.0 + k as f64);
+        }
+        assert!(
+            source_calls.load(Ordering::Relaxed) > 0,
+            "a visible reader keeps a hidden source running"
+        );
+
+        // A host whose cursor payloads include hidden values keeps every study fresh.
+        chart.set_cursor_data_policy(CursorDataPolicy::IncludeHidden);
+        chart.set_indicator_visible(hidden, false);
+        calls.store(0, Ordering::Relaxed);
+        chart.update(SeriesId::MAIN, bar(42 * 60, 400.0));
+        for k in 0..3 {
+            chart.refresh_studies(13.0 + k as f64);
+        }
+        assert!(
+            calls.load(Ordering::Relaxed) > 0,
+            "included hidden values keep a hidden study running"
+        );
     }
 
     /// The real cost advances the frame clock: re-arming from the frame start would make

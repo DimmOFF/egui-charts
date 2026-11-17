@@ -358,7 +358,7 @@ pub(super) struct HostEvents {
     time_scale_size: egui::Vec2,
     pointer: Option<ChartPointer>,
     kind: Option<PointerKind>,
-    cursor_data_policy: CursorDataPolicy,
+    pub(super) cursor_data_policy: CursorDataPolicy,
     click_frames: [Option<u64>; 3],
     input_frame: Option<u64>,
     pointer_touch: Option<(egui::TouchDeviceId, egui::TouchId)>,

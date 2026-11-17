@@ -86,14 +86,19 @@ impl Terminal {
         if let Some(error) = self.top_toolbar.layout_menu.take_error() {
             self.toasts.error(error);
         }
-        let edits = self
-            .charts
-            .iter()
-            .map(Chart::edit_count)
-            .fold(self.layouts.grid_edits, u64::wrapping_add);
+        let edits = self.layout_edits();
         if self.top_toolbar.layout_menu.autosave_due(ctx, edits) {
             self.save_layout();
         }
+    }
+
+    /// The chart and grid edits of the layouts on show, which autosave compares with the count it
+    /// saved.
+    pub(super) fn layout_edits(&self) -> u64 {
+        self.charts
+            .iter()
+            .map(Chart::edit_count)
+            .fold(self.layouts.grid_edits, u64::wrapping_add)
     }
 
     pub(super) fn layouts_show(&mut self, ui: &mut egui::Ui, region: Region) {
@@ -360,13 +365,9 @@ impl Terminal {
         if index == self.layouts.tab {
             return;
         }
-        // Autosave keeps stored layouts current; it does not store the ones never saved.
-        let menu = &self.top_toolbar.layout_menu;
-        if menu.autosave
-            && menu
-                .layouts
-                .contains(&self.layouts.tabs[self.layouts.tab].name)
-        {
+        // Autosave keeps stored layouts current and stores a layout never saved before, such as
+        // the unnamed one, the first time it leaves the screen.
+        if self.top_toolbar.layout_menu.autosave {
             self.save_layout();
         }
         self.layout_stop_replay();
@@ -514,7 +515,7 @@ impl Terminal {
     }
 
     /// Saves the layout on show under its tab's name.
-    fn save_layout(&mut self) {
+    pub(super) fn save_layout(&mut self) {
         let name = self.layouts.tabs[self.layouts.tab].name.clone();
         match self.capture_layout() {
             Ok(layout) => self.top_toolbar.layout_menu.save(&name, &layout),
@@ -732,8 +733,8 @@ mod tests {
         let names: Vec<_> = terminal.layouts.tabs.iter().map(|tab| &*tab.name).collect();
         assert_eq!(names, ["Unnamed", "Unnamed 2"]);
         assert!(
-            storage.get(StoreKind::Layouts, "Unnamed").is_none(),
-            "autosave does not store a layout that was never saved"
+            storage.get(StoreKind::Layouts, "Unnamed").is_some(),
+            "autosave stores the layout it leaves, though it was never saved"
         );
         assert!(
             terminal
@@ -951,9 +952,35 @@ mod tests {
         );
     }
 
+    /// Closing saves the layout on show, unnamed or not, even when the autosave delay has not
+    /// passed, and the flush waits for the write.
     #[test]
-    fn saved_layouts_open_again_and_after_a_restart() {
+    fn closing_writes_the_open_layout() {
         let storage = Arc::new(MemoryStorage::default());
+        let mut terminal = new_terminal(&storage);
+        settle(&mut terminal);
+        terminal.top_toolbar.layout_menu.autosave = true;
+        terminal
+            .chart_mut()
+            .user_action(|chart| chart.config_mut().show_grid = false);
+        assert!(!terminal.flush_storage(), "the write is still pending");
+        // The host keeps calling this every frame until it is answered.
+        for _ in 0..2 {
+            frame(&mut terminal, SIZE, vec![]);
+            if terminal.flush_storage() {
+                break;
+            }
+        }
+        assert!(terminal.flush_storage(), "the close waits for the write");
+        let document = storage
+            .get(StoreKind::Layouts, "Unnamed")
+            .expect("the open layout is stored on close");
+        let layout = SavedLayout::from_json(&document).unwrap();
+        assert!(!layout.charts[0].config.as_ref().unwrap().show_grid);
+    }
+
+    #[test]
+    fn saved_layouts_open_again_and_after_a_restart() {        let storage = Arc::new(MemoryStorage::default());
         let mut terminal = new_terminal(&storage);
         settle(&mut terminal);
         layout(

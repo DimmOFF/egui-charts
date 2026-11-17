@@ -222,10 +222,10 @@ impl Terminal {
         self
     }
 
-    /// Writes changed drawings and settings now and retries failed writes, taking in the answers
-    /// storage gave already without waiting for others. Returns `true` once storage has
-    /// acknowledged the drawings of every chart and the settings, and at once without
-    /// [`with_storage`](Self::with_storage).
+    /// Writes changed drawings, settings and the open layout now and retries failed writes,
+    /// taking in the answers storage gave already without waiting for others. Returns `true`
+    /// once storage has acknowledged the drawings of every chart, the settings and the layout
+    /// writes, and at once without [`with_storage`](Self::with_storage).
     ///
     /// Dropping the terminal does this once without waiting, so a write queued behind an
     /// unanswered one is lost. To keep every edit, a host waits for `true` before it lets the
@@ -236,6 +236,14 @@ impl Terminal {
     /// read and a storage conflict the user has not settled keep it `false`.
     pub fn flush_storage(&mut self) -> bool {
         let mut flushed = true;
+        // A close keeps the open layout current; the autosave delay may not have passed.
+        let edits = self.layout_edits();
+        if self.top_toolbar.layout_menu.autosave
+            && self.top_toolbar.layout_menu.unsaved_edits(edits)
+        {
+            self.save_layout();
+        }
+        flushed &= self.top_toolbar.layout_menu.is_idle();
         if self.settings.is_some() {
             let current = self.user_settings();
             if let Some(settings) = &mut self.settings {

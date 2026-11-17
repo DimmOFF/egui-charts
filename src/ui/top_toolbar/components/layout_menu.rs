@@ -429,8 +429,9 @@ impl LayoutMenu {
 
     /// Call every frame with a count that changes whenever the layout does, such as the sum of
     /// [`Chart::edit_count`](crate::widget::Chart::edit_count) over its charts. Returns `true`
-    /// when the host should save the current layout: autosave is on, the layout is stored, and
-    /// the count changed and then stayed the same for [`AUTOSAVE_DELAY`](Self::AUTOSAVE_DELAY).
+    /// when the host should save the current layout: autosave is on and the count changed and
+    /// then stayed the same for [`AUTOSAVE_DELAY`](Self::AUTOSAVE_DELAY). The first save of a
+    /// layout never saved, such as the unnamed one the terminal opens with, stores it.
     pub fn autosave_due(&mut self, ctx: &egui::Context, edits: u64) -> bool {
         self.edits = edits;
         if self.observed_layout != self.curr_layout {
@@ -439,11 +440,7 @@ impl LayoutMenu {
             self.changed = None;
         }
         let saved = *self.saved_edits.get_or_insert(edits);
-        let stored = self
-            .curr_layout
-            .as_ref()
-            .is_some_and(|name| self.layouts.contains(name));
-        if !self.autosave || !stored || self.storage.is_none() || edits == saved {
+        if !self.autosave || self.storage.is_none() || edits == saved {
             self.changed = None;
             return false;
         }
@@ -462,6 +459,17 @@ impl LayoutMenu {
         }
         self.changed = None;
         true
+    }
+
+    /// Whether autosave left `edits`, the layout's current edit count, unsaved, as a close
+    /// should save them.
+    pub fn unsaved_edits(&self, edits: u64) -> bool {
+        self.saved_edits != Some(edits)
+    }
+
+    /// Whether storage has every request answered, so a closing host can stop waiting.
+    pub fn is_idle(&self) -> bool {
+        self.pending.is_none() && self.requests.is_empty()
     }
 
     /// The error of a failed storage request since the last call, to show to the user.

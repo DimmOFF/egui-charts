@@ -556,11 +556,22 @@ impl<'a> Evaluator<'a> {
                     }
                 }
             }
+            // TradingView draws only the cells a script wrote: a row with nothing in it collapses
+            // instead of leaving an empty box of grid lines.
+            let written =
+                |cell: &StudyCell| matches!(cell, StudyCell::Text(text) if !text.is_empty());
+            let keep: Vec<bool> = (0..cells.len())
+                .map(|row| {
+                    cells[row].iter().any(written)
+                        || cell_bg[row].iter().any(Option::is_some)
+                        || cell_text[row].iter().any(Option::is_some)
+                })
+                .collect();
             let mut table = StudyTable::default();
-            table.rows = cells;
-            table.cell_bg = cell_bg;
-            table.cell_text = cell_text;
-            table.cell_align = cell_align;
+            table.rows = retain_rows(cells, &keep);
+            table.cell_bg = retain_rows(cell_bg, &keep);
+            table.cell_text = retain_rows(cell_text, &keep);
+            table.cell_align = retain_rows(cell_align, &keep);
             table.border_color = fields.get("__border").and_then(Value::color);
             table.bg = fields.get("__bg").and_then(Value::color);
             table.position = table_position(fields.get("__position").and_then(Value::text));
@@ -3915,6 +3926,14 @@ fn line_pattern(value: &Value) -> egui_charts::model::LineStyle {
     }
 }
 
+/// Keeps the rows flagged in `keep`, in order; rows past the end of `keep` stay.
+fn retain_rows<T>(rows: Vec<Vec<T>>, keep: &[bool]) -> Vec<Vec<T>> {
+    rows.into_iter()
+        .zip(keep.iter().copied().chain(std::iter::repeat(true)))
+        .filter_map(|(row, keep)| keep.then_some(row))
+        .collect()
+}
+
 /// The Pine `position.*` corner a table sits in, as the path or the member's bare name.
 fn table_position(name: Option<&str>) -> TablePosition {
     let name = name.map(|name| name.strip_prefix("position.").unwrap_or(name));
@@ -4445,6 +4464,25 @@ mod tests {
             .flatten()
             .all(|align| *align == egui::Align2::CENTER_CENTER));
         assert_eq!(table.position, TablePosition::TopRight);
+    }
+
+    #[test]
+    fn a_table_drops_the_rows_the_script_never_wrote() {
+        let output = run(
+            "indicator(\"T\")\nvar table t = table.new(position.top_right, 2, 4, border_color=color.gray)\ntable.cell(t, 0, 0, \"A\")\ntable.cell(t, 1, 0, \"B\")\ntable.cell(t, 0, 2, \"C\", bgcolor=color.red)\nplot(close)\n",
+            &[1.0],
+        );
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let table = output.tables.first().expect("a table with cells");
+        // Rows 1 and 3 stay empty, so they collapse as they do on TradingView.
+        assert_eq!(
+            table.rows,
+            vec![
+                vec![StudyCell::Text("A".into()), StudyCell::Text("B".into())],
+                vec![StudyCell::Text("C".into()), StudyCell::Text(String::new())]
+            ]
+        );
+        assert_eq!(table.cell_bg, vec![vec![None, None], vec![Some(Color32::RED), None]]);
     }
 
     #[test]

@@ -253,7 +253,13 @@ pub(crate) fn paint(
         size,
     );
     let painter = painter.with_clip_rect(bounds.intersect(ui.clip_rect()));
-    painter.rect_filled(bounds, 3.0, table.bg.unwrap_or(theme.ui.panel_bg_floating));
+    // A Pine table without `bgcolor` is transparent, as TradingView draws it; a built-in table
+    // always gets a panel behind it.
+    if let Some(bg) = table.bg {
+        painter.rect_filled(bounds, 3.0, bg);
+    } else if !table.columns.is_empty() {
+        painter.rect_filled(bounds, 3.0, theme.ui.panel_bg_floating);
+    }
     // A table with a header colour frames itself in white, as its rows are coloured; a bordered
     // Pine table keeps its own colour, and a titled table the theme's border.
     let frame = table.border_color.or_else(|| {

@@ -343,6 +343,9 @@ pub(crate) fn mapped_drawings(
                 drawing.stroke_width = style.width;
                 drawing.line_style = style.pattern;
             }
+            // A study builds its drawings again on every calculation, so a theme shade would
+            // recolour the studies saved before it; they draw the colours their inputs set.
+            drawing.theme_shade = false;
             drawing.update_screen_coords(|bar: f32| coords.index_to_x(f64::from(bar)), &price_to_y);
             drawing
         })
@@ -366,6 +369,7 @@ pub(crate) fn paint_drawings(
         bars: &[],
         revision: 0,
         bar_to_x: &bar_to_x,
+        bar_spacing: coords.bar_spacing,
         price_to_y: &price_to_y,
         y_to_price: &|y| price.y_to_price(y),
         time_axis: false,

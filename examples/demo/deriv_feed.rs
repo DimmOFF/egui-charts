@@ -105,17 +105,15 @@ impl DerivFeed {
                 if ![open, high, low, close].iter().all(|p| p.is_finite()) {
                     return None;
                 }
-                Some(Bar {
-                    time: Utc.timestamp_opt(epoch, 0).single()?,
+                Some(Bar::new(
+                    Utc.timestamp_opt(epoch, 0).single()?,
                     open,
                     high,
                     low,
                     close,
                     // Deriv's public candle response does not include volume.
-                    volume: 0.0,
-                    colors: None,
-                    payload: None,
-                })
+                    0.0,
+                ))
             })
             .collect()
     }

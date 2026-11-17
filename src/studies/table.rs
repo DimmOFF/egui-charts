@@ -1,7 +1,8 @@
-//! Labelled study tables, independent of bar-indexed plots.
+﻿//! Labelled study tables, independent of bar-indexed plots.
 
 /// A cell in a study table.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum StudyCell {
     /// A row label or other text.
     Text(String),
@@ -9,8 +10,9 @@ pub enum StudyCell {
     Percent(Option<f64>),
 }
 
-/// A labelled table drawn in the lower right of the study's pane.
+/// A labelled table drawn in a corner, an edge or the middle of the study's pane.
 #[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct StudyTable {
     /// Caption above the column headings.
     pub title: String,
@@ -28,43 +30,125 @@ pub struct StudyTable {
     pub border_color: Option<egui::Color32>,
     /// The table's own fill, from a Pine table's `bgcolor`; `None` uses the theme.
     pub bg: Option<egui::Color32>,
-    /// The pane corner or edge the table sits in.
-    pub position: StudyTablePosition,
+    /// Background of every cell of each row, in row order. Rows past its end, and every row
+    /// when it is empty, keep the default cell background.
+    pub cell_colors: Vec<egui::Color32>,
+    /// Background of the column headings, which also frames the table in white, or `None` for
+    /// the default.
+    pub header_color: Option<egui::Color32>,
+    /// Text of the column headings and of rows with a background, or `None` for the default.
+    /// Text over a background it does not contrast with turns towards black.
+    pub text_color: Option<egui::Color32>,
+    /// Where the table sits in the pane.
+    pub position: TablePosition,
+    /// Size of the table's text.
+    pub text_size: TableTextSize,
 }
 
-/// Where a study table sits in its pane.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum StudyTablePosition {
-    /// The upper left corner.
+/// Where a study table sits in its pane. The `Debug` names are the choices study inputs list. The
+/// set is closed: the nine places of a three by three grid.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum TablePosition {
+    /// Upper left corner.
     TopLeft,
-    /// The top edge, centred.
+    /// Middle of the upper edge.
     TopCenter,
-    /// The upper right corner.
+    /// Upper right corner.
     TopRight,
-    /// The left edge, centred.
+    /// Middle of the left edge.
     MiddleLeft,
-    /// The centre of the pane.
+    /// Centre of the pane.
     MiddleCenter,
-    /// The right edge, centred.
+    /// Middle of the right edge.
     MiddleRight,
-    /// The lower left corner.
+    /// Lower left corner.
     BottomLeft,
-    /// The bottom edge, centred.
+    /// Middle of the lower edge.
     BottomCenter,
-    /// The lower right corner.
+    /// Lower right corner.
     #[default]
     BottomRight,
 }
 
-#[cfg(feature = "widget")]
-fn rating_color(rating: &str) -> egui::Color32 {
-    match rating {
-        "Strong Buy" => super::palette::BLUE,
-        "Buy" => egui::Color32::from_rgb(91, 156, 246),
-        "Strong Sell" => super::palette::BRIGHT_RED,
-        "Sell" => egui::Color32::from_rgb(239, 154, 154),
-        _ => super::palette::DISABLED,
+impl TablePosition {
+    /// Every position, top row first, each row from left to right.
+    pub const ALL: [Self; 9] = [
+        Self::TopLeft,
+        Self::TopCenter,
+        Self::TopRight,
+        Self::MiddleLeft,
+        Self::MiddleCenter,
+        Self::MiddleRight,
+        Self::BottomLeft,
+        Self::BottomCenter,
+        Self::BottomRight,
+    ];
+}
+
+impl std::fmt::Debug for TablePosition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TopLeft => "Top left",
+            Self::TopCenter => "Top center",
+            Self::TopRight => "Top right",
+            Self::MiddleLeft => "Middle left",
+            Self::MiddleCenter => "Middle center",
+            Self::MiddleRight => "Middle right",
+            Self::BottomLeft => "Bottom left",
+            Self::BottomCenter => "Bottom center",
+            Self::BottomRight => "Bottom right",
+        })
+    }
+}
+
+/// The text size of a study table. The `Debug` names are the choices study inputs list.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TableTextSize {
+    /// 8 points.
+    Tiny,
+    /// 10 points.
+    Small,
+    /// 11 points.
+    #[default]
+    Normal,
+    /// 14 points.
+    Large,
+    /// 18 points.
+    Huge,
+}
+
+impl TableTextSize {
+    /// Every size, smallest first.
+    pub const ALL: [Self; 5] = [
+        Self::Tiny,
+        Self::Small,
+        Self::Normal,
+        Self::Large,
+        Self::Huge,
+    ];
+
+    /// The font size in points.
+    pub fn points(self) -> f32 {
+        match self {
+            Self::Tiny => 8.0,
+            Self::Small => 10.0,
+            Self::Normal => 11.0,
+            Self::Large => 14.0,
+            Self::Huge => 18.0,
+        }
+    }
+}
+
+impl std::fmt::Debug for TableTextSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Tiny => "Tiny",
+            Self::Small => "Small",
+            Self::Normal => "Normal",
+            Self::Large => "Large",
+            Self::Huge => "Huge",
+        })
     }
 }
 
@@ -78,10 +162,12 @@ pub(crate) fn paint(
     use crate::theme::ThemeExt;
     use egui::{Align2, FontId, Rect, Stroke, StrokeKind, pos2, vec2};
 
-    let rating_table = table.title == "Technical Ratings";
+    let styled = table.header_color.is_some();
     let painter = ui.painter().clone();
     let theme = ui.active_theme();
-    let font = FontId::proportional(11.0);
+    let font = FontId::proportional(table.text_size.points());
+    // Rows are twice the font size high: 22 points at the normal size.
+    let row_height = 2.0 * table.text_size.points();
     let text = |cell: &StudyCell| match cell {
         StudyCell::Text(text) => text.clone(),
         StudyCell::Percent(Some(value)) if value.is_finite() => format!("{value:+.2}%"),
@@ -116,10 +202,14 @@ pub(crate) fn paint(
     // A Pine table has no caption, while a built-in one is titled and keeps to half the pane
     // so it leaves the chart readable. A Pine table is sized by its script, so it may fill the
     // room the legend leaves.
-    let caption = if table.title.is_empty() { 0.0 } else { 22.0 };
+    let caption = if table.title.is_empty() {
+        0.0
+    } else {
+        row_height
+    };
     // A Pine table declares no heading row; a built-in one names its columns instead.
     let headings = usize::from(!table.columns.is_empty());
-    let height = 22.0 * (table.rows.len() + headings) as f32 + caption;
+    let height = row_height * (table.rows.len() + headings) as f32 + caption;
     let mut available = rect.shrink(8.0);
     available.min.y += 24.0;
     if !available.is_positive() || rect.height() < 44.0 {
@@ -144,15 +234,15 @@ pub(crate) fn paint(
         height.min(available.height()).min(limit),
     );
     let (align_x, align_y) = match table.position {
-        StudyTablePosition::TopLeft => (0.0, 0.0),
-        StudyTablePosition::TopCenter => (0.5, 0.0),
-        StudyTablePosition::TopRight => (1.0, 0.0),
-        StudyTablePosition::MiddleLeft => (0.0, 0.5),
-        StudyTablePosition::MiddleCenter => (0.5, 0.5),
-        StudyTablePosition::MiddleRight => (1.0, 0.5),
-        StudyTablePosition::BottomLeft => (0.0, 1.0),
-        StudyTablePosition::BottomCenter => (0.5, 1.0),
-        StudyTablePosition::BottomRight => (1.0, 1.0),
+        TablePosition::TopLeft => (0.0, 0.0),
+        TablePosition::TopCenter => (0.5, 0.0),
+        TablePosition::TopRight => (1.0, 0.0),
+        TablePosition::MiddleLeft => (0.0, 0.5),
+        TablePosition::MiddleCenter => (0.5, 0.5),
+        TablePosition::MiddleRight => (1.0, 0.5),
+        TablePosition::BottomLeft => (0.0, 1.0),
+        TablePosition::BottomCenter => (0.5, 1.0),
+        TablePosition::BottomRight => (1.0, 1.0),
     };
     let bounds = Rect::from_min_size(
         available.min
@@ -163,32 +253,27 @@ pub(crate) fn paint(
         size,
     );
     let painter = painter.with_clip_rect(bounds.intersect(ui.clip_rect()));
-    painter.rect_filled(
-        bounds,
-        3.0,
-        table.bg.unwrap_or(theme.ui.panel_bg_floating),
-    );
-    let border = table
-        .border_color
-        .or((!table.title.is_empty()).then_some(theme.ui.border));
-    if let Some(color) = border {
+    painter.rect_filled(bounds, 3.0, table.bg.unwrap_or(theme.ui.panel_bg_floating));
+    // A table with a header colour frames itself in white, as its rows are coloured; a bordered
+    // Pine table keeps its own colour, and a titled table the theme's border.
+    let frame = table.border_color.or_else(|| {
+        (styled || !table.title.is_empty()).then_some(if styled {
+            egui::Color32::WHITE
+        } else {
+            theme.ui.border
+        })
+    });
+    if let Some(color) = frame {
         painter.rect_stroke(
             bounds,
             3.0,
-            Stroke::new(
-                if rating_table { 2.0 } else { 1.0 },
-                if rating_table {
-                    egui::Color32::WHITE
-                } else {
-                    color
-                },
-            ),
+            Stroke::new(if styled { 2.0 } else { 1.0 }, color),
             StrokeKind::Inside,
         );
     }
     if caption > 0.0 {
         painter.text(
-            bounds.min + vec2(8.0, 11.0),
+            bounds.min + vec2(8.0, caption / 2.0),
             Align2::LEFT_CENTER,
             &table.title,
             font.clone(),
@@ -220,7 +305,7 @@ pub(crate) fn paint(
                 // The heading row is synthesised above `rows`, so data colours shift by one.
                 let data_row = row_index.checked_sub(headings);
                 for (column, (cell, width)) in row.iter().zip(&widths).enumerate() {
-                    let cell_rect = Rect::from_min_size(pos2(x, y), vec2(*width, 22.0));
+                    let cell_rect = Rect::from_min_size(pos2(x, y), vec2(*width, row_height));
                     let own = |colors: &Vec<Vec<Option<egui::Color32>>>| {
                         data_row
                             .and_then(|row| colors.get(row))
@@ -230,78 +315,64 @@ pub(crate) fn paint(
                     };
                     let bg = own(&table.cell_bg);
                     let ink = own(&table.cell_text);
-                    let mut color = match cell {
-                        _ if rating_table && row_index == 0 => {
-                            painter.rect_filled(
-                                cell_rect,
-                                0.0,
-                                egui::Color32::from_rgb(41, 91, 121),
-                            );
-                            egui::Color32::WHITE
-                        }
-                        _ if rating_table => {
-                            let rating = match row.get(2) {
-                                Some(StudyCell::Text(text)) => text.as_str(),
-                                _ => "Neutral",
-                            };
-                            let fill = rating_color(rating);
-                            painter.rect_filled(cell_rect, 0.0, fill);
+                    let fill = match row_index {
+                        0 => table.header_color,
+                        row => table.cell_colors.get(row - 1).copied(),
+                    };
+                    let mut color = if let Some(fill) = fill {
+                        painter.rect_filled(cell_rect, 0.0, fill);
+                        if row_index > 0 {
                             painter.rect_stroke(
                                 cell_rect,
                                 0.0,
                                 Stroke::new(1.0, egui::Color32::WHITE),
                                 StrokeKind::Inside,
                             );
-                            crate::theme::readable_color(
-                                egui::Color32::WHITE,
-                                egui::Color32::BLACK,
-                                &[fill],
-                                4.5,
-                            )
                         }
-                        StudyCell::Percent(Some(value)) if value.is_finite() => {
-                            let color = if *value >= 0.0 {
-                                egui::Color32::from_rgb(8, 153, 129)
-                            } else {
-                                egui::Color32::from_rgb(242, 55, 69)
-                            };
-                            let tint = color.gamma_multiply(
-                                0.1 + if table.title == "Seasonality" {
-                                    0.4
+                        let text = table.text_color.unwrap_or(egui::Color32::WHITE);
+                        crate::theme::readable_color(text, egui::Color32::BLACK, &[fill], 4.5)
+                    } else {
+                        match cell {
+                            StudyCell::Percent(Some(value)) if value.is_finite() => {
+                                let color = if *value >= 0.0 {
+                                    egui::Color32::from_rgb(8, 153, 129)
                                 } else {
-                                    0.2
-                                } * (value.abs() / 10.0).min(1.0) as f32,
-                            );
-                            painter.rect_filled(
-                                Rect::from_min_size(pos2(x, y), vec2(*width, 22.0)),
-                                0.0,
-                                tint,
-                            );
-                            crate::theme::readable_color(
-                                color,
-                                theme.ui.text,
-                                &[theme.ui.panel_bg_floating.blend(tint)],
-                                4.5,
-                            )
-                        }
-                        _ if matches!(table.title.as_str(), "Performance" | "Seasonality") => {
-                            let alpha = if matches!(cell, StudyCell::Percent(None)) {
-                                if table.title == "Seasonality" {
-                                    128
+                                    egui::Color32::from_rgb(242, 55, 69)
+                                };
+                                let tint = color.gamma_multiply(
+                                    0.1 + if table.title == "Seasonality" {
+                                        0.4
+                                    } else {
+                                        0.2
+                                    } * (value.abs() / 10.0).min(1.0) as f32,
+                                );
+                                painter.rect_filled(cell_rect, 0.0, tint);
+                                crate::theme::readable_color(
+                                    color,
+                                    theme.ui.text,
+                                    &[theme.ui.panel_bg_floating.blend(tint)],
+                                    4.5,
+                                )
+                            }
+                            _ if matches!(table.title.as_str(), "Performance" | "Seasonality") => {
+                                let alpha = if matches!(cell, StudyCell::Percent(None)) {
+                                    if table.title == "Seasonality" {
+                                        128
+                                    } else {
+                                        26
+                                    }
                                 } else {
-                                    26
-                                }
-                            } else {
-                                51
-                            };
-                            painter.rect_filled(
-                                cell_rect,
-                                0.0,
-                                egui::Color32::from_rgba_unmultiplied(120, 123, 134, alpha),
-                            );
-                            theme.ui.text
+                                    51
+                                };
+                                painter.rect_filled(
+                                    cell_rect,
+                                    0.0,
+                                    egui::Color32::from_rgba_unmultiplied(120, 123, 134, alpha),
+                                );
+                                theme.ui.text
+                            }
+                            _ => theme.ui.text,
                         }
-                        _ => theme.ui.text,
                     };
                     if let Some(bg) = bg {
                         painter.rect_filled(cell_rect, 0.0, bg);
@@ -324,7 +395,7 @@ pub(crate) fn paint(
                     );
                     x += width;
                 }
-                y += 22.0;
+                y += row_height;
             }
             // shortcut: every grid line is one pixel, until a script asks for a wider border.
             if let Some(color) = table.border_color {
@@ -335,11 +406,20 @@ pub(crate) fn paint(
                     painter.vline(x, content.y_range(), stroke);
                 }
                 for row in 1..(table.rows.len() + headings) {
-                    painter.hline(content.x_range(), content.top() + 22.0 * row as f32, stroke);
+                    painter.hline(content.x_range(), content.top() + row_height * row as f32, stroke);
                 }
             }
         });
-    bounds
+    if matches!(
+        table.position,
+        TablePosition::BottomLeft | TablePosition::BottomCenter | TablePosition::BottomRight
+    ) {
+        bounds
+    } else {
+        // shortcut: only tables at the bottom stack upwards, so two tables at the top or in the
+        // middle of one pane overlap; give them their own stacks when a pane needs several.
+        Rect::from_min_size(pos2(rect.min.x, rect.max.y + 8.0), egui::Vec2::ZERO)
+    }
 }
 
 /// Paints the tables of one or more studies into a pane: each table sits in the corner it asks
@@ -349,7 +429,7 @@ pub(crate) fn paint(
 #[cfg(feature = "widget")]
 #[derive(Default)]
 pub(crate) struct TableStack {
-    corners: Vec<(StudyTablePosition, egui::Rect)>,
+    corners: Vec<(TablePosition, egui::Rect)>,
 }
 
 #[cfg(feature = "widget")]
@@ -401,9 +481,9 @@ mod tests {
             position,
             ..StudyTable::default()
         };
-        let checklist = table("checklist", 8, StudyTablePosition::BottomRight);
-        let watermark = table("watermark", 2, StudyTablePosition::BottomCenter);
-        let stacked = table("stacked", 2, StudyTablePosition::BottomRight);
+        let checklist = table("checklist", 8, TablePosition::BottomRight);
+        let watermark = table("watermark", 2, TablePosition::BottomCenter);
+        let stacked = table("stacked", 2, TablePosition::BottomRight);
         let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
         let ctx = egui::Context::default();
         let output = ctx.run_ui(
@@ -444,12 +524,14 @@ mod tests {
         output.drop_without_applying_deltas();
     }
 
-    /// A narrow or short pane keeps overflowing columns and years within a scrollable table.
+    /// A narrow or short pane keeps overflowing columns and years within a scrollable table, at
+    /// the table's position and text size. Only a table at the bottom takes the space below the
+    /// next table.
     #[test]
     fn overflowing_tables_fit_the_pane() {
         use egui::{Event, MouseWheelUnit, RawInput, Rect, Shape, TouchPhase, vec2};
 
-        let table = StudyTable {
+        let lower_right = StudyTable {
             title: "Seasonality".into(),
             columns: (0..13).map(|i| format!("Column {i}")).collect(),
             rows: (0..40)
@@ -461,14 +543,28 @@ mod tests {
                 .collect(),
             ..StudyTable::default()
         };
-        for (_, theme) in crate::theme::presets() {
+        let upper_left = StudyTable {
+            position: TablePosition::TopLeft,
+            text_size: TableTextSize::Large,
+            ..lower_right.clone()
+        };
+        for ((_, theme), table) in crate::theme::presets()
+            .into_iter()
+            .flat_map(|theme| [(theme.clone(), &lower_right), (theme, &upper_left)])
+        {
+            let top = table.position == TablePosition::TopLeft;
             for width in [240.0, 800.0] {
                 let ctx = egui::Context::default();
                 crate::theme::apply_to_egui(&ctx, &theme);
                 let rect = Rect::from_min_size(egui::Pos2::ZERO, vec2(width, 300.0));
                 for frame in 0..20 {
-                    let mut events =
-                        vec![Event::PointerMoved(rect.right_bottom() - vec2(100.0, 50.0))];
+                    // The wheel scrolls the table under the pointer.
+                    let pointer = if top {
+                        rect.left_top() + vec2(100.0, 100.0)
+                    } else {
+                        rect.right_bottom() - vec2(100.0, 50.0)
+                    };
+                    let mut events = vec![Event::PointerMoved(pointer)];
                     if frame == 1 {
                         events.push(Event::MouseWheel {
                             unit: MouseWheelUnit::Point,
@@ -486,10 +582,28 @@ mod tests {
                             ..Default::default()
                         },
                         |ui| {
-                            let bounds = paint(ui, rect, &table, ui.scope_id().with("table"));
-                            assert!(rect.contains_rect(bounds), "{bounds:?} outside {rect:?}");
+                            let bounds = paint(ui, rect, table, ui.scope_id().with("table"));
+                            if top {
+                                assert_eq!(bounds.top() - 8.0, rect.max.y);
+                            } else {
+                                assert!(rect.contains_rect(bounds), "{bounds:?} outside {rect:?}");
+                            }
                         },
                     );
+                    let title = output
+                        .shapes
+                        .iter()
+                        .find_map(|clipped| match &clipped.shape {
+                            Shape::Text(text) if text.galley.text() == "Seasonality" => Some(text),
+                            _ => None,
+                        });
+                    let title = title.expect("title painted");
+                    assert_eq!(
+                        title.galley.job.sections[0].format.font_id.size,
+                        table.text_size.points()
+                    );
+                    // Below the pane's 8-point margin and its 24-point legend row at the top.
+                    assert_eq!(title.galley.rect.top() + title.pos.y < 50.0, top);
                     if frame == 19 {
                         assert!(output.shapes.iter().any(|clipped| matches!(&clipped.shape,
                             Shape::Text(text) if text.galley.text() == "Last 39"

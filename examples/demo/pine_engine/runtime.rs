@@ -1,4 +1,4 @@
-//! Evaluates a parsed script bar by bar: series and `var` state, user functions, `if` values,
+﻿//! Evaluates a parsed script bar by bar: series and `var` state, user functions, `if` values,
 //! `plot`/`fill`/`plotshape`, and the stateful builtins.
 
 use std::borrow::Cow;
@@ -10,7 +10,7 @@ use chrono::{Datelike, TimeZone, Timelike};
 use egui::Color32;
 use egui_charts::model::Bar;
 use egui_charts::studies::{
-    FillBoundary, PlotType, StudyCell, StudyFill, StudyTable, StudyTablePosition,
+    FillBoundary, PlotType, StudyCell, StudyFill, StudyTable, TablePosition,
 };
 
 use crate::pine_engine::ast;
@@ -556,17 +556,14 @@ impl<'a> Evaluator<'a> {
                     }
                 }
             }
-            let table = StudyTable {
-                title: String::new(),
-                columns: Vec::new(),
-                rows: cells,
-                cell_bg,
-                cell_text,
-                cell_align,
-                border_color: fields.get("__border").and_then(Value::color),
-                bg: fields.get("__bg").and_then(Value::color),
-                position: table_position(fields.get("__position").and_then(Value::text)),
-            };
+            let mut table = StudyTable::default();
+            table.rows = cells;
+            table.cell_bg = cell_bg;
+            table.cell_text = cell_text;
+            table.cell_align = cell_align;
+            table.border_color = fields.get("__border").and_then(Value::color);
+            table.bg = fields.get("__bg").and_then(Value::color);
+            table.position = table_position(fields.get("__position").and_then(Value::text));
             built.push((filled, table));
         }
         built.sort_by_key(|(filled, _)| std::cmp::Reverse(*filled));
@@ -645,7 +642,7 @@ impl<'a> Evaluator<'a> {
                 sticky,
                 reassign,
             } => {
-                // `var x = …` runs on the first bar only; a missing one is `na` until assigned.
+                // `var x = вЂ¦` runs on the first bar only; a missing one is `na` until assigned.
                 // A `var` in a function belongs to its call site and keeps its value between
                 // bars there, as Pine does.
                 if *sticky {
@@ -1229,7 +1226,7 @@ impl<'a> Evaluator<'a> {
                 return Value::Bool(self.context.timeframe.duration_ms() < 60_000);
             }
             "timeframe.isminutes" => {
-                // Pine spells every intraday interval in minutes — "60", "240" — so it counts.
+                // Pine spells every intraday interval in minutes вЂ” "60", "240" вЂ” so it counts.
                 let duration = self.context.timeframe.duration_ms();
                 return Value::Bool((60_000..86_400_000).contains(&duration));
             }
@@ -2048,7 +2045,7 @@ impl<'a> Evaluator<'a> {
             {
                 return result;
             }
-            // A method on `na` — an empty array's `pop()`, an empty box list's `get(0)` — is a
+            // A method on `na` вЂ” an empty array's `pop()`, an empty box list's `get(0)` вЂ” is a
             // no-op rather than a syntax the editor should report.
             if matches!(value, Value::Na) {
                 return Value::Na;
@@ -3676,7 +3673,7 @@ fn ta_arguments(name: &str, args: &[Arg], values: Vec<Value>) -> Vec<Value> {
         slots[at] = Some(value);
     }
     let mut values: Vec<Value> = slots.into_iter().map(|slot| slot.unwrap_or(Value::Na)).collect();
-    // `ta.pivothigh(leftbars=…, rightbars=…)` leaves out the source, which the two-argument form
+    // `ta.pivothigh(leftbars=вЂ¦, rightbars=вЂ¦)` leaves out the source, which the two-argument form
     // takes from the bar instead.
     if matches!(name, "pivothigh" | "pivotlow") {
         while values.len() > 2 && values.first().is_some_and(|value| matches!(value, Value::Na)) {
@@ -3885,18 +3882,18 @@ fn pine_multiplier(timeframe: egui_charts::model::Timeframe) -> f64 {
 /// The glyph a `shape.*` style draws: the chart paints study `plotshape` marks as text labels.
 fn shape_glyph(style: &str) -> String {
     match style {
-        "triangleup" => "▲",
-        "triangledown" => "▼",
-        "circle" => "●",
-        "cross" | "xcross" => "✕",
-        "diamond" => "◆",
-        "square" => "■",
-        "flag" => "⚑",
-        "arrowup" => "↑",
-        "arrowdown" => "↓",
+        "triangleup" => "в–І",
+        "triangledown" => "в–ј",
+        "circle" => "в—Џ",
+        "cross" | "xcross" => "вњ•",
+        "diamond" => "в—†",
+        "square" => "в– ",
+        "flag" => "вљ‘",
+        "arrowup" => "в†‘",
+        "arrowdown" => "в†“",
         // `shape.labelup` and `shape.labeldown` draw their `text=` alone.
         "labelup" | "labeldown" => "",
-        _ => "✕",
+        _ => "вњ•",
     }
     .to_owned()
 }
@@ -3919,18 +3916,18 @@ fn line_pattern(value: &Value) -> egui_charts::model::LineStyle {
 }
 
 /// The Pine `position.*` corner a table sits in, as the path or the member's bare name.
-fn table_position(name: Option<&str>) -> StudyTablePosition {
+fn table_position(name: Option<&str>) -> TablePosition {
     let name = name.map(|name| name.strip_prefix("position.").unwrap_or(name));
     match name {
-        Some("top_left") => StudyTablePosition::TopLeft,
-        Some("top_center") => StudyTablePosition::TopCenter,
-        Some("top_right") => StudyTablePosition::TopRight,
-        Some("middle_left") => StudyTablePosition::MiddleLeft,
-        Some("middle_center") => StudyTablePosition::MiddleCenter,
-        Some("middle_right") => StudyTablePosition::MiddleRight,
-        Some("bottom_left") => StudyTablePosition::BottomLeft,
-        Some("bottom_center") => StudyTablePosition::BottomCenter,
-        _ => StudyTablePosition::BottomRight,
+        Some("top_left") => TablePosition::TopLeft,
+        Some("top_center") => TablePosition::TopCenter,
+        Some("top_right") => TablePosition::TopRight,
+        Some("middle_left") => TablePosition::MiddleLeft,
+        Some("middle_center") => TablePosition::MiddleCenter,
+        Some("middle_right") => TablePosition::MiddleRight,
+        Some("bottom_left") => TablePosition::BottomLeft,
+        Some("bottom_center") => TablePosition::BottomCenter,
+        _ => TablePosition::BottomRight,
     }
 }
 
@@ -4447,7 +4444,7 @@ mod tests {
             .iter()
             .flatten()
             .all(|align| *align == egui::Align2::CENTER_CENTER));
-        assert_eq!(table.position, StudyTablePosition::TopRight);
+        assert_eq!(table.position, TablePosition::TopRight);
     }
 
     #[test]
@@ -4473,7 +4470,7 @@ mod tests {
             "indicator(\"T\")\ntp = position.middle_right\nvar table t = table.new(tp, 1, 1)\ntable.cell(t, 0, 0, \"x\")\nplot(close)\n",
             &[1.0],
         );
-        assert_eq!(output.tables[0].position, StudyTablePosition::MiddleRight);
+        assert_eq!(output.tables[0].position, TablePosition::MiddleRight);
     }
 
     #[test]
@@ -4738,7 +4735,7 @@ mod tests {
             "indicator(\"T\")\nplotshape(true, style=shape.triangleup, location=location.belowbar)\nplotchar(true, char=\"A\", text=\"Mon\")\n",
             &[1.0],
         );
-        assert_eq!(output.shapes[0].text, "▲");
+        assert_eq!(output.shapes[0].text, "в–І");
         assert_eq!(output.shapes[1].text, "Mon");
         assert_eq!(output.shapes[1].font_size, 12.0);
     }
@@ -5194,7 +5191,7 @@ plot(dayofweek.monday == 2 ? 1 : 0)
     fn a_label_keeps_its_line_breaks_and_placement() {
         use egui_charts::drawings::TextAnchor;
         let output = run(
-            "indicator(\"T\")\nlabel.new(bar_index, high, \"4H\\n(1:02)\", style = label.style_label_down)\nlabel.new(bar_index, low, \"●\", style = label.style_label_up)\n",
+            "indicator(\"T\")\nlabel.new(bar_index, high, \"4H\\n(1:02)\", style = label.style_label_down)\nlabel.new(bar_index, low, \"в—Џ\", style = label.style_label_up)\n",
             &[1.0, 2.0],
         );
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
@@ -5203,7 +5200,7 @@ plot(dayofweek.monday == 2 ? 1 : 0)
         };
         assert_eq!(above.text, "4H\n(1:02)");
         assert_eq!(above.text_anchor, TextAnchor::Above);
-        assert_eq!(below.text, "●");
+        assert_eq!(below.text, "в—Џ");
         assert_eq!(below.text_anchor, TextAnchor::Below);
     }
 
@@ -5959,7 +5956,7 @@ plot(close)
         let output = run(script, &[10.0, 11.0]);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let table = output.tables.first().expect("the table has cells");
-        assert_eq!(table.position, StudyTablePosition::BottomLeft);
+        assert_eq!(table.position, TablePosition::BottomLeft);
         assert_eq!(
             table.rows,
             [

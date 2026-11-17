@@ -318,10 +318,15 @@ impl DrawingProps {
                     position_target_color,
                     position_stop_color,
                     position_style,
+                    marker.show_text,
+                    marker.glyph,
+                    marker.show_glyph,
+                    marker.glyph_color,
                     volume_profile,
                     regression_trend,
                     vwap,
                     channel_midline,
+                    theme_shade,
                     line_measurements.price_change,
                     line_measurements.percent_change,
                     line_measurements.pip_change,
@@ -359,6 +364,12 @@ impl DrawingProps {
                         let edited = settings.fibonacci_config();
                         let mut config = drawing.fibonacci_config().into_owned();
                         config.apply_edits(&original, &edited);
+                        // An edited fan saved before it had time levels takes the current look.
+                        if drawing.tool_type == crate::drawings::DrawingToolType::FibonacciSpeedFan
+                            && config.time_levels.is_none()
+                        {
+                            config.time_levels = Some(config.levels.clone());
+                        }
                         drawing.fib_config = Some(config);
                     } else {
                         drawing.fib_config.clone_from(&settings.fib_config);
@@ -479,6 +490,9 @@ impl DrawingProps {
             }
             if !settings.position_style.is_valid() {
                 return Err("Position line width must be 1 to 100 and font size 1 to 256");
+            }
+            if !settings.marker.is_valid() {
+                return Err("Glyph must be 1 to 32 bytes");
             }
             if !settings.position_sizing.is_valid() {
                 return Err(
@@ -617,10 +631,8 @@ mod tests {
             chart.drawings_mut().select_drawings([7, 8]);
             let mut props = DrawingProps::from_drawing(&chart.drawings().drawings[0], &chart);
             let output = egui::Context::default().run_ui(Default::default(), |ui| {
-                let mut pickers = [
-                    crate::ui_kit::ColorPickerState::new(props.color),
-                    crate::ui_kit::ColorPickerState::new(props.color),
-                ];
+                let mut pickers =
+                    [(); 3].map(|_| crate::ui_kit::ColorPickerState::new(props.color));
                 super::super::tabs::StyleTab::show(
                     ui,
                     &mut props,
@@ -708,6 +720,13 @@ mod tests {
             settings.position_target_color = Some([40, 100, 220, 255]);
             settings.position_stop_color = Some([220, 140, 40, 255]);
             settings.position_style.font_size = 16.0;
+            let marker = crate::drawings::AnnotationMarker {
+                show_text: false,
+                glyph: "🚀".into(),
+                show_glyph: true,
+                glyph_color: Some([7, 8, 9, 255]),
+            };
+            settings.marker = marker.clone();
             settings.volume_profile = VolumeProfileConfig::new(48, 0.8);
             settings.regression_trend = RegressionTrendConfig::new(3.0);
             settings.channel_midline = true;
@@ -781,7 +800,8 @@ mod tests {
             assert_eq!(saved.position_target_color, Some([40, 100, 220, 255]));
             assert_eq!(saved.position_stop_color, Some([220, 140, 40, 255]));
             assert_eq!(saved.position_style.font_size, 16.0);
-            assert_eq!(saved.regression_trend.unwrap().deviations(), 3.0);
+            assert_eq!(saved.marker, marker);
+            assert_eq!(saved.regression_trend.unwrap().upper_deviation(), 3.0);
             assert!(saved.channel_midline);
             assert_eq!(saved.line_measurements, measurements);
             assert!(saved.bars_pattern.unwrap().mirrored);
@@ -1018,6 +1038,19 @@ mod tests {
             assert_eq!(config.levels[1].value, 0.25 + index as f32);
             assert_eq!(config.level_width, 2.0 + index as f32);
         }
+        // A fan saved before it had time levels takes its price levels as time levels, and with
+        // them the current look, on any edit of its settings.
+        let mut fan = Drawing::new(0, DrawingToolType::FibonacciSpeedFan);
+        fan.fib_config.as_mut().unwrap().time_levels = None;
+        chart.drawings_mut().drawings = vec![fan];
+        chart.drawings_mut().select_drawings([0]);
+        let mut props = DrawingProps::from_drawing(&chart.drawings().drawings[0], &chart);
+        let settings = &mut props.tool_settings.as_mut().unwrap().settings;
+        settings.fib_config.as_mut().unwrap().grid_visible = false;
+        let edits = props.edited_drawings(DrawingId(0), &chart).unwrap();
+        let config = edits[0].fib_config.as_ref().unwrap();
+        assert!(!config.grid_visible);
+        assert_eq!(config.time_levels.as_ref(), Some(&config.levels));
         // A rate belongs to an account currency; changing the currency also replaces its rate.
         for currency_changed in [false, true] {
             chart.drawings_mut().drawings = [("EUR", 0.8), ("GBP", 0.6), ("EUR", 0.7)]

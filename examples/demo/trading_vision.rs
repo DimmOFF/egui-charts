@@ -208,11 +208,14 @@ fn build_terminal(
     chart_options.time_scale.right_bar_stays_on_scroll = true;
     terminal.chart_mut().set_chart_options(chart_options);
     // The Pine editor sits on the right rail, as in the reference terminal.
-    terminal.widget_bar_mut().widgets.push(WidgetBarWidget {
-        id: PINE_WIDGET,
-        icon: icons::CODE,
-        tooltip: "Pine Editor".into(),
-        section: WidgetBarSection::Bottom,
-    });
+    terminal
+        .widget_bar_mut()
+        .widgets
+        .push(WidgetBarWidget::new(
+            PINE_WIDGET,
+            icons::CODE,
+            "Pine Editor",
+            WidgetBarSection::Bottom,
+        ));
     terminal
 }

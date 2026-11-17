@@ -101,16 +101,14 @@ impl BinanceFeed {
                     {
                         return None;
                     }
-                    Some(Bar {
-                        time: Utc.timestamp_millis_opt(row.first()?.as_i64()?).single()?,
+                    Some(Bar::new(
+                        Utc.timestamp_millis_opt(row.first()?.as_i64()?).single()?,
                         open,
                         high,
                         low,
                         close,
-                        volume: row.get(5).and_then(Self::number).unwrap_or(0.0),
-                        colors: None,
-                        payload: None,
-                    })
+                        row.get(5).and_then(Self::number).unwrap_or(0.0),
+                    ))
                 })
                 .collect(),
         )

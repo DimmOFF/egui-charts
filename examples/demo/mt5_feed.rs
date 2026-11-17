@@ -259,16 +259,14 @@ impl Mt5Feed {
                 let time = Utc
                     .timestamp_millis_opt(connection.utc_ms(rate.time * 1000))
                     .single()?;
-                Some(Bar {
+                Some(Bar::new(
                     time,
-                    open: rate.open,
-                    high: rate.high,
-                    low: rate.low,
-                    close: rate.close,
-                    volume: rate.tick_volume as f64,
-                    colors: None,
-                    payload: None,
-                })
+                    rate.open,
+                    rate.high,
+                    rate.low,
+                    rate.close,
+                    rate.tick_volume as f64,
+                ))
             })
             .collect()
     }

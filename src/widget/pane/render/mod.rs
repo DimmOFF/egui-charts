@@ -104,7 +104,7 @@ impl Chart {
         &mut self,
         ui: &mut Ui,
         footprint: Option<(
-            &crate::data::Footprint,
+            crate::data::FootprintView<'_>,
             &crate::chart::overlays::FootprintConfig,
         )>,
     ) -> Response {
@@ -124,8 +124,7 @@ impl Chart {
             .enumerate()
             .filter(|(_, pane)| {
                 pane.id == main_pane
-                    || (pane.id == PaneId::MAIN || self.pane_shown(pane))
-                        && maximized.is_none_or(|id| id == pane.id)
+                    || self.pane_drawn(pane) && maximized.is_none_or(|id| id == pane.id)
             })
             .map(|(idx, pane)| (idx, pane.id, false))
             .collect();
@@ -387,7 +386,10 @@ impl Chart {
         // A host series whose legend asked to remove it, hide it, or open its settings.
         let mut pending_series_action = None;
         let mut pending_pane_collapse = None;
-        let mut pending_pane_maximize = None;
+        // A chart without another pane has nothing to hide behind the price pane.
+        let mut pending_pane_maximize = (self.price_plot_double_click
+            && (maximized.is_some() || panes.len() > 1))
+            .then_some(main_pane);
         let current_selection = self.selection.selected_id();
         // Draws the background, grid, axis and crosshair of a pane without a visible study.
         let frame = CustomIndicator::new("", |_| Vec::new())
@@ -446,7 +448,7 @@ impl Chart {
                 .iter()
                 .map(|at| {
                     let item = &self.price_series[*at];
-                    let close = match hovered {
+                    let close = match self.readout_index {
                         Some(bar) => self.series_close_at(item, bar),
                         None => crate::model::last_with_value(&item.bars).map(|bar| bar.close),
                     };
@@ -625,7 +627,9 @@ impl Chart {
                 panel.legend_offset = legend_offset;
                 panel.pane_controls = true;
                 // A series legend reports its value at any bar, the last close without a crosshair.
-                panel.bar_index = hovered.or(id.filter(|_| study.is_none()).map(|_| 0));
+                panel.bar_index = self
+                    .readout_index
+                    .or(id.filter(|_| study.is_none()).map(|_| 0));
                 let legend_row_height = panel
                     .legend_galley(
                         ui.painter(),
@@ -1559,7 +1563,7 @@ impl Chart {
                     if let Some(idx) = self.study_ids.iter().position(|study| study == id) {
                         let study = &studies.indicators()[idx];
                         if study.is_visible() {
-                            tables.paint(ui, plot, &study.tables(), (pane_id, id));
+                            tables.paint(ui, pane_plot, &study.tables(), (pane_id, id));
                         }
                     }
                 }
@@ -1633,7 +1637,10 @@ impl Chart {
         if main_collapsed {
             self.collapsed_price_header(ui, main_rect);
         }
-        self.pane_collapse_shortcut(ui);
+        // On a pane maximized when the frame began, the gesture was the plain double-click.
+        if maximized.is_none() {
+            self.pane_collapse_shortcut(ui);
+        }
 
         ui.advance_cursor_after_rect(available);
         ui.spacing_mut().item_spacing = host_spacing;

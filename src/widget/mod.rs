@@ -112,7 +112,7 @@ mod primitives;
 #[cfg(feature = "png-export")]
 mod raster;
 mod readout;
-mod replay;
+pub(crate) mod replay;
 mod selection;
 mod series;
 pub mod settings;
@@ -168,6 +168,10 @@ pub(crate) mod tool_interaction;
 
 pub use keyboard::{ShortcutMap, ShortcutRequest};
 pub use state::{BoxZoomState, ElasticBounceState, KineticScrollState};
+
+/// The main bars' revision, length and last high, low and close, and the pending sizes, that
+/// the sizes derived from history were last resolved from.
+type BoxSizesRead = (u64, usize, Option<[u64; 3]>, [bool; 4]);
 
 /// Interactive financial chart widget for egui.
 ///
@@ -273,6 +277,9 @@ pub struct Chart {
     scroll_animation: Option<time_scale::ScrollAnimation>,
     /// Time axis below the plots in the last frame; zero height while its labels are hidden
     time_axis_rect: Rect,
+    /// Whether the last price frame took a double-click on its plot, below its status line and
+    /// away from the drawings, series and primitives there
+    price_plot_double_click: bool,
     /// Chart type (candlestick, line, area, bar, Renko, Kagi)
     pub(crate) chart_type: ChartType,
     /// Parameters of the price-based chart types and the baseline
@@ -280,6 +287,9 @@ pub struct Chart {
     #[cfg(feature = "studies")]
     trade_profiles: trade_profile::TradeProfiles,
     pending_box_sizes: [bool; 4],
+    /// What the pending sizes were last resolved from: a size those bars could not give is not
+    /// read again until the bars or the pending sizes change.
+    box_sizes_read: Option<BoxSizesRead>,
     /// Whether older source bars can contribute to the shown series.
     pub(crate) older_bars_drawn: bool,
     /// Whether tracking mode is currently active
@@ -297,10 +307,14 @@ pub struct Chart {
     /// Changes when what the data table calculates from changes, unlike the steps of the chart's
     /// own refresh, whose results the table does not read.
     readout_revision: u64,
-    /// See [`Self::data_table_identity`].
-    #[cfg(feature = "ui")]
+    /// Tells this chart from every other, also of another run: the data table keys its column
+    /// choices by it, and the snapshots and drawings documents the chart writes name it.
+    #[cfg(feature = "drawings")]
     data_table_identity: u64,
     study_data: studies_data::StudyDataCache,
+    /// Whether the footprint statistics of the last frame had an open interest row, so that the
+    /// study data requests the open interest they read.
+    footprint_open_interest: bool,
     pub(crate) element_studies: crate::chart::rendering::candles::price_based::ElementStudies,
     /// Range bars built from the held trades, while the chart type is Range.
     execution_ranges: crate::chart::rendering::candles::price_based::ExecutionRanges,
@@ -341,6 +355,10 @@ pub struct Chart {
         String,
         (DrawingManager, marks::TimeOrdered<crate::model::Marker>),
     >,
+    /// Counts the times [`Self::forget_symbol`] or [`Self::load_drawings`] dropped or replaced
+    /// the drawings of a symbol at once, which `ChartLayout` tells from a last drawing deleted.
+    #[cfg(feature = "drawings")]
+    drawing_resets: u64,
     #[cfg(not(feature = "drawings"))]
     symbol_markers: std::collections::HashMap<String, marks::TimeOrdered<crate::model::Marker>>,
     /// Where each symbol's drawings are kept; see [`Chart::set_storage`].
@@ -349,6 +367,11 @@ pub struct Chart {
     /// The id each study a snapshot saved has since [`Chart::restore`] added it again.
     #[cfg(feature = "drawings")]
     restored_studies: std::collections::HashMap<usize, usize>,
+    /// The chart that took the snapshot of the last restore, as its `saved_by` names it, or
+    /// `None` before any restore and for a snapshot that names none. Only the drawings
+    /// documents that chart wrote hold the saved ids `restored_studies` maps.
+    #[cfg(feature = "drawings")]
+    restored_from: Option<u64>,
     /// Original column ids of restored studies, retained for snapshots from earlier restores.
     #[cfg(feature = "drawings")]
     study_column_ids: std::collections::HashMap<usize, usize>,
@@ -448,7 +471,8 @@ pub struct Chart {
     pub(crate) synced_crosshair_bar_idx: Option<f64>,
     /// Source period retained by time-based setters and resolved against the current bars.
     synced_crosshair_period: Option<(DateTime<Utc>, DateTime<Utc>)>,
-    /// Price of the external crosshair in its target's units; `None` centres its horizontal line.
+    /// Price of the external crosshair in its target's units; `None` draws the vertical guide
+    /// alone.
     synced_crosshair_price: Option<f64>,
     /// Target bar series of a programmatic position; `None` uses the main scale.
     synced_crosshair_series: Option<SeriesId>,
@@ -458,6 +482,12 @@ pub struct Chart {
     last_crosshair_series: Option<SeriesId>,
     /// Last computed hover bar index (for sync emission to other charts)
     pub(crate) last_hover_bar_idx: Option<f64>,
+    /// Time of the hovered whitespace slot after the last bar, sent to linked charts.
+    pub(crate) last_hover_whitespace: Option<DateTime<Utc>>,
+    /// Shown bar the status line, legends and data window read this frame: the one under the
+    /// local pointer, else under a crosshair from a linked chart or the host; `None` reads the
+    /// latest bar.
+    pub(crate) readout_index: Option<usize>,
 
     // =========================================================================
     // Marks (Widget API)
@@ -509,6 +539,16 @@ pub struct Chart {
     size: Option<Vec2>,
     /// The main bars in groups that fall within one pixel, while zoomed out that far.
     merge_groups: merge::Groups,
+}
+
+impl std::fmt::Debug for Chart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Chart")
+            .field("symbol", &self.symbol())
+            .field("timeframe", &self.timeframe())
+            .field("bars", &self.bars(SeriesId::MAIN).len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// The object a right-click landed on, with the data needed to position and
@@ -943,6 +983,7 @@ impl Chart {
     /// let mut options = chart.chart_options().clone();
     /// options.crosshair.mode = egui_charts::config::CrosshairMode::Magnet;
     /// options.time_scale.min_bar_spacing = 0.1;
+    /// options.kinetic_scroll.damping_coeff = 0.9;
     /// chart.set_chart_options(options);
     /// # }
     /// ```

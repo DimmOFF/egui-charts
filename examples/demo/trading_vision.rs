@@ -74,8 +74,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     let mut terminal: Option<Terminal> = None;
-    let mut pine =
-        PineScripts::load(deriv_services::default_path().with_file_name("pine_scripts.json"));
+    let mut pine = PineScripts::load("TradingVision");
     let started = std::time::Instant::now();
     let mut flushing = false;
     let mut deadline: Option<std::time::Instant> = None;

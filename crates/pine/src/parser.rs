@@ -47,6 +47,7 @@ impl Parser {
         let mut overlay = true;
         let body = parser.parse_body(&mut title, &mut overlay)?;
         inputs_of(&body, &mut parser.inputs);
+        crate::ast::assign_input_keys(&mut parser.inputs);
         let indexed = crate::runtime::indexed_calls(&body);
         let indexed_names = crate::runtime::indexed_names(&body);
         Ok(Program {
@@ -1519,6 +1520,7 @@ fn input_declaration(
     };
     Some(InputDecl {
         id,
+        key: String::new(),
         kind,
         title,
         default,

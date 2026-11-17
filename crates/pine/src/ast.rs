@@ -35,6 +35,9 @@ pub enum InputKind {
 #[derive(Clone, Debug)]
 pub struct InputDecl {
     pub id: NodeId,
+    /// The settings key of this input. The parse-time [`id`](Self::id) moves when the script is
+    /// edited, so saved settings are keyed by the title the user sees; see [`assign_input_keys`].
+    pub key: String,
     pub kind: InputKind,
     pub title: String,
     pub default: Value,
@@ -44,6 +47,28 @@ pub struct InputDecl {
     pub inline: Option<String>,
     /// The `tooltip` shown beside the input.
     pub tooltip: Option<String>,
+}
+
+/// Fills [`InputDecl::key`] for the inputs of one script.
+///
+/// A saved instance stores its values by these keys, so a key has to survive edits above the
+/// `input()` call: it is the title (and group) the user sees, with a counter for repeats.
+pub(crate) fn assign_input_keys(inputs: &mut [InputDecl]) {
+    for at in 0..inputs.len() {
+        let base = match inputs[at].group.as_deref() {
+            Some(group) if !group.is_empty() => format!("{group}/{}", inputs[at].title),
+            _ => inputs[at].title.clone(),
+        };
+        let base = base.trim();
+        let base = if base.is_empty() { "input" } else { base };
+        let mut key = base.to_owned();
+        let mut copy = 2;
+        while inputs[..at].iter().any(|input| input.key == key) {
+            key = format!("{base} ({copy})");
+            copy += 1;
+        }
+        inputs[at].key = key;
+    }
 }
 
 /// A call argument, named when the script names it.

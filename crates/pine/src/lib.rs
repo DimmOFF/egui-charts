@@ -7,18 +7,18 @@
 //! line, so the editor can say what a script uses that this engine does not run.
 //!
 //! The engine, the [`Script`] and its [`runtime::RunOutput`] need only the data types of
-//! [`egui_charts`]; `study` adds the [`Indicator`](egui_charts::studies::Indicator) adapter and
-//! `editor` the panel, so a host takes just the layers it wants:
+//! [`egui_charts`]; `study` adds the [`Indicator`](egui_charts::studies::Indicator) adapter,
+//! `store` the folder of user scripts, and `editor` the panel, so a host takes just the layers it
+//! wants:
 //!
 //! ```toml
 //! egui-charts-pine = { path = "../pine", default-features = false, features = ["study"] }
 //! ```
 //!
-//! A host that embeds the editor keeps the script list where it keeps its own state and hands the
-//! panel the chart each frame:
+//! A host that embeds the editor hands the panel the chart each frame:
 //!
 //! ```text
-//! let mut pine = PineScripts::load(state_dir.join("pine_scripts.json"));
+//! let mut pine = PineScripts::load("TradingVision");
 //! // In the frame:
 //! let on_chart = pine.on_chart(chart);
 //! if pine.show(ui, on_chart) {
@@ -28,6 +28,10 @@
 //!     chart.add_indicator(push.indicator); // or replace the series in `push.replace`
 //! }
 //! ```
+//!
+//! The editor keeps the user's scripts in the folder `store` resolves for the application: the
+//! `config/pinescript/` beside a portable executable, or the per-user config folder. A host that
+//! already owns storage implements [`store::ScriptStore`] and opens the panel on it instead.
 //!
 //! A study added from the script list, or picked by name in the indicator menu, is a
 //! [`PineStudy`], so a host can also build one itself with `chart.add_indicator(Box::new(
@@ -42,6 +46,8 @@ pub mod parser;
 pub mod runtime;
 #[cfg(feature = "study")]
 pub mod study;
+#[cfg(feature = "store")]
+pub mod store;
 pub mod value;
 
 use std::collections::HashMap;

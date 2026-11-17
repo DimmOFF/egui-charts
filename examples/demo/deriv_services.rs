@@ -161,14 +161,17 @@ struct Inner {
 type Persisted = BTreeMap<String, BTreeMap<String, String>>;
 
 impl FileStorage {
-    /// Opens the store beside the executable, reading the documents kept there. A store left in
-    /// the old per-user directory seeds the new one once, so the move keeps the settings.
+    /// Opens the store in `config/` beside the executable, reading the documents kept there. A
+    /// store an older build left beside the executable or per user seeds the new one once, so the
+    /// move keeps the settings.
     pub fn open() -> Self {
         let path = default_path();
         if !path.exists()
             && let Some(legacy) = legacy_path()
-            && legacy.exists()
         {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             let _ = std::fs::copy(&legacy, &path);
         }
         Self::open_at(path)
@@ -291,23 +294,27 @@ impl Storage for FileStorage {
     }
 }
 
-/// Where the store lives: beside the executable, so a development build does not overwrite the
-/// settings of another one.
+/// Where the store lives: the `config/` folder beside the executable, so a development build does
+/// not overwrite the settings of another one.
 pub(crate) fn default_path() -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("storage.json")))
+        .and_then(|exe| exe.parent().map(|dir| dir.join("config").join("storage.json")))
         .unwrap_or_else(|| PathBuf::from("storage.json"))
 }
 
-/// The per-user location the store used before it moved beside the executable.
+/// The places older builds kept the store: beside the executable, and per user before that.
 fn legacy_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA")
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("storage.json")));
+    let per_user = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
         })
-        .map(|dir| dir.join("egui-charts-deriv").join("storage.json"))
+        .map(|dir| dir.join("egui-charts-deriv").join("storage.json"));
+    beside.into_iter().chain(per_user).find(|path| path.exists())
 }
 
 fn kind_key(kind: StoreKind) -> &'static str {
@@ -361,10 +368,14 @@ fn flatten(tree: Persisted) -> HashMap<(StoreKind, String), String> {
 mod tests {
     use super::*;
 
+    /// The store sits in `config/` beside the executable, not next to it.
     #[test]
-    fn the_store_lives_beside_the_executable() {
+    fn the_store_lives_in_the_config_folder_beside_the_executable() {
         let exe = std::env::current_exe().expect("the test binary has a path");
-        assert_eq!(default_path().parent(), exe.parent());
+        assert_eq!(
+            default_path().parent().and_then(|config| config.parent()),
+            exe.parent()
+        );
         assert_eq!(default_path().file_name().unwrap(), "storage.json");
     }
 

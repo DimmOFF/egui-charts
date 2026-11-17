@@ -350,7 +350,7 @@ impl Indicator for PineStudy {
             .script
             .inputs()
             .iter()
-            .find(|decl| decl.id.to_string() == id)
+            .find(|decl| decl.key == id)
             .cloned()
         else {
             return Err(StudyError::UnknownInput(id.into()));
@@ -591,7 +591,7 @@ fn study_shape(mark: &ShapeMark) -> Drawing {
 
 /// The library schema of one `input.*` call.
 fn study_input(decl: &InputDecl) -> StudyInput {
-    let id = decl.id.to_string();
+    let id = decl.key.clone();
     let (value, kind) = match (&decl.kind, &decl.default) {
         (crate::ast::InputKind::Integer { min, max }, default) => {
             let value = default.number().unwrap_or(0.0) as i32;
@@ -735,6 +735,24 @@ mod tests {
                 .set_input(&fast, InputValue::Text("x".into()))
                 .is_err()
         );
+    }
+
+    /// Saved instance settings key the inputs by these, so an edit above the call must not move
+    /// them; a repeated title gets a number.
+    #[test]
+    fn input_keys_are_the_titles_not_the_positions() {
+        let study = PineStudy::new(
+            "indicator(\"T\")\na = input.int(3, \"Length\")\nb = input.int(2, \"Same\")\nc = input.int(1, \"Same\")\nplot(close)",
+        )
+        .unwrap();
+        let inputs = study.inputs();
+        let ids: Vec<&str> = inputs.iter().map(|input| input.id.as_str()).collect();
+        assert_eq!(ids, ["Length", "Same", "Same (2)"]);
+        let edited = PineStudy::new(
+            "indicator(\"T\")\n// an edit above the call\nx = close\na = input.int(3, \"Length\")\nb = input.int(2, \"Same\")\nc = input.int(1, \"Same\")\nplot(x)",
+        )
+        .unwrap();
+        assert_eq!(edited.inputs()[0].id, "Length");
     }
 
     #[test]

@@ -639,6 +639,8 @@ pub mod icons {
     // Indicator categories and object tree groups
     /// Code SVG icon.
     pub const CODE: Icon = crate::icon_from_path!("ui/code.svg");
+    /// Curly braces SVG icon: a script the editor opens.
+    pub const BRACES: Icon = crate::icon_from_path!("ui/braces.svg");
     /// Users SVG icon.
     pub const USERS: Icon = crate::icon_from_path!("ui/users.svg");
     /// Crown SVG icon.

@@ -207,6 +207,7 @@ impl Chart {
     pub(super) fn apply_study_action(&mut self, action: StudyAction) {
         let index = match action {
             StudyAction::Settings(index)
+            | StudyAction::EditScript(index)
             | StudyAction::ToggleVisibility(index)
             | StudyAction::Remove(index)
             | StudyAction::Menu { index, .. } => index,
@@ -241,6 +242,7 @@ impl Chart {
         }
         self.user_action(|chart| match action {
             StudyAction::Settings(_) => chart.indicator_settings_request = Some(id),
+            StudyAction::EditScript(_) => chart.indicator_script_request = Some(id),
             StudyAction::ToggleVisibility(_) => {
                 chart.set_indicator_visible(id, !chart.studies.indicators()[index].is_visible());
             }

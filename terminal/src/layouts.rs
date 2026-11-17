@@ -912,6 +912,46 @@ mod tests {
     }
 
     #[test]
+    fn a_host_study_comes_back_with_its_layout() {
+        let storage = Arc::new(MemoryStorage::default());
+        let factory = || {
+            let mut factory = IndicatorFactory::new();
+            factory.register_in(IndicatorFactory::PERSONAL, "Host pane", || {
+                Box::new(CustomIndicator::new("Host pane", |_| Vec::new()).with_overlay(false))
+            });
+            factory
+        };
+        let mut terminal = Terminal::new(Arc::new(TestFeed))
+            .with_symbol("AAPL")
+            .with_storage(storage.clone())
+            .with_indicator_factory(factory());
+        settle(&mut terminal);
+        terminal.user_action(|terminal| {
+            let study = terminal
+                .studies
+                .indicators
+                .factory()
+                .create("Host pane")
+                .unwrap();
+            terminal.chart_mut().add_indicator(study);
+        });
+        layout(&mut terminal, LayoutAction::Save);
+        drop(terminal);
+        let mut terminal = Terminal::new(Arc::new(TestFeed))
+            .with_symbol("AAPL")
+            .with_storage(storage.clone())
+            .with_indicator_factory(factory());
+        settle(&mut terminal);
+        assert!(
+            terminal
+                .chart()
+                .indicators()
+                .any(|(_, study)| study.name() == "Host pane"),
+            "the layout keeps host studies"
+        );
+    }
+
+    #[test]
     fn saved_layouts_open_again_and_after_a_restart() {
         let storage = Arc::new(MemoryStorage::default());
         let mut terminal = new_terminal(&storage);

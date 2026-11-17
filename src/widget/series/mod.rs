@@ -131,6 +131,12 @@ impl Chart {
             .filter(|id| !self.study_ids.contains(id) || self.indicator_user_edit_enabled(*id))
     }
 
+    /// Take the script request from a legend edit button: the source of the study the host's
+    /// editor can open.
+    pub fn take_indicator_script_request(&mut self) -> Option<SeriesId> {
+        self.indicator_script_request.take()
+    }
+
     /// Replaces the bars of `series`, for history or a replay window. Invalid bars (a non-finite
     /// value, a high or low on the wrong side of the open and close, negative volume) are dropped
     /// and counted in [`feed_state`](Self::feed_state), except [whitespace](Bar::whitespace) bars,

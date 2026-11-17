@@ -715,12 +715,17 @@ impl IndicatorPane {
             indicator,
             text_color,
         );
-        let (visibility_response, settings_response, close_response, menu) = match responses {
-            Some(([visibility, settings, close], menu)) => {
-                (Some(visibility), Some(settings), Some(close), menu)
-            }
-            None => (None, None, None, None),
-        };
+        let (visibility_response, settings_response, script_response, close_response, menu) =
+            match responses {
+                Some(([visibility, settings, script, close], menu)) => (
+                    Some(visibility),
+                    Some(settings),
+                    Some(script),
+                    Some(close),
+                    menu,
+                ),
+                None => (None, None, None, None, None),
+            };
 
         // Return panel info for hit testing
         Some(PaneInteraction {
@@ -732,6 +737,7 @@ impl IndicatorPane {
             close_response,
             visibility_response,
             settings_response,
+            script_response,
             menu,
         })
     }

@@ -61,6 +61,9 @@ pub enum Action {
     Compare(CompareAction),
     /// The indicator dialog.
     Indicators(IndicatorDialogAction),
+    /// A study's script the host should open in its editor, by the study's name, from the legend's
+    /// edit button.
+    EditScript(String),
     /// The chart settings dialog.
     Settings(SettingsAction),
     /// The drawing properties dialog.

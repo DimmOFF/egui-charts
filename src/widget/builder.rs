@@ -188,6 +188,7 @@ impl Chart {
             server_time_offset: None,
             bar_close_time: None,
             indicator_settings_request: None,
+            indicator_script_request: None,
             session_quote: None,
             session_provider: None,
             horizontal_scale: None,

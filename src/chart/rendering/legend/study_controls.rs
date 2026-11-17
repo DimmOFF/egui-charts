@@ -3,21 +3,20 @@ use crate::theme::ThemeExt;
 use egui::FontId;
 use egui::{Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
 
-/// Width of the study's buttons: read-only studies keep hide and, with an article, help.
+/// Width of the study's buttons: a read-only study keeps hide, a script's edit button and, with
+/// an article, help.
 pub(crate) fn controls_width(study: &dyn crate::studies::Indicator) -> f32 {
-    let help = study.help_url().is_some();
-    match (study.user_edit_enabled(), help) {
-        (true, true) => 100.0,
-        (true, false) => 80.0,
-        (false, true) => 40.0,
-        (false, false) => 20.0,
-    }
+    let buttons = 1
+        + 3 * usize::from(study.user_edit_enabled())
+        + usize::from(study.script_editable())
+        + usize::from(study.help_url().is_some());
+    20.0 * buttons as f32
 }
 
-/// The row outline and its hide, settings, remove, more-actions and help buttons. Returns the first
-/// three buttons and, when the more-actions button is clicked or the row secondary-clicked, the
-/// corner of the study menu. `backdrop`, the chart background behind the controls, fills them
-/// when they are revealed, for a caller that paints nothing under them.
+/// The row outline and its hide, settings, edit-script, remove, more-actions and help buttons.
+/// Returns the first four buttons and, when the more-actions button is clicked or the row
+/// secondary-clicked, the corner of the study menu. `backdrop`, the chart background behind the
+/// controls, fills them when they are revealed, for a caller that paints nothing under them.
 pub(crate) fn study_controls(
     ui: &mut Ui,
     row: Rect,
@@ -25,15 +24,16 @@ pub(crate) fn study_controls(
     backdrop: Option<egui::Color32>,
     id: egui::Id,
     study: &dyn crate::studies::Indicator,
-) -> ([Response; 3], Option<Pos2>) {
+) -> ([Response; 4], Option<Pos2>) {
     let theme = ui.active_theme();
     let visible = study.is_visible();
     let editable = study.user_edit_enabled();
     let help = study.help_url();
-    // The help button follows the hide button when editing is off.
+    // The script button follows the settings, and the help button the more-actions one.
     let shown = |index: usize| match index {
         0 => true,
-        4 => help.is_some(),
+        5 => help.is_some(),
+        2 => study.script_editable(),
         _ => editable,
     };
     let touch_id = egui::Id::unique("legend_touch_input");
@@ -83,7 +83,7 @@ pub(crate) fn study_controls(
     // Keep controls focusable while Tab transfers focus from their row.
     let focused = row_response.has_focus()
         || row_response.lost_focus()
-        || (0..5_usize)
+        || (0..6_usize)
             .any(|index| shown(index) && ui.memory(|memory| memory.has_focus(id.with(index))));
     let hovered = !touch
         && ui.input(|input| input.pointer.hover_pos().is_some())
@@ -101,8 +101,8 @@ pub(crate) fn study_controls(
             egui::StrokeKind::Inside,
         );
     }
-    let buttons: [Response; 5] = std::array::from_fn(|index| {
-        let slot = if index == 4 && !editable { 1 } else { index };
+    let buttons: [Response; 6] = std::array::from_fn(|index| {
+        let slot = (0..index).filter(|other| shown(*other)).count();
         let rect = Rect::from_min_size(
             controls.min + Vec2::new(slot as f32 * 20.0, 0.0),
             Vec2::splat(20.0),
@@ -114,9 +114,10 @@ pub(crate) fn study_controls(
                 0 if visible => "Hide study",
                 0 => "Show study",
                 1 => "Study settings",
-                2 => "Remove study",
-                3 => "More actions",
-                _ => "Study help",
+                2 => "Edit script",
+                3 => "Remove study",
+                5 => "Study help",
+                _ => "More actions",
             },
         );
         let shown = shown(index);
@@ -139,7 +140,7 @@ pub(crate) fn study_controls(
                 .rect_filled(rect, theme.radius.sm, theme.ui.btn_bg_hover);
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        if index == 4 {
+        if index == 5 {
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -159,7 +160,8 @@ pub(crate) fn study_controls(
                     0 if visible => &crate::icons::icons::EYE,
                     0 => &crate::icons::icons::EYE_HIDE,
                     1 => &crate::icons::icons::SETTINGS,
-                    2 => &crate::icons::icons::TRASH,
+                    2 => &crate::icons::icons::BRACES,
+                    3 => &crate::icons::icons::TRASH,
                     _ => &crate::icons::icons::UI_MORE_HORIZONTAL,
                 };
                 icon.as_image_tinted(Vec2::splat(14.0), theme.ui.text)
@@ -169,18 +171,18 @@ pub(crate) fn study_controls(
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                [if visible { "−" } else { "+" }, "...", "×", "•••"][index],
+                [if visible { "−" } else { "+" }, "...", "{}", "×", "•••"][index],
                 FontId::proportional(14.0),
                 theme.ui.text,
             );
         }
         response
     });
-    let [hide, settings, remove, more, _] = buttons;
+    let [hide, settings, script, remove, more, _] = buttons;
     if more.clicked() {
         menu = Some(more.rect.left_bottom());
     }
-    ([hide, settings, remove], menu)
+    ([hide, settings, script, remove], menu)
 }
 
 #[cfg(all(test, feature = "studies"))]
@@ -201,7 +203,7 @@ mod tests {
             let controls = Rect::from_min_size(Pos2::new(150.0, 10.0), Vec2::new(80.0, 20.0));
             let settings = controls.min + Vec2::new(30.0, 10.0);
             let frame = |events| {
-                let mut clicked = [false; 3];
+                let mut clicked = [false; 4];
                 let mut menu = None;
                 let output = ctx.run_ui(
                     egui::RawInput {
@@ -275,11 +277,11 @@ mod tests {
             };
             assert!(!frame(vec![Event::PointerGone]).0);
             let first = tap(settings);
-            assert_eq!(first.1, [false; 3], "the first tap only reveals controls");
+            assert_eq!(first.1, [false; 4], "the first tap only reveals controls");
             let second = tap(settings);
             assert_eq!(
                 second.1,
-                [false, true, false],
+                [false, true, false, false],
                 "the second tap opens settings"
             );
             tap(row.left_center() + Vec2::new(10.0, 0.0));
@@ -330,10 +332,14 @@ mod tests {
                     repeat: false,
                     modifiers: Default::default(),
                 }]);
-                assert_eq!(
-                    activated.1,
-                    std::array::from_fn(|button| index == button + 1)
-                );
+                let mut expected = [false; 4];
+                match index {
+                    1 => expected[0] = true,
+                    2 => expected[1] = true,
+                    3 => expected[3] = true,
+                    _ => {}
+                }
+                assert_eq!(activated.1, expected);
                 // The menu opens below the more-actions button.
                 assert_eq!(
                     activated.3,
@@ -355,7 +361,7 @@ mod tests {
             let controls = Rect::from_min_size(Pos2::new(150.0, 10.0), Vec2::new(100.0, 20.0));
             let row = row.union(controls);
             let frame = |events| {
-                let mut clicks = [false; 3];
+                let mut clicks = [false; 4];
                 let output = ctx.run_ui(
                     egui::RawInput {
                         events,
@@ -400,7 +406,7 @@ mod tests {
                         pressed,
                         modifiers: Default::default(),
                     }]);
-                    assert_eq!(clicks, [index == 0 && !pressed, false, false]);
+                    assert_eq!(clicks, [index == 0 && !pressed, false, false, false]);
                     opened.extend(urls);
                 }
                 assert_eq!(
@@ -526,5 +532,57 @@ mod tests {
                 "the full wrapped study row must respond to a tap"
             );
         }
+    }
+
+    /// A script study offers its edit button between the settings and the remove one.
+    #[test]
+    fn a_script_study_offers_an_edit_button() {
+        let theme = crate::theme::Theme::dark();
+        let ctx = Context::default();
+        crate::theme::apply_to_egui(&ctx, &theme);
+        let study = crate::studies::CustomIndicator::new("Script", |_| Vec::new())
+            .with_script_editable(true);
+        assert_eq!(controls_width(&study), 100.0);
+        let row = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(200.0, 20.0));
+        let controls = Rect::from_min_size(Pos2::new(150.0, 10.0), Vec2::new(100.0, 20.0));
+        // The second button after hide: hidden settings come first, then this one.
+        let pos = controls.min + Vec2::new(40.0 + 10.0, 10.0);
+        let frame = |events| {
+            let mut clicked = [false; 4];
+            ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let (buttons, _) = study_controls(
+                        ui,
+                        row,
+                        controls,
+                        None,
+                        egui::Id::unique("script"),
+                        &study,
+                    );
+                    clicked = buttons.map(|response| response.clicked());
+                },
+            )
+            .drop_without_applying_deltas();
+            clicked
+        };
+        frame(vec![Event::PointerMoved(pos)]);
+        let button = |pressed| {
+            frame(vec![Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            }])
+        };
+        assert_eq!(button(true), [false; 4], "a press clicks nothing yet");
+        assert_eq!(
+            button(false),
+            [false, false, true, false],
+            "the edit button sits between settings and remove"
+        );
     }
 }

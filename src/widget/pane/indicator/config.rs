@@ -232,6 +232,8 @@ pub struct PaneInteraction {
     pub visibility_response: Option<Response>,
     /// Settings button response, when the legend is shown.
     pub settings_response: Option<Response>,
+    /// Edit-script button response, for a study whose source the host's editor can open.
+    pub script_response: Option<Response>,
     /// Corner of the study menu, when the legend's more-actions button was clicked or its row
     /// secondary-clicked this frame.
     pub menu: Option<Pos2>,

@@ -207,6 +207,10 @@ impl Indicator for PineStudy {
         &self.name
     }
 
+    fn script_editable(&self) -> bool {
+        true
+    }
+
     fn calculate(&mut self, data: &[Bar]) {
         let output = self.script.run(data, &self.context, &self.sources);
         self.store(output, data.len());
@@ -753,6 +757,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(edited.inputs()[0].id, "Length");
+    }
+
+    /// The chart's legend offers the edit button only for a study the host can edit as a script.
+    #[test]
+    fn a_script_opens_in_the_editor() {
+        let study = PineStudy::new("indicator(\"T\")\nplot(close)").unwrap();
+        assert!(study.script_editable());
     }
 
     #[test]

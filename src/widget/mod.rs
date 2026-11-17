@@ -395,6 +395,8 @@ pub struct Chart {
     server_time_offset: Option<chrono::TimeDelta>,
     bar_close_time: Option<chrono::DateTime<chrono::Utc>>,
     pub(crate) indicator_settings_request: Option<SeriesId>,
+    /// A study whose script the host's editor should open, from the legend's edit button.
+    pub(crate) indicator_script_request: Option<SeriesId>,
     session_quote: Option<crate::model::quote::SessionQuote>,
     session_provider: Option<std::sync::Arc<dyn crate::model::SessionProvider>>,
     horizontal_scale: Option<std::sync::Arc<dyn crate::scales::HorizontalScale>>,

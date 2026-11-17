@@ -420,10 +420,20 @@ impl Terminal {
     }
 
     /// Opens the dialog a click in the chart asked for: a study's settings, the scale settings,
-    /// or the chart's settings on a double click of the main series.
+    /// or the chart's settings on a double click of the main series; hands a script's edit to the
+    /// host.
     fn take_chart_requests(&mut self) {
         if let Some(id) = self.chart_mut().take_indicator_settings_request() {
             self.open_study_settings(id);
+        }
+        let script = self.chart_mut().take_indicator_script_request().and_then(|id| {
+            self.chart()
+                .indicators()
+                .find(|(series, _)| *series == id)
+                .map(|(_, study)| study.name().to_owned())
+        });
+        if let Some(name) = script {
+            self.emit(Action::EditScript(name));
         }
         if self.chart_mut().take_scale_settings_request() {
             self.open_chart_settings();

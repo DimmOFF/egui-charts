@@ -681,6 +681,26 @@ fn footprint_annotations_and_statistics_follow_executions() {
         if ["POC", "Delta POC", "Cluster", "Single", "UH", "UL", "Ask stack", "Bid stack"].contains(&t.galley.text()))));
 }
 
+/// The legend's script button asks the host to open the study's source in its editor.
+#[cfg(feature = "studies")]
+#[test]
+fn a_script_study_legend_asks_the_host_for_its_editor() {
+    use crate::chart::rendering::StudyAction;
+    use crate::studies::{CustomIndicator, SMA};
+    let mut chart = chart(&[100.0], &[110.0]);
+    let script = chart.add_indicator(Box::new(
+        CustomIndicator::new("Script", |_| Vec::new()).with_script_editable(true),
+    ));
+    chart.add_indicator(Box::new(SMA::new(3)));
+    chart.apply_study_action(StudyAction::EditScript(0));
+    assert_eq!(chart.take_indicator_script_request(), Some(script));
+    assert_eq!(
+        chart.take_indicator_settings_request(),
+        None,
+        "editing a script opens no settings"
+    );
+}
+
 /// The main series' legend actions hide it, request its settings and remove it through the
 /// chart's typed operations, leaving the studies and other series in place.
 #[cfg(feature = "studies")]

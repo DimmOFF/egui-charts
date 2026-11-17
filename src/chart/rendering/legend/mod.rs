@@ -68,6 +68,8 @@ pub enum QuoteSide {
 pub enum StudyAction {
     /// Open the study's settings in the host.
     Settings(usize),
+    /// Open the study's script in the host's editor.
+    EditScript(usize),
     /// Toggle study visibility.
     ToggleVisibility(usize),
     /// Remove the study.
@@ -846,6 +848,7 @@ impl<'a> Legend<'a> {
                 for (response, intent) in responses.iter().zip([
                     StudyAction::ToggleVisibility(index),
                     StudyAction::Settings(index),
+                    StudyAction::EditScript(index),
                     StudyAction::Remove(index),
                 ]) {
                     if response.clicked() {

@@ -118,6 +118,8 @@ fn main() -> eframe::Result {
                     egui_charts_terminal::Action::WidgetBar(
                         egui_charts::ui::widget_bar::WidgetBarAction::WidgetClicked(PINE_WIDGET),
                     ) => pine.open = !pine.open,
+                    // The legend's edit button opens the script on the chart in the editor.
+                    egui_charts_terminal::Action::EditScript(name) => pine.open_script(name),
                     _ => {}
                 }
             }

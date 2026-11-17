@@ -71,6 +71,7 @@ pub struct CustomIndicator {
     offsets: Vec<isize>,
     fills: Vec<super::StudyFill>,
     plot_color: Option<PlotColorFn>,
+    script_editable: bool,
 }
 
 impl std::fmt::Debug for CustomIndicator {
@@ -112,6 +113,7 @@ impl CustomIndicator {
             offsets: Vec::new(),
             fills: Vec::new(),
             plot_color: None,
+            script_editable: false,
         }
     }
 
@@ -224,6 +226,12 @@ impl CustomIndicator {
         self.line_names = names;
         self
     }
+
+    /// Mark the study as a script the host's editor can open, which adds the legend's edit button.
+    pub fn with_script_editable(mut self, editable: bool) -> Self {
+        self.script_editable = editable;
+        self
+    }
 }
 
 impl Indicator for CustomIndicator {
@@ -321,6 +329,10 @@ impl Indicator for CustomIndicator {
 
     fn is_overlay(&self) -> bool {
         self.is_overlay
+    }
+
+    fn script_editable(&self) -> bool {
+        self.script_editable
     }
 
     fn line_count(&self) -> usize {

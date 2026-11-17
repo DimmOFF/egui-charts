@@ -418,6 +418,15 @@ impl PineScripts {
         self.pending.take()
     }
 
+    /// Opens the editor on the stored script titled `name`, as the chart's edit button asks. A
+    /// name the store no longer holds just opens the editor.
+    pub fn open_script(&mut self, name: &str) {
+        if let Some(at) = self.scripts.iter().position(|script| script.name == name) {
+            self.select(at);
+        }
+        self.open = true;
+    }
+
     fn current(&self) -> Option<&SavedScript> {
         self.editing.and_then(|at| self.scripts.get(at))
     }

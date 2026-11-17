@@ -203,6 +203,12 @@ pub trait Indicator: Send {
         true
     }
 
+    /// Whether this study is a script the host's editor can open. The legend then offers an edit
+    /// button beside the study's settings, and the host is asked to open the study's source.
+    fn script_editable(&self) -> bool {
+        false
+    }
+
     /// Optional study help article, opened by the host from the legend or context menu.
     /// Built-ins default to their API article; custom studies can supply a host URL.
     fn help_url(&self) -> Option<&str> {

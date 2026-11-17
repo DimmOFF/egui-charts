@@ -160,11 +160,11 @@ mod tests {
     #[test]
     fn legacy_and_modern_inputs_keep_their_defaults() {
         let script = Script::parse(
-            "//@version=4\nstudy(\"W\")\nn = input(title=\"Periods\", defval=2, minval=2, type=input.integer)\nmode = input(title=\"Mode\", defval=\"3\", options=[\"3\", \"5\"])\nlen = input.int(14, \"Length\")\ncolor = input.color(color.red, \"Color\")\ntint = input.color(color.new(color.gray, 85), \"Tint\")\n",
+            "//@version=4\nstudy(\"W\")\nn = input(title=\"Periods\", defval=2, minval=2, type=input.integer)\nmode = input(title=\"Mode\", defval=\"3\", options=[\"3\", \"5\"])\nlen = input.int(14, \"Length\")\ncolor = input.color(color.red, \"Color\")\ntint = input.color(color.new(color.gray, 85), \"Tint\")\nbull = input.color(color.rgb(103, 154, 129), \"Bullish\")\n",
         )
         .unwrap();
         let inputs = script.inputs();
-        assert_eq!(inputs.len(), 5);
+        assert_eq!(inputs.len(), 6);
         assert_eq!(inputs[0].title, "Periods");
         assert_eq!(inputs[0].default, Value::Num(2.0));
         assert!(matches!(inputs[1].kind, ast::InputKind::Choice(_)));
@@ -175,6 +175,11 @@ mod tests {
         assert_eq!(
             inputs[4].default,
             Value::Color(egui::Color32::from_rgba_unmultiplied(160, 160, 160, 38))
+        );
+        // `color.rgb` in a default is the colour it builds, not the white fallback.
+        assert_eq!(
+            inputs[5].default,
+            Value::Color(egui::Color32::from_rgb(103, 154, 129))
         );
     }
 

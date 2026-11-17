@@ -1538,7 +1538,7 @@ fn const_number(expr: &Expr) -> Option<f64> {
     }
 }
 
-/// A literal, or the `color.new(...)` a default often is.
+/// A literal, or the `color.*(...)` call a default often is.
 fn default_value(expr: &Expr) -> Value {
     if let Some(value) = literal(expr) {
         return value;
@@ -1551,27 +1551,16 @@ fn default_value(expr: &Expr) -> Value {
             return Value::Color(color);
         }
     }
+    // `color.new(color.gray, 85)`, `color.rgb(103, 154, 129)`: the runtime folds the same call, so
+    // a default builds the colour the script would.
     if let Expr::Call { callee, args, .. } = expr
-        && callee == &["color".to_owned(), "new".to_owned()]
+        && let [namespace, name] = callee.as_slice()
+        && namespace == "color"
     {
-        let base = args
-            .first()
-            .map(|arg| default_value(&arg.value))
-            .and_then(|value| value.color())
-            .unwrap_or(egui::Color32::WHITE);
-        let transparency = args
-            .get(1)
-            .and_then(|arg| const_number(&arg.value))
-            .unwrap_or(0.0);
-        // `color.new` sets the transparency, replacing the base colour's own.
-        let factor = 1.0 - (transparency / 100.0).clamp(0.0, 1.0);
-        let [red, green, blue, _] = base.to_srgba_unmultiplied();
-        return Value::Color(egui::Color32::from_rgba_unmultiplied(
-            red,
-            green,
-            blue,
-            (255.0 * factor).round() as u8,
-        ));
+        let values: Vec<Value> = args.iter().map(|arg| default_value(&arg.value)).collect();
+        if let Some(value) = crate::builtins::color(name, &values) {
+            return value;
+        }
     }
     Value::Na
 }

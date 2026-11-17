@@ -319,6 +319,15 @@ impl IndicatorSettingsDialog {
             }
             return result;
         }
+        // A study that draws its plots only once it has run may finish after the dialog opened,
+        // and edits staged for the plot count it had then would be rejected one by one.
+        if let Some(study) = chart.indicator_mut(id)
+            && study.line_count() != self.edit.as_ref()?.settings.plots.len()
+        {
+            self.edit.as_mut()?.settings = study.settings();
+            self.line_names = study.line_names();
+            self.previewed = None;
+        }
         let mut pending = self.edit.as_ref()?.clone();
         pending.inputs = self
             .inputs
@@ -2576,6 +2585,32 @@ mod tests {
         })
         .drop_without_applying_deltas();
         assert_eq!(dialog.levels[0].0, 25.0);
+    }
+
+    /// A study that finds its plots after the dialog opened would reject every edit staged for
+    /// the plot count it had none for; the preview adopts the study's own styles instead.
+    #[test]
+    fn a_preview_adopts_plots_the_study_found_after_the_dialog_opened() {
+        let mut dialog = IndicatorSettingsDialog::default();
+        let mut chart = crate::widget::test_frames::chart(&[100.0], &[110.0]);
+        let id = chart.add_indicator(Box::new(SMA::new(20)));
+        assert!(dialog.open_for_chart(&chart, id));
+        // As if the study had not run yet when the dialog read its settings.
+        dialog.edit.as_mut().unwrap().settings.plots.clear();
+        dialog.line_names.clear();
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            dialog.show_preview_for_chart(ui.ctx(), &Theme::dark(), &mut chart);
+        })
+        .drop_without_applying_deltas();
+        let edit = dialog.edit.as_ref().unwrap();
+        assert_eq!(edit.settings.plots.len(), 1);
+        assert_eq!(dialog.line_names, ["SMA(20)"]);
+        chart
+            .indicator_mut(id)
+            .unwrap()
+            .apply_settings(&edit.inputs, edit.settings.clone())
+            .expect("the adopted plot styles apply");
     }
 
     #[test]

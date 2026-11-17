@@ -434,7 +434,8 @@ impl PineScripts {
     fn show_window(&mut self, ctx: &egui::Context, on_chart: Option<SeriesId>) -> bool {
         let mut changed = false;
         let mut close = false;
-        let chrome = Chrome::new(ctx.theme() == egui::Theme::Dark);
+        // The window floats over the app, whose theme need not follow the system's appearance.
+        let chrome = Chrome::new(ctx.global_style().visuals.dark_mode);
         // The window's own title bar has no room for the pin, so the editor draws the row.
         egui::Window::new("Pine Editor")
             .title_bar(false)
@@ -1872,6 +1873,52 @@ mod tests {
                 assert_eq!(width, screen.width());
             }
         }
+    }
+
+    /// The floating window takes its colours from the app's theme, not from the system's
+    /// appearance: a dark app on a light system gets the dark editor.
+    #[test]
+    fn a_floating_editor_follows_the_app_theme_not_the_system() {
+        let ctx = egui::Context::default();
+        ctx.set_theme(egui::Theme::Light);
+        egui_charts::theme::apply_to_egui(&ctx, &egui_charts::theme::Theme::dark());
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0));
+        let mut pine = PineScripts {
+            open: true,
+            ..PineScripts::default()
+        };
+        // The window's first frames fade in; the last one paints it opaque.
+        let mut frames = Vec::new();
+        for frame in 0..8 {
+            let mut output = ctx.run_pass(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(frame as f64 * 0.25),
+                    ..Default::default()
+                },
+                |ctx| {
+                    ctx.root_ui(|ui| pine.show(ui, None));
+                },
+            );
+            output.textures_delta.clear();
+            frames = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Rect(rect) => Some((rect.fill, rect.stroke.color)),
+                    _ => None,
+                })
+                .collect();
+        }
+        // The code background and the window border of the editor's dark chrome.
+        let (code_bg, border) = (
+            egui::Color32::from_rgb(0x00, 0x00, 0x00),
+            egui::Color32::from_rgb(0x22, 0x22, 0x22),
+        );
+        assert!(
+            frames.iter().any(|frame| *frame == (code_bg, border)),
+            "the floating editor paints the dark chrome, not {frames:?}"
+        );
     }
 
     /// The chart offers Add until the script is there, and Update only while it differs.

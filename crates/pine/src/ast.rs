@@ -1,10 +1,10 @@
-//! The parsed shape of a script: statements, expressions, inputs and the diagnostics the editor
+﻿//! The parsed shape of a script: statements, expressions, inputs and the diagnostics the editor
 //! shows for what this subset does not run.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::pine_engine::value::Value;
+use crate::value::Value;
 
 /// Identifies a call site, so a builtin keeps its state (`ta.ema`'s previous value) between bars
 /// and an `input.*` keeps the value the user set.
@@ -92,7 +92,7 @@ pub enum Expr {
         then: Box<Expr>,
         otherwise: Box<Expr>,
     },
-    /// Pine's `x = if cond` … `else` …, which yields the last value of the taken block.
+    /// Pine's `x = if cond` вЂ¦ `else` вЂ¦, which yields the last value of the taken block.
     If {
         cond: Box<Expr>,
         then: Block,
@@ -243,7 +243,7 @@ pub fn visit_stmts(body: &[Stmt], f: &mut impl FnMut(&Expr)) {
 /// One branch of a `switch`.
 #[derive(Clone, Debug)]
 pub struct SwitchArm {
-    /// The values or conditions to compare; empty for the default `=> …` arm.
+    /// The values or conditions to compare; empty for the default `=> вЂ¦` arm.
     pub conds: Vec<Expr>,
     /// The statements whose last value the arm answers with.
     pub body: Block,
@@ -256,16 +256,16 @@ pub enum Stmt {
     Assign {
         name: String,
         value: Expr,
-        /// `var x = …` evaluates on the first bar only.
+        /// `var x = вЂ¦` evaluates on the first bar only.
         sticky: bool,
-        /// `x := …` writes the variable in the scope that declared it.
+        /// `x := вЂ¦` writes the variable in the scope that declared it.
         reassign: bool,
     },
     /// `[a, b] = f()`: the names take the values a call answers with.
     Tuple {
         names: Vec<String>,
         value: Expr,
-        /// `var [a, b] = …` evaluates on the first bar only.
+        /// `var [a, b] = вЂ¦` evaluates on the first bar only.
         sticky: bool,
     },
     If {
@@ -304,7 +304,7 @@ pub enum Stmt {
     },
     Expr(Expr),
     Function(Function),
-    /// A user-defined `type` or `enum`, whose instances `Type.new(…)` builds.
+    /// A user-defined `type` or `enum`, whose instances `Type.new(вЂ¦)` builds.
     Type(TypeDecl),
     /// Parsed and reported, not run: `switch`, `strategy.*` calls and the like.
     Unsupported {

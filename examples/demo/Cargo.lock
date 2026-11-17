@@ -1020,6 +1020,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui-charts",
+ "egui-charts-pine",
  "egui-charts-terminal",
  "egui_extras",
  "ehttp",
@@ -1042,6 +1043,19 @@ dependencies = [
  "web-sys",
  "webpki-roots 1.0.11",
  "winresource",
+]
+
+[[package]]
+name = "egui-charts-pine"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "egui",
+ "egui-charts",
+ "regex",
+ "rfd",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

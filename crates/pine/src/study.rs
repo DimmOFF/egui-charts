@@ -1,4 +1,4 @@
-//! A parsed Pine script as a chart study: its plots become lines, `fill` becomes a band and
+﻿//! A parsed Pine script as a chart study: its plots become lines, `fill` becomes a band and
 //! `plotshape` becomes text labels.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,12 +12,12 @@ use egui_charts::studies::{
     StudyData, StudyDataRequest, StudyError, StudyFill, StudyInput, StudyTable,
 };
 
-use crate::pine_engine::Script;
-use crate::pine_engine::ast::InputDecl;
-use crate::pine_engine::runtime::{
+use crate::Script;
+use crate::ast::InputDecl;
+use crate::runtime::{
     Context, DrawingKind, DrawingOutput, RunOutput, SecurityData, ShapeMark,
 };
-use crate::pine_engine::value::Value;
+use crate::value::Value;
 
 /// A script run for one state of the bars.
 #[derive(Clone)]
@@ -197,7 +197,7 @@ impl PineStudy {
     }
 
     /// What the last run could not do, with source lines, for the editor.
-    pub fn diagnostics(&self) -> &[crate::pine_engine::ast::Diagnostic] {
+    pub fn diagnostics(&self) -> &[crate::ast::Diagnostic] {
         self.script.diagnostics()
     }
 }
@@ -593,38 +593,38 @@ fn study_shape(mark: &ShapeMark) -> Drawing {
 fn study_input(decl: &InputDecl) -> StudyInput {
     let id = decl.id.to_string();
     let (value, kind) = match (&decl.kind, &decl.default) {
-        (crate::pine_engine::ast::InputKind::Integer { min, max }, default) => {
+        (crate::ast::InputKind::Integer { min, max }, default) => {
             let value = default.number().unwrap_or(0.0) as i32;
             let min = min.map(|min| min as i32).unwrap_or(i32::MIN);
             let max = max.map(|max| max as i32).unwrap_or(i32::MAX);
             (InputValue::Integer(value), InputKind::Integer(min, max))
         }
-        (crate::pine_engine::ast::InputKind::Number { min, max }, default) => {
+        (crate::ast::InputKind::Number { min, max }, default) => {
             let value = default.number().unwrap_or(0.0);
             let min = min.unwrap_or(-1e300);
             let max = max.unwrap_or(1e300);
             (InputValue::Number(value), InputKind::Number(min, max))
         }
-        (crate::pine_engine::ast::InputKind::Toggle, default) => (
+        (crate::ast::InputKind::Toggle, default) => (
             InputValue::Toggle(default.flag().unwrap_or(false)),
             InputKind::Toggle,
         ),
-        (crate::pine_engine::ast::InputKind::Color, default) => (
+        (crate::ast::InputKind::Color, default) => (
             InputValue::Color(default.color().unwrap_or(Color32::WHITE)),
             InputKind::Color,
         ),
-        (crate::pine_engine::ast::InputKind::Timeframe, _) => {
+        (crate::ast::InputKind::Timeframe, _) => {
             (InputValue::Timeframe(None), InputKind::Timeframe)
         }
-        (crate::pine_engine::ast::InputKind::Symbol, _) => {
+        (crate::ast::InputKind::Symbol, _) => {
             (InputValue::Symbol(String::new()), InputKind::Symbol)
         }
         // The library has no session input, so a session is edited as its text.
-        (crate::pine_engine::ast::InputKind::Session, default) => (
+        (crate::ast::InputKind::Session, default) => (
             InputValue::Text(default.text().unwrap_or_default().to_owned()),
             InputKind::Text,
         ),
-        (crate::pine_engine::ast::InputKind::Choice(choices), default) => {
+        (crate::ast::InputKind::Choice(choices), default) => {
             let index = default
                 .text()
                 .and_then(|text| choices.iter().position(|choice| choice == text))
@@ -634,7 +634,7 @@ fn study_input(decl: &InputDecl) -> StudyInput {
                 InputKind::Choice(choices.clone()),
             )
         }
-        (crate::pine_engine::ast::InputKind::Text, default) => (
+        (crate::ast::InputKind::Text, default) => (
             InputValue::Text(default.text().unwrap_or_default().to_owned()),
             InputKind::Text,
         ),
@@ -655,7 +655,7 @@ fn pine_value(decl: &InputDecl, value: &InputValue) -> Value {
         InputValue::Toggle(flag) => Value::Bool(*flag),
         InputValue::Color(color) => Value::Color(*color),
         InputValue::Choice(index) => match &decl.kind {
-            crate::pine_engine::ast::InputKind::Choice(choices) => choices
+            crate::ast::InputKind::Choice(choices) => choices
                 .get(*index)
                 .map(|choice| Value::Str(choice.clone().into()))
                 .unwrap_or(Value::Na),

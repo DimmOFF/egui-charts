@@ -1,4 +1,4 @@
-//! One value of a running script: numbers cover ints, and `Na` is Pine's missing value.
+﻿//! One value of a running script: numbers cover ints, and `Na` is Pine's missing value.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -9,7 +9,7 @@ use egui::Color32;
 #[derive(Clone, Debug)]
 pub struct Lambda {
     pub params: Vec<String>,
-    pub body: crate::pine_engine::ast::Expr,
+    pub body: crate::ast::Expr,
 }
 
 /// A Pine matrix: its shape and row-major values, shared by every variable that refers to it.

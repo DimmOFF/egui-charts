@@ -1,0 +1,27 @@
+[package]
+name = "egui-charts-pine"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The chart library is a published crate of its own; this one only builds beside it, like
+# `examples/demo`.
+[workspace]
+
+[dependencies]
+egui = "0.37.0"
+egui-charts = { path = "../..", default-features = false, features = ["widget", "studies", "drawings", "timezones"] }
+chrono = "0.4.43"
+# `str.match` takes Pine's regular expressions.
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The editor's Import and Export file dialogs.
+rfd = { version = "0.17.2", optional = true }
+
+[features]
+default = ["study", "editor"]
+# `PineStudy`: a script as the chart's `Indicator`.
+study = []
+# `PineScripts`: the editor panel. Needs the chart's widgets and theme.
+editor = ["study", "egui-charts/ui", "dep:rfd"]

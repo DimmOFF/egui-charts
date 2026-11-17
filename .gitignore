@@ -6,3 +6,4 @@
 /docs/capture/target
 /_site
 /temp/pine
+/crates/pine/target

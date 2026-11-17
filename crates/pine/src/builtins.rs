@@ -1,4 +1,4 @@
-//! The `ta.*`, `math.*`, `color.*` and `str.*` calls of the subset, with the per-call-site
+﻿//! The `ta.*`, `math.*`, `color.*` and `str.*` calls of the subset, with the per-call-site
 //! state a series function needs. The runtime keys [`TaState`] by call site, so `ta.ema` at two
 //! places in a script keeps two independent averages.
 
@@ -8,7 +8,7 @@ use std::sync::Arc;
 use egui::Color32;
 use egui_charts::model::Bar;
 
-use crate::pine_engine::value::{self, Value};
+use crate::value::{self, Value};
 
 /// How many past source values the windowed functions keep.
 const MAX_WINDOW: usize = 8_192;

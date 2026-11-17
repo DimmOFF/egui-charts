@@ -18,10 +18,6 @@ mod deriv_feed;
 mod deriv_services;
 #[path = "mt5_feed.rs"]
 mod mt5_feed;
-#[path = "pine_editor.rs"]
-mod pine_editor;
-#[path = "pine_engine/mod.rs"]
-mod pine_engine;
 
 use catalog::Catalog;
 use combined::{CombinedFeed, CombinedQuotes};
@@ -33,8 +29,8 @@ use egui_charts::ui::export::ExportFormat;
 use egui_charts::ui::widget_bar::{WidgetBarSection, WidgetBarWidget};
 use egui_charts::widget::SeriesId;
 use egui_charts::widget::settings::ChartSettingsState;
+use egui_charts_pine::PineScripts;
 use egui_charts_terminal::{ExportContents, Terminal};
-use pine_editor::PineScripts;
 use std::sync::Arc;
 
 const SYMBOL: &str = "R_100";
@@ -78,7 +74,8 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     let mut terminal: Option<Terminal> = None;
-    let mut pine = PineScripts::load();
+    let mut pine =
+        PineScripts::load(deriv_services::default_path().with_file_name("pine_scripts.json"));
     let started = std::time::Instant::now();
     let mut flushing = false;
     let mut deadline: Option<std::time::Instant> = None;
@@ -208,14 +205,11 @@ fn build_terminal(
     chart_options.time_scale.right_bar_stays_on_scroll = true;
     terminal.chart_mut().set_chart_options(chart_options);
     // The Pine editor sits on the right rail, as in the reference terminal.
-    terminal
-        .widget_bar_mut()
-        .widgets
-        .push(WidgetBarWidget::new(
-            PINE_WIDGET,
-            icons::CODE,
-            "Pine Editor",
-            WidgetBarSection::Bottom,
-        ));
+    terminal.widget_bar_mut().widgets.push(WidgetBarWidget::new(
+        PINE_WIDGET,
+        icons::CODE,
+        "Pine Editor",
+        WidgetBarSection::Bottom,
+    ));
     terminal
 }

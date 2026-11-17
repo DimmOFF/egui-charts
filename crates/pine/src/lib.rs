@@ -1,25 +1,59 @@
-﻿//! A Pine Script subset: lexer, parser, evaluator and the [`PineStudy`] that charts it.
+﻿//! A Pine Script subset on top of [`egui_charts`]: lexer, parser, evaluator, the [`PineStudy`]
+//! that charts a script, and the editor panel a host can embed.
 //!
 //! The subset covers what a user's ordinary indicator needs: series with `[n]`, `var`, `:=`,
 //! assignments and `if` values, user functions, `input.*`, `ta.*`, `math.*`, `color.*`, `str.*`,
 //! `plot`, `fill`, `plotshape` and `hline`. Everything else parses into a diagnostic with its
 //! line, so the editor can say what a script uses that this engine does not run.
+//!
+//! The engine, the [`Script`] and its [`runtime::RunOutput`] need only the data types of
+//! [`egui_charts`]; `study` adds the [`Indicator`](egui_charts::studies::Indicator) adapter and
+//! `editor` the panel, so a host takes just the layers it wants:
+//!
+//! ```toml
+//! egui-charts-pine = { path = "../pine", default-features = false, features = ["study"] }
+//! ```
+//!
+//! A host that embeds the editor keeps the script list where it keeps its own state and hands the
+//! panel the chart each frame:
+//!
+//! ```text
+//! let mut pine = PineScripts::load(state_dir.join("pine_scripts.json"));
+//! // In the frame:
+//! let on_chart = pine.on_chart(chart);
+//! if pine.show(ui, on_chart) {
+//!     terminal.set_indicator_factory(pine.factory());
+//! }
+//! if let Some(push) = pine.take_chart_push() {
+//!     chart.add_indicator(push.indicator); // or replace the series in `push.replace`
+//! }
+//! ```
+//!
+//! A study added from the script list, or picked by name in the indicator menu, is a
+//! [`PineStudy`], so a host can also build one itself with `chart.add_indicator(Box::new(
+//! PineStudy::new(source)?))`.
 
 pub mod ast;
 pub mod builtins;
+#[cfg(feature = "editor")]
+pub mod editor;
 pub mod lexer;
 pub mod parser;
 pub mod runtime;
+#[cfg(feature = "study")]
 pub mod study;
 pub mod value;
 
 use std::collections::HashMap;
 
+#[cfg(feature = "editor")]
+pub use editor::PineScripts;
+#[cfg(feature = "study")]
 pub use study::PineStudy;
 
-use crate::pine_engine::ast::{Block, Diagnostic, InputDecl, NodeId, Program, Stmt};
-use crate::pine_engine::runtime::{Context, RunOutput};
-use crate::pine_engine::value::Value;
+use crate::ast::{Block, Diagnostic, InputDecl, NodeId, Program, Stmt};
+use crate::runtime::{Context, RunOutput};
+use crate::value::Value;
 
 /// A parsed script and its current input values.
 #[derive(Clone, Debug)]
@@ -115,7 +149,7 @@ fn dedup(diagnostics: &mut Vec<Diagnostic>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pine_engine::parser::Parser;
+    use crate::parser::Parser;
 
     #[test]
     fn legacy_and_modern_inputs_keep_their_defaults() {
@@ -243,7 +277,7 @@ mod tests {
         let boxes: Vec<_> = output
             .drawings
             .iter()
-            .filter(|drawing| drawing.kind == crate::pine_engine::runtime::DrawingKind::Box)
+            .filter(|drawing| drawing.kind == crate::runtime::DrawingKind::Box)
             .collect();
         assert!(
             boxes

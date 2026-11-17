@@ -1,4 +1,4 @@
-//! The user's Pine scripts: the study factory they feed, the editor window and the file that
+﻿//! The user's Pine scripts: the study factory they feed, the editor window and the file that
 //! keeps them between runs.
 
 use std::path::PathBuf;
@@ -10,7 +10,7 @@ use egui_charts::theme::ThemeExt;
 use egui_charts::ui_kit::buttons::{Button, ButtonSize, IconButton};
 use egui_charts::widget::{Chart, SeriesId};
 
-use crate::pine_engine::PineStudy;
+use crate::PineStudy;
 
 /// What a new script starts as.
 const NEW_SCRIPT: &str = "//@version=6\nindicator(\"My script\")\nplot(close)\n";
@@ -82,9 +82,8 @@ struct EditorState {
 }
 
 impl PineScripts {
-    /// Reads the saved scripts, importing the development copies on the first run.
-    pub fn load() -> Self {
-        let path = crate::deriv_services::default_path().with_file_name("pine_scripts.json");
+    /// Reads the saved scripts from `path`, importing the development copies on the first run.
+    pub fn load(path: PathBuf) -> Self {
         let state_path = path.with_file_name("pine_editor.json");
         let pinned = std::fs::read(&state_path)
             .ok()
@@ -990,7 +989,9 @@ mod tests {
             };
             let mut width = screen.width();
             for _ in 0..2 {
-                let _ = ctx.run_ui(
+                // The test paints no glyphs to a screen, so the frame's texture deltas are dropped
+                // on purpose; epaint panics at a bare drop.
+                ctx.run_ui(
                     egui::RawInput {
                         screen_rect: Some(screen),
                         ..Default::default()
@@ -999,7 +1000,8 @@ mod tests {
                         pine.show(ui, None);
                         width = ui.available_rect_before_wrap().width();
                     },
-                );
+                )
+                .drop_without_applying_deltas();
             }
             if pinned {
                 assert!(width < screen.width() - 300.0, "{width}");

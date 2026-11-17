@@ -13,13 +13,13 @@ use egui_charts::studies::{
     FillBoundary, PlotType, StudyCell, StudyFill, StudyTable, TablePosition,
 };
 
-use crate::pine_engine::ast;
-use crate::pine_engine::ast::{
+use crate::ast;
+use crate::ast::{
     Arg, Diagnostic, Expr, Function, NodeId, Program, Stmt, TypeDecl,
 };
-use crate::pine_engine::builtins::{self, TaState};
-use crate::pine_engine::parser::literal;
-use crate::pine_engine::value::{self, Value};
+use crate::builtins::{self, TaState};
+use crate::parser::literal;
+use crate::value::{self, Value};
 
 /// How many times one `for`/`while` may run before it is stopped, so a runaway script cannot
 /// hang the chart.
@@ -922,7 +922,7 @@ impl<'a> Evaluator<'a> {
             Expr::Number(number) => Value::Num(*number),
             Expr::Bool(flag) => Value::Bool(*flag),
             Expr::Str(text) => Value::Str(text.clone()),
-            Expr::Color(rgba) => Value::Color(crate::pine_engine::parser::rgba_of(*rgba)),
+            Expr::Color(rgba) => Value::Color(crate::parser::rgba_of(*rgba)),
             Expr::Na => Value::Na,
             Expr::Array(items) => {
                 let values: Vec<Value> = items.iter().map(|item| self.eval(item)).collect();
@@ -4080,7 +4080,7 @@ fn closed_bars(bars: &[Bar], timeframe: egui_charts::model::Timeframe, now: i64)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pine_engine::parser::Parser;
+    use crate::parser::Parser;
     use chrono::{TimeZone, Utc};
 
     fn bars(closes: &[f64]) -> Vec<Bar> {

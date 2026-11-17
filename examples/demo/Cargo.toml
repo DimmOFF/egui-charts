@@ -18,6 +18,7 @@ path = "trading_vision.rs"
 
 [dependencies]
 egui-charts = { path = "../..", features = ["ui", "alert-engine", "strategies", "detectors"] }
+egui-charts-pine = { path = "../../crates/pine" }
 eframe = { version = "0.37.0", default-features = false, features = ["glow", "persistence"] }
 # The emoji fonts draw the icons the drawing bar's Icons/Emojis menu places.
 egui = { version = "0.37.0", features = ["monochrome_emoji_fonts"] }

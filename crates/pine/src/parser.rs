@@ -1,14 +1,14 @@
-//! Recursive-descent parser for the Pine subset, with the indentation the lexer produced.
+﻿//! Recursive-descent parser for the Pine subset, with the indentation the lexer produced.
 //!
 //! Everything it parses but does not run is recorded in [`Program::diagnostics`] with its line, so
 //! the editor can say what is missing instead of failing the whole script.
 
-use crate::pine_engine::ast::{
+use crate::ast::{
     Arg, Block, Diagnostic, Expr, FieldDecl, Function, InputDecl, InputKind, NodeId, Program, Stmt,
     SwitchArm, TypeDecl,
 };
-use crate::pine_engine::lexer::{Spanned, Token, lex};
-use crate::pine_engine::value::Value;
+use crate::lexer::{Spanned, Token, lex};
+use crate::value::Value;
 use std::collections::HashMap;
 
 /// Type words a Pine declaration may start with.
@@ -47,8 +47,8 @@ impl Parser {
         let mut overlay = true;
         let body = parser.parse_body(&mut title, &mut overlay)?;
         inputs_of(&body, &mut parser.inputs);
-        let indexed = crate::pine_engine::runtime::indexed_calls(&body);
-        let indexed_names = crate::pine_engine::runtime::indexed_names(&body);
+        let indexed = crate::runtime::indexed_calls(&body);
+        let indexed_names = crate::runtime::indexed_names(&body);
         Ok(Program {
             title,
             overlay,
@@ -372,7 +372,7 @@ impl Parser {
         is_ident(self.at) && is_ident(self.at + 1)
     }
 
-    /// Whether the tokens at the cursor are `name.field := …` rather than a plain name assignment.
+    /// Whether the tokens at the cursor are `name.field := вЂ¦` rather than a plain name assignment.
     fn looks_like_field_assignment(&self) -> bool {
         let is_ident = |at: usize| {
             matches!(
@@ -1034,7 +1034,7 @@ impl Parser {
         }
     }
 
-    /// Skips `<…>` after a constructor name, including `array<array<float>>`.
+    /// Skips `<вЂ¦>` after a constructor name, including `array<array<float>>`.
     fn skip_type_arguments(&mut self) -> Result<(), String> {
         let mut depth = 0i32;
         loop {
@@ -1544,7 +1544,7 @@ fn default_value(expr: &Expr) -> Value {
     if let Some(path) = path_of(expr) {
         let joined = path.join(".");
         if let Some(name) = joined.strip_prefix("color.")
-            && let Some(color) = crate::pine_engine::builtins::color_constant(name)
+            && let Some(color) = crate::builtins::color_constant(name)
         {
             return Value::Color(color);
         }

@@ -705,6 +705,9 @@ impl Indicator for ConfiguredStudy {
             .user_edit_enabled
             .unwrap_or_else(|| self.study.user_edit_enabled())
     }
+    fn script_editable(&self) -> bool {
+        self.study.script_editable()
+    }
     fn help_url(&self) -> Option<&str> {
         self.settings
             .help_url
@@ -2725,5 +2728,18 @@ mod tests {
         let saved: StudySettings =
             serde_json::from_str(r#"{"plots":[],"precision":null,"hidden_intervals":[]}"#).unwrap();
         assert_eq!(StudySettings::default(), saved);
+    }
+
+    /// A chart wraps a study without settings, and the legend still sees a script it can edit.
+    #[test]
+    fn a_wrapped_script_stays_editable() {
+        let script = crate::studies::CustomIndicator::new("Script", |_| Vec::new())
+            .with_script_editable(true);
+        let wrapped = ConfiguredStudy::new(Box::new(script));
+        assert!(wrapped.script_editable());
+        let plain = ConfiguredStudy::new(Box::new(crate::studies::CustomIndicator::new(
+            "Plain", |_| Vec::new(),
+        )));
+        assert!(!plain.script_editable());
     }
 }

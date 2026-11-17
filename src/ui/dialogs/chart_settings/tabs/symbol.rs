@@ -1,12 +1,12 @@
 //! Symbol and status line tabs of the chart settings dialog.
 
 use super::super::SettingsDialog;
-use super::{checkbox, styled_checkbox, styled_dropdown};
+use super::{checkbox, pick_color, styled_checkbox, styled_dropdown};
 use crate::localization as l10n;
+use crate::scales::TimezoneMode;
 use crate::theme::Theme;
 use crate::theme::ThemeExt;
 use crate::tokens::DESIGN_TOKENS;
-use crate::ui_kit::ColorPicker;
 use crate::widget::settings::PrecisionMode;
 use egui::{RichText, Ui};
 
@@ -18,12 +18,14 @@ impl SettingsDialog {
         ui.horizontal(|ui| {
             ui.add_space(0.0);
             ui.vertical(|ui| {
-                styled_checkbox(
-                    ui,
-                    &mut self.settings.show_price_targets,
-                    "Analyst price targets",
-                    theme.ui.text,
-                );
+                if self.price_targets_offered {
+                    styled_checkbox(
+                        ui,
+                        &mut self.settings.show_price_targets,
+                        "Analyst price targets",
+                        theme.ui.text,
+                    );
+                }
                 let kind = self.settings.chart_type;
                 if kind.is_time_independent()
                     || !kind.uses_ohlc()
@@ -197,11 +199,7 @@ impl SettingsDialog {
                                     for (color, picker, id) in
                                         [(up, up_picker, up_id), (down, down_picker, down_id)]
                                     {
-                                        if let Some(picked) =
-                                            ColorPicker::new(picker, id).show(ui).inner
-                                        {
-                                            *color = picked;
-                                        }
+                                        pick_color(ui, picker, id, color);
                                     }
                                 });
                             });
@@ -264,20 +262,34 @@ impl SettingsDialog {
                 self.draw_section_header(ui, "TIMEZONE", theme);
 
                 self.draw_setting_row_with_controls(ui, "Timezone", theme, |ui, dialog| {
-                    let curr_tz = dialog.settings.timezone.clone();
+                    // A zone this build cannot read is shown as saved, with no row selected.
+                    let current = dialog.settings.timezone_mode().ok();
+                    let rows = crate::ui::timeframe_toolbar::toolbar::zone_rows(
+                        &dialog.timezones,
+                        current.as_ref().unwrap_or(&TimezoneMode::Utc),
+                    );
+                    let shown = rows
+                        .iter()
+                        .find(|(_, mode)| Some(mode) == current.as_ref())
+                        .map_or_else(
+                            || dialog.settings.timezone.clone(),
+                            |(label, _)| label.clone(),
+                        );
                     styled_dropdown(
                         ui,
                         "timezone",
                         DESIGN_TOKENS.sizing.settings_dialog.dropdown_width,
                         theme.ui.text,
-                        &curr_tz,
+                        &shown,
                         |ui| {
-                            for tz in &dialog.timezones {
-                                ui.selectable_value(
-                                    &mut dialog.settings.timezone,
-                                    tz.clone(),
-                                    l10n::text(ui.ctx(), tz.as_str()),
-                                );
+                            for (label, mode) in rows {
+                                let selected = Some(&mode) == current.as_ref();
+                                if ui
+                                    .selectable_label(selected, l10n::text(ui.ctx(), &label))
+                                    .clicked()
+                                {
+                                    dialog.settings.set_timezone_mode(&mode);
+                                }
                             }
                         },
                     );

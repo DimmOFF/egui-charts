@@ -18,6 +18,7 @@ use crate::ui_kit::dialog::{DialogFooter, DialogFrame, dialog_header};
 use crate::ui_kit::tab_bar::TabBar;
 
 /// Drawing properties dialog
+#[derive(Debug)]
 pub struct DrawingPropertiesDialog {
     /// Display and layout options for this component.
     pub config: DrawingPropertiesConfig,
@@ -249,10 +250,12 @@ impl DrawingPropertiesDialog {
                 drawing.position_target_color = old.position_target_color;
                 drawing.position_stop_color = old.position_stop_color;
                 drawing.position_style = old.position_style;
+                drawing.marker = old.marker;
                 drawing.volume_profile = old.volume_profile;
                 drawing.regression_trend = old.regression_trend;
                 drawing.vwap = old.vwap;
                 drawing.channel_midline = old.channel_midline;
+                drawing.theme_shade = old.theme_shade;
                 drawing.line_measurements = old.line_measurements;
                 drawing.price_axis_label = old.price_axis_label;
                 drawing.time_axis_label = old.time_axis_label;
@@ -582,8 +585,8 @@ const FOOTER_HEIGHT: f32 = 60.0;
 /// Keyboard and colour picker state kept in egui memory between frames.
 #[derive(Clone, Default)]
 struct UiState {
-    /// Colour and fill colour pickers of the Style tab.
-    pickers: [ColorPickerState; 2],
+    /// Colour, fill colour and signpost disc colour pickers of the Style tab.
+    pickers: [ColorPickerState; 3],
     /// Text colour, background and border pickers of the Text tab, and of the Style tab's rows
     /// for a price label's badge and a price note's label.
     text_pickers: [ColorPickerState; 3],
@@ -594,6 +597,7 @@ struct UiState {
 }
 
 /// Only previewed drawings are restored; incoming host drawings and metadata stay intact.
+#[derive(Debug)]
 struct PreviewDrawing {
     drawing: Drawing,
     times: Vec<Option<chrono::DateTime<chrono::Utc>>>,
@@ -667,17 +671,21 @@ mod tests {
             crate::theme::apply_to_egui(&ctx, &theme);
             let mut chart = Chart::new(BarData::new());
             let mut dialog = DrawingPropertiesDialog::new();
-            for (tool, fill, extend, text, stroke) in [
-                (Tool::HorizontalLine, false, false, true, true),
-                (Tool::Rect, true, true, true, true),
-                (Tool::Brush, true, false, false, true),
-                (Tool::TrendLine, false, true, true, true),
-                (Tool::TrendAngle, false, true, true, true),
-                (Tool::TextLabel, false, false, true, false),
-                (Tool::Highlighter, false, false, false, true),
-                (Tool::ArrowMarker, false, false, true, false),
-                (Tool::ArrowMarkDown, false, false, true, false),
-                (Tool::FibonacciChannel, true, false, true, false),
+            for (tool, fill, extend, text, (width, style)) in [
+                (Tool::HorizontalLine, false, false, true, (true, true)),
+                (Tool::Rect, true, true, true, (true, true)),
+                (Tool::Brush, true, false, false, (true, true)),
+                (Tool::TrendLine, false, true, true, (true, true)),
+                (Tool::TrendAngle, false, true, true, (true, true)),
+                (Tool::TextLabel, false, false, true, (false, false)),
+                (Tool::Highlighter, false, false, false, (true, true)),
+                (Tool::ArrowMarker, false, false, true, (false, false)),
+                (Tool::ArrowMarkDown, false, false, true, (false, false)),
+                (Tool::FibonacciChannel, true, false, true, (false, false)),
+                (Tool::Pitchfork, false, true, false, (true, false)),
+                (Tool::Tweet, true, false, true, (false, true)),
+                (Tool::Sticker, false, false, false, (false, false)),
+                (Tool::GhostFeed, false, false, false, (false, false)),
             ] {
                 let mut drawing = Drawing::new(7, tool);
                 drawing.chart_points = vec![ChartPoint::new(1.0, 100.0); 3];
@@ -695,9 +703,15 @@ mod tests {
                     ("Fill", fill),
                     ("Extend", extend),
                     ("Text", text),
-                    ("Color", tool != Tool::FibonacciChannel),
-                    ("Line width", stroke),
-                    ("Line style", stroke),
+                    (
+                        "Color",
+                        !matches!(
+                            tool,
+                            Tool::FibonacciChannel | Tool::Sticker | Tool::GhostFeed
+                        ),
+                    ),
+                    ("Line width", width),
+                    ("Line style", style),
                     ("Coordinates", !freehand),
                     ("Template", true),
                     ("Ok", true),
@@ -716,8 +730,8 @@ mod tests {
         }
     }
 
-    /// A trend angle's Text tab styles its own labels: it has no text to write, align or box.
-    /// Text also offers to follow the zoom and to wrap.
+    /// A trend angle's or chart pattern's Text tab styles its own labels: it has no text to write,
+    /// align or box. Text also offers to follow the zoom and to wrap.
     #[test]
     fn text_tab_rows_follow_the_tool() {
         let ctx = Context::default();
@@ -727,6 +741,7 @@ mod tests {
             (Tool::TrendAngle, false, true, false),
             (Tool::TrendLine, true, true, false),
             (Tool::TextLabel, true, true, true),
+            (Tool::XABCDPattern, false, true, false),
         ] {
             let mut drawing = Drawing::new(7, tool);
             drawing.chart_points = vec![ChartPoint::new(1.0, 100.0); 2];
@@ -787,6 +802,8 @@ mod tests {
             for (id, width) in [(7, 20.0), (8, 4.0), (9, 6.0)] {
                 let mut drawing = Drawing::new(id, Tool::TrendLine);
                 drawing.stroke_width = width;
+                // As saved before the theme shade, which Reset to defaults switches on.
+                drawing.theme_shade = false;
                 drawing.chart_points =
                     vec![ChartPoint::new(2.0, 100.0), ChartPoint::new(5.0, 110.0)];
                 chart.drawings_mut().drawings.push(drawing);
@@ -820,6 +837,7 @@ mod tests {
                 settings.position_target_color = Some([40, 100, 220, 255]);
                 settings.position_stop_color = Some([220, 140, 40, 255]);
                 settings.position_style.border = true;
+                settings.marker.show_text = false;
                 settings.price_axis_label = false;
                 settings.time_axis_label = false;
                 settings.italic = true;
@@ -835,6 +853,7 @@ mod tests {
                 settings.note_text_style = Some(note_text);
                 settings.text_color = Some([1, 2, 3, 255]);
                 settings.line_measurements.price_labels = true;
+                settings.theme_shade = true;
                 dialog.coordinates.points[1].price = "125".into();
                 frame(&mut dialog, &mut chart, &ctx, vec![]);
                 assert_eq!(
@@ -847,6 +866,7 @@ mod tests {
                 assert_eq!(preview.position_target_color, Some([40, 100, 220, 255]));
                 assert_eq!(preview.position_stop_color, Some([220, 140, 40, 255]));
                 assert!(preview.position_style.border);
+                assert!(!preview.marker.show_text);
                 assert!(!preview.price_axis_label && !preview.time_axis_label);
                 assert!(preview.italic);
                 assert_eq!((preview.text_wrap, preview.text_wrap_width), (true, 120.0));
@@ -854,6 +874,7 @@ mod tests {
                 assert_eq!(preview.note_text_style, Some(note_text));
                 assert_eq!(preview.text_color, Some([1, 2, 3, 255]));
                 assert!(preview.line_measurements.price_labels);
+                assert!(preview.theme_shade);
                 assert_eq!(chart.drawings().drawings[2].stroke_width, 6.0);
                 assert!(!chart.can_undo());
                 assert!(chart.can_redo(), "preview must retain existing redo");
@@ -896,6 +917,7 @@ mod tests {
             assert_eq!(restored.position_target_color, None, "{finish}");
             assert_eq!(restored.position_stop_color, None, "{finish}");
             assert!(!restored.position_style.border, "{finish}");
+            assert!(restored.marker.show_text, "{finish}");
             assert!(
                 restored.price_axis_label && restored.time_axis_label,
                 "{finish}"
@@ -910,6 +932,7 @@ mod tests {
             );
             assert_eq!(restored.text_color, Some([41, 98, 255, 255]), "{finish}");
             assert_eq!(restored.line_measurements, Default::default(), "{finish}");
+            assert!(!restored.theme_shade, "{finish}");
             assert_eq!(chart.drawings().drawings[0].stroke_width, 20.0, "{finish}");
             assert_eq!(chart.drawings().drawings[1].stroke_width, 4.0, "{finish}");
             assert_eq!(

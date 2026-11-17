@@ -8,8 +8,7 @@
 
 use super::time_formatter::TimeFormatter;
 use super::timescale_marks::{
-    TickMark, TickMarkGenerator, TickMarkGeneratorConfig, TickMarkType, TickMarkWeight,
-    keep_spaced_by,
+    TickMark, TickMarkGenerator, TickMarkGeneratorConfig, TickMarkWeight, keep_spaced_by,
 };
 use crate::model::Bar;
 use chrono::{DateTime, Duration, Utc};
@@ -48,6 +47,14 @@ use chrono::{DateTime, Duration, Utc};
 pub struct CustomHorizontalScale<K> {
     keys: Vec<K>,
     format: Box<dyn Fn(&K) -> String + Send + Sync>,
+}
+
+impl<K> std::fmt::Debug for CustomHorizontalScale<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustomHorizontalScale")
+            .field("keys", &self.keys.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<K: Ord> CustomHorizontalScale<K> {
@@ -108,14 +115,12 @@ impl<K: Ord + Send + Sync> HorizontalScale for CustomHorizontalScale<K> {
         let marks = points
             .iter()
             .filter_map(|&(time, index)| {
-                Some(TickMark {
+                Some(TickMark::new(
                     time,
                     index,
-                    label: (self.format)(self.key(time)?),
-                    mark_type: TickMarkType::Time,
-                    weight: TickMarkWeight::new(1),
-                    bold: false,
-                })
+                    TickMarkWeight::new(1),
+                    (self.format)(self.key(time)?),
+                ))
             })
             .collect();
         keep_spaced_by(
@@ -133,6 +138,7 @@ impl<K: Ord + Send + Sync> HorizontalScale for CustomHorizontalScale<K> {
 
 /// Where the tick marks of a horizontal axis are laid out.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct TickMarkLayout {
     /// Plot width in points.
     pub width: f32,
@@ -143,6 +149,26 @@ pub struct TickMarkLayout {
     /// Whether marks of one weight are shown all or none, so labels of one kind stay evenly
     /// spaced.
     pub uniform_distribution: bool,
+}
+
+impl TickMarkLayout {
+    /// A plot `width` points wide with `bar_spacing` points per slot and labels at least
+    /// `min_spacing` points apart, of one weight all or none when `uniform_distribution`.
+    ///
+    /// ```
+    /// use egui_charts::scales::TickMarkLayout;
+    ///
+    /// let layout = TickMarkLayout::new(800.0, 6.0, 80.0, false);
+    /// assert_eq!(layout.width, 800.0);
+    /// ```
+    pub fn new(width: f32, bar_spacing: f32, min_spacing: f32, uniform_distribution: bool) -> Self {
+        Self {
+            width,
+            bar_spacing,
+            min_spacing,
+            uniform_distribution,
+        }
+    }
 }
 
 /// What the keys of the horizontal axis mean: which of them are labelled, how, and how the
@@ -251,9 +277,17 @@ pub fn time_key(time: DateTime<Utc>) -> f64 {
 /// and 1, then half prices, and draws the roundest kind shown in bold. Labels and the crosshair
 /// show `precision` decimals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PriceHorizontalScale {
     /// Decimals of the labels.
     pub precision: usize,
+}
+
+impl PriceHorizontalScale {
+    /// A scale whose labels and crosshair show `precision` decimals.
+    pub fn new(precision: usize) -> Self {
+        Self { precision }
+    }
 }
 
 impl Default for PriceHorizontalScale {
@@ -298,13 +332,15 @@ impl HorizontalScale for PriceHorizontalScale {
 
 /// A horizontal scale of maturities in months, for yield curves, encoded with [`key_time`].
 ///
-/// Maturities read `3M` below a year and `2Y` or `2Y6M` from a year on. The axis labels
+/// Maturities read `3M` below a year and `2Y` or `2Y6M` from a year on, with at most two
+/// decimals of a month, such as `2Y9.33M`. Keys below zero get no label. The axis labels
 /// multiples of 10 years first, then of 5 and 3 years, whole years, half years, quarters and
 /// months, and draws the longest kind shown in bold.
 ///
 /// Actual maturity samples are spaced linearly by month. [`Self::whitespace`] remains available
 /// for hosts that also need explicit empty samples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MaturityScale {
     /// Months between neighbouring slots.
     pub base_resolution: u32,
@@ -346,14 +382,21 @@ impl MaturityScale {
             .collect()
     }
 
+    /// Writes `months` to two decimals of a month at most, rounded before the years are split
+    /// off, so keys derived from days or weeks carry no float noise.
     fn format(months: f64) -> String {
+        let months = (months * 100.0).round() / 100.0;
         let (years, rest) = ((months / 12.0).floor(), months % 12.0);
+        let short = |value: f64| {
+            let text = format!("{value:.2}");
+            text.trim_end_matches('0').trim_end_matches('.').to_owned()
+        };
         if months < 12.0 {
-            format!("{months}M")
-        } else if rest == 0.0 {
+            format!("{}M", short(months))
+        } else if short(rest) == "0" {
             format!("{years}Y")
         } else {
-            format!("{years}Y{rest}M")
+            format!("{years}Y{}M", short(rest))
         }
     }
 }
@@ -382,7 +425,13 @@ impl HorizontalScale for MaturityScale {
             .find(|(step, _)| months % step == 0.0)
             .map_or(0, |(_, weight)| weight)
         };
-        weighted_marks(points, layout, weight, Self::format)
+        // Keys extrapolated left of zero are no maturities.
+        let points: Vec<_> = points
+            .iter()
+            .copied()
+            .filter(|(time, _)| time_key(*time) >= 0.0)
+            .collect();
+        weighted_marks(&points, layout, weight, Self::format)
     }
 
     fn format_crosshair(&self, key: DateTime<Utc>, _bar_seconds: i64) -> String {
@@ -401,13 +450,13 @@ fn weighted_marks(
 ) -> Vec<TickMark> {
     let marks = points
         .iter()
-        .map(|&(time, index)| TickMark {
-            time,
-            mark_type: TickMarkType::Time,
-            weight: TickMarkWeight::new(weight(time_key(time))),
-            label: String::new(),
-            index,
-            bold: false,
+        .map(|&(time, index)| {
+            TickMark::new(
+                time,
+                index,
+                TickMarkWeight::new(weight(time_key(time))),
+                String::new(),
+            )
         })
         .collect();
     let mut kept = keep_spaced_by(
@@ -528,7 +577,16 @@ mod tests {
             "4512.50"
         );
         let maturity = MaturityScale::default();
-        for (months, label) in [(3.0, "3M"), (30.0, "2Y6M"), (360.0, "30Y")] {
+        // Keys derived from days carry float noise: a third of 100 months and of one month.
+        for (months, label) in [
+            (3.0, "3M"),
+            (30.0, "2Y6M"),
+            (360.0, "30Y"),
+            (100.0 / 3.0, "2Y9.33M"),
+            (1.0 / 3.0, "0.33M"),
+            (30.5, "2Y6.5M"),
+            (0.25, "0.25M"),
+        ] {
             assert_eq!(maturity.format_crosshair(at(months), 0), label);
         }
 

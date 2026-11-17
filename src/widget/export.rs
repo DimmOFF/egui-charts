@@ -63,6 +63,7 @@ impl Default for ImageExportOptions {
 /// bind any user textures referenced by their image sources whose pixels were not supplied in
 /// [`ImageExportOptions::textures`] before drawing.
 #[must_use = "Render the frame and apply its texture deltas, or clear them before dropping"]
+#[derive(Debug)]
 #[non_exhaustive]
 pub struct ChartImage {
     /// Exact output dimensions in pixels.
@@ -738,7 +739,7 @@ impl Chart {
         chart.apply_visible_bars_once = self.apply_visible_bars_once;
         chart.start_idx = self.start_idx;
         for (_, study) in self.indicators() {
-            chart.add_indicator(study.clone_box());
+            chart.add_indicator(study.clone_for_export());
         }
         chart.study_ids = self.study_ids.clone();
         chart.study_inputs = self.study_inputs.clone();

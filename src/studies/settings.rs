@@ -132,15 +132,31 @@ pub struct FillStyle {
     pub inverted_color: Option<Color32>,
     /// Whether the band is drawn.
     pub visible: bool,
+    /// Whether `visible` alone decides that the band is drawn. Styles saved by earlier releases
+    /// lack it: their band was also hidden with a boundary plot, which applying them carries over
+    /// to `visible`.
+    #[serde(default)]
+    pub(super) independent: bool,
 }
 
 impl FillStyle {
     /// A visible band with the same colour on either side of a crossing.
+    ///
+    /// ```
+    /// use ecolor::Color32;
+    /// use egui_charts::studies::FillStyle;
+    ///
+    /// let mut band = FillStyle::new(Color32::from_rgba_unmultiplied(33, 150, 243, 13));
+    /// band.inverted_color = Some(Color32::from_rgba_unmultiplied(242, 54, 69, 13));
+    /// band.visible = false;
+    /// assert_eq!(band.color, Color32::from_rgba_unmultiplied(33, 150, 243, 13));
+    /// ```
     pub fn new(color: Color32) -> Self {
         Self {
             color,
             inverted_color: None,
             visible: true,
+            independent: true,
         }
     }
 }
@@ -212,8 +228,11 @@ fn match_declared_styles(study: &dyn Indicator, settings: &mut StudySettings) {
         let mut middle = levels[2];
         middle.visible = false;
         settings.levels.push(middle);
-    } else if study.name() == "KST" && settings.levels.is_empty() && levels.len() == 1 {
-        // Saved before it had a zero guide, a KST keeps drawing none until the guide is shown.
+    } else if matches!(study.name(), "KST" | "CMF" | "Force Index")
+        && settings.levels.is_empty()
+        && levels.len() == 1
+    {
+        // Saved before it had a zero guide, the study keeps drawing none until the guide is shown.
         let mut zero = levels[0];
         zero.visible = false;
         settings.levels.push(zero);
@@ -252,9 +271,8 @@ fn match_declared_styles(study: &dyn Indicator, settings: &mut StudySettings) {
     settings
         .fills
         .extend(fills[saved..].iter().map(|fill| FillStyle {
-            color: fill.color,
             inverted_color: fill.inverted_color,
-            visible: true,
+            ..FillStyle::new(fill.color)
         }));
 }
 
@@ -302,6 +320,7 @@ impl StudyIntervalRange {
 
 /// Host-serializable presentation settings of an applied study.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[non_exhaustive]
 pub struct StudySettings {
     /// Show values in the status line when the chart enables study values. Defaults to true.
     #[serde(default = "enabled_by_default")]
@@ -328,7 +347,7 @@ pub struct StudySettings {
     /// [`StudyPane::levels`](super::StudyPane::levels). Settings saved before levels were
     /// editable, and settings with another number of levels, take the study's own levels and fill.
     /// Only the guide declared since is added, hidden, to a Stochastic saved with two levels or a
-    /// Know Sure Thing saved with none.
+    /// Know Sure Thing, Chaikin Money Flow or Force Index saved with none.
     #[serde(default)]
     pub levels: Vec<LevelStyle>,
     /// Whether the band between the boundary levels is filled.
@@ -360,13 +379,42 @@ pub struct StudySettings {
     pub background_visible: bool,
     /// One independent style per band returned by [`Indicator::fills`].
     /// Missing styles take the study's declared colours and visibility. Styles of bands the study
-    /// does not declare yet are kept for when it does.
+    /// does not declare yet are kept for when it does. A style saved before bands were drawn
+    /// whatever the visibility of their boundary plots restores hidden while one of those plots
+    /// is hidden, as it was drawn then.
     #[serde(default)]
     pub fills: Vec<FillStyle>,
     /// Independent styles for [`Indicator::gradients`], in declaration order.
-    /// Older settings inherit the study's declared ramps.
+    /// Missing styles take the study's declared ramps, shown. A saved study template of an SMI
+    /// from before it declared its shading restores the ramps hidden.
     #[serde(default)]
     pub gradients: Vec<GradientStyle>,
+}
+
+impl Default for StudySettings {
+    /// No plot styles, the chart's default precision and no hidden intervals, with the status
+    /// line values and the pane tint shown, as older saved settings restore them.
+    fn default() -> Self {
+        Self {
+            show_legend_values: true,
+            user_edit_enabled: None,
+            help_url: None,
+            plots: Vec::new(),
+            precision: None,
+            hidden_intervals: Vec::new(),
+            interval_range: StudyIntervalRange::default(),
+            levels: Vec::new(),
+            fill_between_levels: false,
+            level_fill_color: Color32::TRANSPARENT,
+            untagged_plots: Vec::new(),
+            price_line_plots: Vec::new(),
+            plot_variants: Vec::new(),
+            background: None,
+            background_visible: true,
+            fills: Vec::new(),
+            gradients: Vec::new(),
+        }
+    }
 }
 
 fn enabled_by_default() -> bool {
@@ -375,7 +423,7 @@ fn enabled_by_default() -> bool {
 
 /// An owned settings and input snapshot without calculated study data.
 /// Used by chart history; restoring it requires recalculation on the current bars.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct StudySettingsSnapshot {
     inputs: Vec<(String, InputValue)>,
     pub(crate) settings: StudySettings,
@@ -480,7 +528,6 @@ impl StudySettingsSnapshot {
 /// bars that share time with their bars, its markers sit on the last such chart bar once the
 /// values on the chart reach their bar, and its labels are hidden. Its visible range is the range
 /// of its own bars that share time with the chart bars in view.
-#[derive(Clone)]
 pub struct ConfiguredStudy {
     study: Box<dyn Indicator>,
     settings: StudySettings,
@@ -511,6 +558,12 @@ pub struct ConfiguredStudy {
     kept: Option<Kept>,
 }
 
+impl Clone for ConfiguredStudy {
+    fn clone(&self) -> Self {
+        self.clone_with(self.study.clone_box())
+    }
+}
+
 /// The values a study keeps on the bars that remain after the chart evicted the oldest `shift`
 /// bars since its last calculation.
 #[derive(Clone)]
@@ -519,7 +572,43 @@ struct Kept {
     shift: usize,
 }
 
+impl std::fmt::Debug for ConfiguredStudy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConfiguredStudy")
+            .field("settings", &self.settings)
+            .field("timeframe", &self.timeframe)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ConfiguredStudy {
+    // Select the inner clone once, without first cloning and discarding its calculated data.
+    fn clone_with(&self, study: Box<dyn Indicator>) -> Self {
+        Self {
+            study,
+            settings: self.settings.clone(),
+            timeframe: self.timeframe,
+            instrument_precision: self.instrument_precision,
+            formatter: self.formatter.clone(),
+            overlay: self.overlay,
+            scale: self.scale,
+            scale_mapping: self.scale_mapping,
+            source: self.source,
+            calculation_symbol: self.calculation_symbol.clone(),
+            calculation_timeframe: self.calculation_timeframe,
+            wait_for_close: self.wait_for_close,
+            offset: self.offset,
+            clock: self.clock.clone(),
+            aligned: self.aligned.clone(),
+            aligned_bars: self.aligned_bars.clone(),
+            spans: self.spans.clone(),
+            visible: self.visible.clone(),
+            aligned_markers: self.aligned_markers.clone(),
+            aligned_zones: self.aligned_zones.clone(),
+            kept: self.kept.clone(),
+        }
+    }
+
     /// Retain the study's current colours, widths and calculation parameters.
     pub fn new(study: Box<dyn Indicator>) -> Self {
         let mut settings = study.settings();
@@ -788,18 +877,26 @@ impl Indicator for ConfiguredStudy {
     fn data_requests(&self) -> Vec<super::StudyDataRequest> {
         if !self.calculation_symbol.is_empty() || self.calculation_timeframe.is_some() {
             // The bars come first: `update_data` reads them from the head. The study's own
-            // metric requests (exchange rates) follow, as they are not bars of that interval.
+            // metric requests (exchange rates) follow, and the candles it reads inside the
+            // Interval's bars, as they are not bars of that interval.
             let mut requests = vec![super::StudyDataRequest {
                 metric: None,
                 symbol: self.calculation_symbol.clone(),
                 timeframe: self.calculation_timeframe,
             }];
-            requests.extend(
-                self.study
-                    .data_requests()
-                    .into_iter()
-                    .filter(|request| request.metric.is_some()),
-            );
+            // Bars inside the Interval's bars, on the chart symbol, are the candles a chart of
+            // that interval would read (24-hour Volume on 1W reads hourly candles).
+            let inside = |timeframe: Timeframe| {
+                self.calculation_symbol.is_empty()
+                    && !timeframe.is_trade_based()
+                    && self
+                        .calculation_timeframe
+                        .is_some_and(|interval| timeframe.duration_ms() < interval.duration_ms())
+            };
+            requests.extend(self.study.data_requests().into_iter().filter(|request| {
+                request.metric.is_some()
+                    || (request.symbol.is_empty() && request.timeframe.is_some_and(inside))
+            }));
             requests
         } else {
             self.study.data_requests()
@@ -1374,6 +1471,25 @@ impl Indicator for ConfiguredStudy {
         if bands > 0 && bands < self.study.fills().len() {
             settings.fills.truncate(bands);
         }
+        // A band saved before its style alone decided whether it is drawn was not drawn while
+        // a boundary plot was hidden, so it keeps that look with its own switch off.
+        let declared = edited.study.fills();
+        let hidden = |boundary| match boundary {
+            super::FillBoundary::Plot(line) => {
+                settings.plots.get(line).is_some_and(|plot| !plot.visible)
+            }
+            super::FillBoundary::Level(_) => false,
+        };
+        for (band, style) in settings.fills.iter_mut().enumerate() {
+            if !style.independent
+                && declared
+                    .get(band)
+                    .is_some_and(|fill| hidden(fill.first) || hidden(fill.second))
+            {
+                style.visible = false;
+            }
+            style.independent = true;
+        }
         match_declared_styles(edited.study.as_ref(), &mut settings);
         if self.study.value_format() != edited.study.value_format() {
             self.formatter = None;
@@ -1642,6 +1758,9 @@ impl Indicator for ConfiguredStudy {
     }
     fn clone_box(&self) -> Box<dyn Indicator> {
         Box::new(self.clone())
+    }
+    fn clone_for_export(&self) -> Box<dyn Indicator> {
+        Box::new(self.clone_with(self.study.clone_for_export()))
     }
 }
 
@@ -1943,6 +2062,60 @@ mod tests {
             .set_input("calculation_timeframe", InputValue::Timeframe(None))
             .unwrap();
         assert_eq!(study.data_requests(), [eur]);
+    }
+
+    /// 24-hour Volume on an Interval longer than a day asks for the lower-interval candles a
+    /// chart of that interval asks for, after that interval's bars, and sums the last 24 hours
+    /// of each of its bars from them.
+    #[test]
+    fn volume_24h_on_a_weekly_interval_sums_lower_candles() {
+        use crate::model::BarClock;
+        let at = |day: i64, hour: i64| {
+            chrono::DateTime::UNIX_EPOCH
+                + chrono::Duration::days(day)
+                + chrono::Duration::hours(hour)
+        };
+        let flat = |time, volume| Bar::new(time, 10.0, 10.0, 10.0, 10.0, volume);
+        let mut study = ConfiguredStudy::new(Box::new(super::super::Volume24h::new()));
+        study.set_timeframe(Timeframe::Hour1);
+        study.set_bar_clock(&BarClock::new(Timeframe::Hour1));
+        let weekly = InputValue::Timeframe(Some(Timeframe::Week1));
+        study.set_input("calculation_timeframe", weekly).unwrap();
+        let bars_request = study.data_requests()[0].clone();
+        let hourly = super::super::StudyDataRequest {
+            metric: None,
+            symbol: String::new(),
+            timeframe: Some(Timeframe::Hour1),
+        };
+        // Weeks open on Monday 1970-01-05 (day 4) and Monday 1970-01-12 (day 11).
+        let weeks = [flat(at(4, 0), 99.0), flat(at(11, 0), 99.0)];
+        // The first week's last candle, Sunday 1970-01-11 23:00, closes at 1970-01-12 00:00, so
+        // its window holds the candles opening from 1970-01-11 00:00: 2 + 3 = 5. The candle of
+        // Saturday 1970-01-10 22:00 is older. The second week has no candles and no value.
+        let candles = [
+            flat(at(9, 22), 7.0),
+            flat(at(10, 22), 2.0),
+            flat(at(10, 23), 3.0),
+        ];
+        let source = |request, bars, timeframe| super::super::StudyData {
+            request,
+            bars,
+            clock: BarClock::new(timeframe),
+            instrument: None,
+            timeframe,
+        };
+        let chart = [flat(at(11, 0), 1.0)];
+        study.update_data(
+            &chart,
+            0,
+            &[
+                source(bars_request.clone(), &weeks, Timeframe::Week1),
+                source(hourly.clone(), &candles, Timeframe::Hour1),
+            ],
+        );
+        // The chart bar at 1970-01-12 00:00 shows the first week, which closed then.
+        assert_eq!(study.values().value(0, 0), Some(5.0));
+        assert_eq!(study.data_requests(), [bars_request, hourly]);
     }
 
     #[test]
@@ -2530,5 +2703,15 @@ mod tests {
         study.apply_settings(&[], settings).unwrap();
         study.snapshot_settings().restore(&mut study).unwrap();
         assert_eq!(study.fills()[0].color, own);
+    }
+
+    /// `StudySettings::default()`, where an `Indicator::settings` override starts, holds what
+    /// settings saved with only the original fields restore, so it shows the status line values
+    /// and the pane tint.
+    #[test]
+    fn default_settings_match_settings_saved_without_the_newer_fields() {
+        let saved: StudySettings =
+            serde_json::from_str(r#"{"plots":[],"precision":null,"hidden_intervals":[]}"#).unwrap();
+        assert_eq!(StudySettings::default(), saved);
     }
 }

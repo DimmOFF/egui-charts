@@ -11,6 +11,7 @@ use egui::{Context, Event, KeyboardShortcut};
 /// types that key's character, as some layouts need, unless another binding names that exact
 /// combination.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct ShortcutMap {
     /// Key combinations and their actions, in precedence order.
     pub bindings: Vec<(KeyboardShortcut, KeyboardAction)>,
@@ -71,7 +72,8 @@ impl ShortcutMap {
         };
         find(false).or_else(|| {
             typed_char(key)
-                .filter(|c| !c.is_alphanumeric())
+                // Punctuation only: Shift with a letter, a digit or space is its own shortcut.
+                .filter(|c| !c.is_alphanumeric() && !c.is_whitespace())
                 // Shift+Period typing `>` on a US layout is not the period.
                 .filter(|_| typed.is_none_or(|text| egui::Key::from_name(text) == Some(key)))
                 .and_then(|_| find(true))
@@ -168,9 +170,15 @@ fn starts_entry(text: &str) -> bool {
         .is_some_and(|c| !c.is_control() && !c.is_whitespace())
 }
 
-/// The character naming a letter, digit or punctuation key, the keys whose press types text.
+/// The character of a letter, digit, punctuation or space key, the keys whose press types text.
 fn typed_char(key: egui::Key) -> Option<char> {
-    let mut symbol = key.symbol_or_name().chars();
+    let mut symbol = match key {
+        // egui names these two by a word, although they type a character.
+        egui::Key::Quote => "'",
+        egui::Key::Space => " ",
+        _ => key.symbol_or_name(),
+    }
+    .chars();
     let c = symbol.next()?;
     // The arrows are named by a glyph and type nothing; the minus key by the minus sign.
     (symbol.next().is_none() && (c.is_ascii() || key == egui::Key::Minus)).then_some(c)
@@ -316,6 +324,14 @@ impl super::Chart {
         {
             self.drawings.place_at_pointer = false;
         }
+        // A drawing drag released while the chart was not shown ends once the pointer is up, so
+        // undo and the drawing keys do not wait for a release the chart never sees.
+        #[cfg(feature = "drawings")]
+        if self.drawings.dragging_handle.is_some()
+            && ctx.input(|input| !input.pointer.any_down() && !input.pointer.any_released())
+        {
+            self.user_action(|chart| chart.drawings.end_drag_handle());
+        }
         ctx.data_mut(|data| {
             data.insert_temp(
                 egui::Id::NULL.with("chart_shortcuts"),
@@ -376,6 +392,20 @@ impl super::Chart {
             while self.nudge_selected_drawing(ctx) {}
             self.keyboard.map.consume(ctx, true, |_, _| true)
         } {
+            // Drawing edits wait for a drawing drag to end, as undo does: the release records the
+            // drag from the state it started in, which an edit meanwhile would no longer lead to.
+            #[cfg(feature = "drawings")]
+            if self.drawings.drag_in_progress()
+                && matches!(
+                    action,
+                    KeyboardAction::DeleteSelectedDrawing
+                        | KeyboardAction::DrawingTool(_)
+                        | KeyboardAction::PasteDrawing
+                        | KeyboardAction::ToggleDrawings
+                )
+            {
+                continue;
+            }
             if action == KeyboardAction::PasteDrawing
                 && let Event::Paste(text) = event
             {
@@ -468,6 +498,10 @@ impl super::Chart {
         let Some(key) = key else {
             return false;
         };
+        // The key is taken without effect during a drag, which records the drawing on release.
+        if self.drawings.drag_in_progress() {
+            return true;
+        }
         let step = self
             .instrument()
             .and_then(|i| i.tick_size.filter(|s| s.is_finite() && *s > 0.0))
@@ -814,6 +848,88 @@ mod tests {
         }
     }
 
+    fn press(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// Ctrl+Alt+H hides every drawing unless all are hidden, and then shows them all.
+    #[cfg(feature = "drawings")]
+    #[test]
+    fn hide_drawings_key_hides_all_unless_all_are_hidden() {
+        use crate::drawings::{ChartPoint, Drawing, DrawingToolType};
+        use crate::widget::test_frames::frame;
+        for (hidden, shown) in [
+            ([false, false, false], false),
+            ([false, true, false], false),
+            ([true, true, true], true),
+        ] {
+            let ctx = Context::default();
+            let mut chart = chart(&[10.0], &[20.0]);
+            for (id, hidden) in hidden.into_iter().enumerate() {
+                let mut drawing = Drawing::new(id, DrawingToolType::HorizontalLine);
+                drawing.chart_points = vec![ChartPoint::new(30.0, 14.0 + id as f64)];
+                drawing.completed = true;
+                drawing.visible = !hidden;
+                chart.drawings_mut().drawings.push(drawing);
+            }
+            frame(&ctx, &mut chart, 0.0, vec![]);
+            let hide = press(Key::H, Modifiers::COMMAND.plus(Modifiers::ALT));
+            frame(&ctx, &mut chart, 1.0, vec![hide]);
+            let visible: Vec<_> = chart
+                .drawings()
+                .drawings
+                .iter()
+                .map(|d| d.visible)
+                .collect();
+            assert_eq!(visible, [shown; 3], "{hidden:?}");
+        }
+    }
+
+    /// Drawings hidden by Ctrl+Alt+H or by undoing a show are deselected, so Delete and the
+    /// arrows leave them alone.
+    #[cfg(feature = "drawings")]
+    #[test]
+    fn hidden_drawings_ignore_delete_and_arrow_keys() {
+        use crate::drawings::{ChartPoint, Drawing, DrawingToolType};
+        use crate::widget::test_frames::frame;
+        let ctx = Context::default();
+        let mut chart = chart(&[10.0], &[20.0]);
+        let mut drawing = Drawing::new(7, DrawingToolType::TrendLine);
+        drawing.chart_points = vec![ChartPoint::new(30.0, 14.0), ChartPoint::new(70.0, 17.0)];
+        drawing.completed = true;
+        chart.drawings_mut().drawings.push(drawing.clone());
+        chart.drawings_mut().select(7);
+        frame(&ctx, &mut chart, 0.0, vec![]);
+        let hide = press(Key::H, Modifiers::COMMAND.plus(Modifiers::ALT));
+        for (i, event) in [
+            hide.clone(),
+            press(Key::Delete, Modifiers::NONE),
+            press(Key::ArrowRight, Modifiers::NONE),
+            hide,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            frame(&ctx, &mut chart, 1.0 + i as f64, vec![event]);
+        }
+        let drawings = &chart.drawings().drawings;
+        assert_eq!(drawings.len(), 1);
+        assert!(drawings[0].visible);
+        assert_eq!(drawings[0].chart_points, drawing.chart_points);
+        // Undoing the show hides the drawing again and deselects it too.
+        chart.drawings_mut().select(7);
+        assert!(chart.undo());
+        let delete = press(Key::Delete, Modifiers::NONE);
+        frame(&ctx, &mut chart, 5.0, vec![delete]);
+        assert_eq!(chart.drawings().drawings.len(), 1);
+    }
+
     #[test]
     fn reset_chart_restores_time_and_every_price_scale() {
         use crate::model::SeriesScale;
@@ -1091,28 +1207,56 @@ mod tests {
                 assert_eq!(chart.take_shortcut_requests(), vec![request]);
             }
         }
-        chart.shortcuts_mut().bindings.push((
-            KeyboardShortcut::new(Modifiers::NONE, Key::F),
-            KeyboardAction::FitContent,
-        ));
-        // A press that ran a binding types nothing, whatever character its text carries.
-        for (key, modifiers, text) in [
-            (Key::F, Modifiers::NONE, "f"),
-            (Key::L, Modifiers::ALT, "¬"),
-            (Key::Minus, Modifiers::NONE, "-"),
+        let typed = |text: &str| Event::Text(text.into());
+        let quote = press(Key::Quote, Modifiers::NONE);
+        ctx.run_ui(
+            RawInput {
+                events: vec![quote.clone(), typed("'")],
+                ..Default::default()
+            },
+            |ui| {
+                chart.show(ui);
+            },
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(
+            chart.take_shortcut_requests(),
+            vec![ShortcutRequest::SymbolSearch("'".into())],
+            "an unbound quote key types its character"
+        );
+        for (key, action) in [
+            (Key::F, KeyboardAction::FitContent),
+            (Key::Quote, KeyboardAction::ToggleGrid),
         ] {
+            chart
+                .shortcuts_mut()
+                .bindings
+                .push((KeyboardShortcut::new(Modifiers::NONE, key), action));
+        }
+        // A press that ran a binding types nothing, whatever character its text carries and in
+        // either order, and a space typed before it in the same frame is not taken for its text.
+        for (events, text) in [
+            (vec![press(Key::F, Modifiers::NONE), typed("f")], "f"),
+            (vec![press(Key::L, Modifiers::ALT), typed("¬")], "¬"),
+            (vec![press(Key::Minus, Modifiers::NONE), typed("-")], "-"),
+            (vec![quote.clone(), typed("'")], "'"),
+            (vec![typed("'"), quote.clone()], "'"),
+            (
+                vec![
+                    press(Key::Space, Modifiers::NONE),
+                    typed(" "),
+                    press(Key::Minus, Modifiers::NONE),
+                    typed("-"),
+                ],
+                "-",
+            ),
+        ] {
+            let grid = chart.config().show_grid;
+            let toggles_grid = events.contains(&quote);
+            let fed = format!("{events:?}");
             ctx.run_ui(
                 RawInput {
-                    events: vec![
-                        Event::Key {
-                            key,
-                            physical_key: None,
-                            pressed: true,
-                            repeat: false,
-                            modifiers,
-                        },
-                        Event::Text(text.into()),
-                    ],
+                    events,
                     ..Default::default()
                 },
                 |ui| {
@@ -1120,14 +1264,16 @@ mod tests {
                 },
             )
             .drop_without_applying_deltas();
-            assert!(
-                chart.take_shortcut_requests().is_empty(),
-                "{key:?} is bound and must not also open symbol search"
+            assert_eq!(
+                chart.take_shortcut_requests(),
+                vec![],
+                "{fed} is bound and must not also open symbol search"
             );
             assert!(
-                !ctx.input(|input| input.events.contains(&Event::Text(text.into()))),
-                "{key:?} leaves no text for a host dialog"
+                !ctx.input(|input| input.events.contains(&typed(text))),
+                "{fed} leaves no text for a host dialog"
             );
+            assert_eq!(chart.config().show_grid, grid != toggles_grid, "{fed}");
         }
         assert_eq!(
             chart.state.price_scale().options().mode,

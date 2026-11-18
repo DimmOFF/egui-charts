@@ -502,10 +502,7 @@ impl Terminal {
             .resizable(false)
             .exact_size(49.0)
             .show_separator_line(false)
-            .frame(panel_frame(bg).outer_margin(egui::Margin {
-                left: 4,
-                ..egui::Margin::ZERO
-            }))
+            .frame(panel_frame(bg).outer_margin(egui::Margin::symmetric(2, 0)))
             .show(ui, |ui| match bar.show(ui) {
                 WidgetBarAction::None => {}
                 action => emitted.push(Action::WidgetBar(action)),

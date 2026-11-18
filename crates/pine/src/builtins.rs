@@ -3284,6 +3284,13 @@ fn inverse(
     Some(value)
 }
 
+/// The chart's own colours, as `chart.bg_color` and `chart.fg_color` answer them: a transparent
+/// background blends with any pane, and the foreground is the text of the app's dark theme.
+// shortcut: chart colours ignore the selected theme, pass it through `Context` if a light theme
+// needs them.
+pub const CHART_BG_COLOR: Color32 = Color32::TRANSPARENT;
+pub const CHART_FG_COLOR: Color32 = Color32::from_rgb(209, 212, 220);
+
 /// Pine's `color.*` constants, which an input default often is.
 pub fn color_constant(name: &str) -> Option<Color32> {
     Some(match name {

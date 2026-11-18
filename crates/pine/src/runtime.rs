@@ -1202,10 +1202,8 @@ impl<'a> Evaluator<'a> {
             "syminfo.pointvalue" => return Value::Num(1.0),
             // The theme is not known while a study runs; a transparent background blends with any
             // pane and the foreground matches the light text of the app's dark theme.
-            // shortcut: chart colours ignore the selected theme, pass it through Context if a light
-            // theme ever needs them.
-            "chart.bg_color" => return Value::Color(Color32::TRANSPARENT),
-            "chart.fg_color" => return Value::Color(Color32::from_rgb(209, 212, 220)),
+            "chart.bg_color" => return Value::Color(builtins::CHART_BG_COLOR),
+            "chart.fg_color" => return Value::Color(builtins::CHART_FG_COLOR),
             // A study is computed over the whole series it holds, so all of it counts as visible.
             "chart.left_visible_bar_time" => {
                 return Value::Num(

@@ -1547,9 +1547,16 @@ fn default_value(expr: &Expr) -> Value {
     }
     if let Some(path) = path_of(expr) {
         let joined = path.join(".");
-        if let Some(name) = joined.strip_prefix("color.")
-            && let Some(color) = crate::builtins::color_constant(name)
-        {
+        let color = match joined.as_str() {
+            // The chart's colours keep their runtime value, so an input default is the same colour
+            // the script reads from `chart.fg_color`.
+            "chart.bg_color" => Some(crate::builtins::CHART_BG_COLOR),
+            "chart.fg_color" => Some(crate::builtins::CHART_FG_COLOR),
+            _ => joined
+                .strip_prefix("color.")
+                .and_then(crate::builtins::color_constant),
+        };
+        if let Some(color) = color {
             return Value::Color(color);
         }
     }

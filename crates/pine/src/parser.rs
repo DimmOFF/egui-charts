@@ -1425,10 +1425,6 @@ fn input_declaration(
     let group = setting("group");
     let inline = setting("inline");
     let tooltip = setting("tooltip");
-    // `display = display.none` keeps the value out of the study's status line.
-    let hidden = arg(args, "display")
-        .and_then(path_of)
-        .is_some_and(|path| path.join(".") == "display.none");
     let options = arg(args, "options").and_then(|expr| match expr {
         Expr::Array(items) => Some(
             items
@@ -1523,6 +1519,17 @@ fn input_declaration(
             default_expr,
         ),
         _ => (InputKind::Text, default_expr),
+    };
+    // A status line lists the study's numbers and text. TradingView leaves a boolean out unless
+    // the input asks for it, and `display.none` or a single other target keeps the value out too.
+    let hidden = match arg(args, "display")
+        .and_then(path_of)
+        .map(|path| path.join("."))
+        .as_deref()
+    {
+        Some("display.all" | "display.status_line") => false,
+        Some(_) => true,
+        None => matches!(kind, InputKind::Toggle),
     };
     Some(InputDecl {
         id,

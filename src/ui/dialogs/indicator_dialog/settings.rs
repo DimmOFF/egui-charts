@@ -369,7 +369,7 @@ impl IndicatorSettingsDialog {
         let mut cancel = false;
         let title = l10n::format_text(ctx, "{name} settings", &[("name", self.title.as_str())]);
         Modal::new("indicator_settings", title)
-            .width(620.0)
+            .width(500.0)
             .height(560.0)
             .top(120.0)
             .draggable(true)
@@ -533,8 +533,13 @@ impl IndicatorSettingsDialog {
                                         }
                                         // Leave the fields a fixed part of the row, so a long
                                         // title is shortened instead of pushing them out.
-                                        let fields =
-                                            (ui.available_width() * 0.4).clamp(120.0, 240.0);
+                                        let fields = crate::ui::strategy_report::inputs::control_width(
+                                            &input.kind,
+                                        )
+                                        .map_or_else(
+                                            || (ui.available_width() * 0.4).clamp(120.0, 240.0),
+                                            |width| width + 24.0,
+                                        );
                                         let label = ui
                                             .allocate_ui_with_layout(
                                                 egui::vec2(

@@ -669,10 +669,11 @@ fn study_input(decl: &InputDecl) -> StudyInput {
         (crate::ast::InputKind::Symbol, _) => {
             (InputValue::Symbol(String::new()), InputKind::Symbol)
         }
-        // The library has no session input, so a session is edited as its text.
+        // An `input.session` is edited as its start and end times, and the study reads the text
+        // Pine expects, `HHMM-HHMM`.
         (crate::ast::InputKind::Session, default) => (
             InputValue::Text(default.text().unwrap_or_default().to_owned()),
-            InputKind::Text,
+            InputKind::Session,
         ),
         (crate::ast::InputKind::Choice(choices), default) => {
             let index = default
@@ -825,6 +826,27 @@ mod tests {
         assert!(!study.set_chart_colors(background, foreground));
         study.calculate(&bars(&[1.0]));
         assert_eq!(study.values().line(0), &[16.0]);
+    }
+
+    /// A session input is edited as two times and still holds the text the script reads.
+    #[test]
+    fn a_session_input_is_edited_as_times_and_keeps_its_text() {
+        let mut study = PineStudy::new(
+            "indicator(\"T\")\ns = input.session(\"0112-0212\", \"Session\")\nplot(1)\n",
+        )
+        .unwrap();
+        assert!(matches!(study.inputs()[0].kind, InputKind::Session));
+        assert_eq!(
+            study.inputs()[0].value,
+            InputValue::Text("0112-0212".into())
+        );
+        study
+            .set_input("Session", InputValue::Text("0930-1600".into()))
+            .unwrap();
+        assert_eq!(
+            study.inputs()[0].value,
+            InputValue::Text("0930-1600".into())
+        );
     }
 
     /// Saved instance settings key the inputs by these, so an edit above the call must not move

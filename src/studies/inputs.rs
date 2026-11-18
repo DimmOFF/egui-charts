@@ -24,6 +24,9 @@ pub enum InputKind {
     Timeframe,
     /// A host-resolved symbol, or the chart symbol.
     Symbol,
+    /// A time-of-day range, such as Pine's `input.session`, edited as a start and an end field.
+    /// The value is the text the study reads, `HHMM-HHMM` for Pine.
+    Session,
     /// Text on one line.
     Text,
 }
@@ -132,7 +135,8 @@ impl StudyInput {
             | (InputKind::Color, InputValue::Color(_))
             | (InputKind::Timeframe, InputValue::Timeframe(_)) => true,
             (InputKind::Symbol, InputValue::Symbol(value))
-            | (InputKind::Text, InputValue::Text(value)) => {
+            | (InputKind::Text, InputValue::Text(value))
+            | (InputKind::Session, InputValue::Text(value)) => {
                 value.trim() == value && !value.chars().any(char::is_control)
             }
             _ => false,

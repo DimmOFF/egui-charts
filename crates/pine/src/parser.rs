@@ -599,6 +599,7 @@ impl Parser {
 
     /// `type Foo` or `enum Bar`: the indented fields with their defaults.
     fn parse_type(&mut self) -> Result<TypeDecl, String> {
+        let is_enum = self.at_ident("enum");
         self.advance();
         let name = self.ident()?;
         self.end_line()?;
@@ -611,10 +612,11 @@ impl Parser {
                     name,
                     default: Some(value),
                 }),
-                // `box[] _box` leaves the type word behind and parses as the bare name.
+                // `box[] _box` leaves the type word behind and parses as the bare name. A bare
+                // `enum` entry is its own name as text, which is the value Pine gives it.
                 Stmt::Expr(Expr::Ident(name)) => Some(FieldDecl {
+                    default: is_enum.then(|| Expr::Str(name.as_str().into())),
                     name,
-                    default: None,
                 }),
                 _ => None,
             })

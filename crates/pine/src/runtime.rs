@@ -2077,6 +2077,14 @@ impl<'a> Evaluator<'a> {
             {
                 return self.call_function(function, id, args, Some(value), line);
             }
+            // An `enum` entry is text, which carries no type name: call the one method of that
+            // name. A script declaring two of them needs a type the value does not have, so it
+            // stays unsupported.
+            if matches!(value, Value::Str(_))
+                && let Some(function) = self.single_method(method)
+            {
+                return self.call_function(function, id, args, Some(value), line);
+            }
         }
         if let Some(rest) = name.strip_prefix("timeframe.") {
             return match rest {
@@ -2144,6 +2152,21 @@ impl<'a> Evaluator<'a> {
             return self.call_function(function, id, args, None, line);
         }
         self.unsupported(line, &name)
+    }
+
+    /// The one method named `method` the script declares, for a receiver whose type the value
+    /// does not carry.
+    fn single_method(&self, method: &str) -> Option<&'a Function> {
+        let mut found = None;
+        for methods in self.methods.values() {
+            if let Some(function) = methods.get(method) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(*function);
+            }
+        }
+        found
     }
 
     /// `request.security(...)`: the value of the call, kept as this bar's reading when this run is
@@ -2215,6 +2238,11 @@ impl<'a> Evaluator<'a> {
                 ta: HashMap::new(),
                 referenced: None,
             });
+        if !lookahead && slot.key.is_none() {
+            // The first sighting may be late, as a request inside `if barstate.islast` is: Pine
+            // still reads the completed higher bars, so build them from the chart that ran before.
+            self.seed_security(&mut slot, expr);
+        }
         if lookahead {
             if slot.key != Some(key) {
                 // The higher bar is known whole from the first chart bar of its bucket, which is
@@ -2259,6 +2287,37 @@ impl<'a> Evaluator<'a> {
         let value = slot.values.last().cloned().unwrap_or(Value::Na);
         self.security.insert((id, bucket), slot);
         value
+    }
+
+    /// Builds a `request.security` slot first seen at the current bar from the chart bars before
+    /// it, as if the script had asked on every bar.
+    ///
+    /// shortcut: script variables in the expression read their value at the current bar, not at
+    /// each higher bar's close; upgrade when a request first seen late reads such a variable.
+    fn seed_security(&mut self, slot: &mut SecuritySlot, expr: &Expr) {
+        let bucket = slot.bucket;
+        let mut key = None;
+        for index in 0..self.bar {
+            let Some(bar) = self.bars.get(index).cloned() else {
+                break;
+            };
+            let at = bucket.key(bar.time.timestamp_millis());
+            if key != Some(at) {
+                if key.is_some() {
+                    let completed = slot.bars.len() - 1;
+                    let value = self.eval_security(slot, expr, completed);
+                    slot.values.push(value);
+                }
+                slot.bars.push(bar);
+                key = Some(at);
+            } else if let Some(live) = slot.bars.last_mut() {
+                live.high = live.high.max(bar.high);
+                live.low = live.low.min(bar.low);
+                live.close = bar.close;
+                live.volume += bar.volume;
+            }
+        }
+        slot.key = key;
     }
 
     /// `request.security` on a timeframe below the chart's. The chart holds no bars that fine, so
@@ -4246,6 +4305,20 @@ mod tests {
         assert_eq!(values[120], 61.0);
     }
 
+    /// A request written inside a branch that first runs at the last bar, as a table drawn in
+    /// `barstate.islast`, still reads the higher series Pine evaluates on every bar.
+    #[test]
+    fn a_request_first_read_at_the_last_bar_sees_the_higher_series() {
+        let output = run_bars(
+            "indicator(\"T\", overlay=true)\nvar float shown = na\nif barstate.islast\n    shown := request.security(syminfo.tickerid, \"60\", close[1])\nplot(shown)\n",
+            minute_bars(180),
+        );
+        let values = &output.plots[0].values;
+        assert!(values[119].is_nan(), "the request runs at the last bar only");
+        // The hour that closed at 02:00 has hour one, closing at 60, behind it.
+        assert_eq!(values[179], 60.0);
+    }
+
     #[test]
     fn lookahead_on_reads_the_higher_bar_from_its_first_chart_bar() {
         let output = run_bars(
@@ -5726,6 +5799,31 @@ plot(str.tostring(Side.short) == "short" ? 1 : 0, "short")
         assert_eq!(at("fact"), 120.0);
         assert_eq!(at("side"), 1.0);
         assert_eq!(at("short"), 1.0);
+    }
+
+    /// An `enum` entry without an assigned value is its own name as text, and a method whose
+    /// receiver is that enum dispatches on it.
+    #[test]
+    fn a_bare_enum_entry_is_its_name_and_takes_its_method() {
+        let script = r#"indicator("T")
+enum Bias
+    Up
+    Down
+method label(Bias bias) =>
+    switch (bias)
+        Bias.Up => "up"
+        Bias.Down => "down"
+        => "?"
+b = Bias.Down
+plot(b == "Down" ? 1 : 0, "name")
+plot(b.label() == "down" ? 1 : 0, "method")
+plot(Bias.Up.label() == "up" ? 1 : 0, "entry")
+"#;
+        let output = run(script, &[1.0, 2.0]);
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        for plot in &output.plots {
+            assert_eq!(plot.values[1], 1.0, "{}", plot.title);
+        }
     }
 
     #[test]

@@ -216,6 +216,13 @@ pub trait Indicator: Send {
         Err("the study is not a script".into())
     }
 
+    /// Tells the study which colours the chart draws its own text and background with, for
+    /// studies that name them, such as Pine's `chart.fg_color`. Returns whether the study has to
+    /// be recalculated.
+    fn set_chart_colors(&mut self, _background: Color32, _foreground: Color32) -> bool {
+        false
+    }
+
     /// Optional study help article, opened by the host from the legend or context menu.
     /// Built-ins default to their API article; custom studies can supply a host URL.
     fn help_url(&self) -> Option<&str> {

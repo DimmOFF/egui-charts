@@ -51,6 +51,10 @@ pub struct Context {
     pub root: String,
     /// The Pine name of the instrument type, which `syminfo.type` reads.
     pub symbol_type: String,
+    /// The chart's background colour, which `chart.bg_color` reads.
+    pub background: Color32,
+    /// The chart's text colour, which `chart.fg_color` reads.
+    pub foreground: Color32,
     /// Set when the run's results are no longer wanted, such as when the bars moved on. A run
     /// stops at the next bar instead of finishing work that its study would discard.
     pub cancel: Option<Arc<AtomicBool>>,
@@ -65,6 +69,8 @@ impl Default for Context {
             exchange: String::new(),
             root: String::new(),
             symbol_type: String::new(),
+            background: builtins::CHART_BG_COLOR,
+            foreground: builtins::CHART_FG_COLOR,
             cancel: None,
         }
     }
@@ -1200,10 +1206,10 @@ impl<'a> Evaluator<'a> {
             "syminfo.mintick" => return Value::Num(self.context.mintick),
             // A contract's point value is unknown to the engine; one is the unit contract.
             "syminfo.pointvalue" => return Value::Num(1.0),
-            // The theme is not known while a study runs; a transparent background blends with any
-            // pane and the foreground matches the light text of the app's dark theme.
-            "chart.bg_color" => return Value::Color(builtins::CHART_BG_COLOR),
-            "chart.fg_color" => return Value::Color(builtins::CHART_FG_COLOR),
+            // The chart hands its palette to the study, so the colours it draws text with and
+            // the colours a script asks for match.
+            "chart.bg_color" => return Value::Color(self.context.background),
+            "chart.fg_color" => return Value::Color(self.context.foreground),
             // A study is computed over the whole series it holds, so all of it counts as visible.
             "chart.left_visible_bar_time" => {
                 return Value::Num(

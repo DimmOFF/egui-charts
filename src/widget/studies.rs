@@ -285,6 +285,8 @@ impl Chart {
         let events = held_events(&self.time_scale_events, self.frozen_source_events);
         let include_hidden = self.host_events.cursor_data_policy == CursorDataPolicy::IncludeHidden;
         let needed = needed(self.studies.indicators(), &self.study_ids, include_hidden);
+        let background = self.config.background_color;
+        let foreground = self.config.text_color;
         for (at, study) in self.studies.indicators_mut().iter_mut().enumerate() {
             if !needed[at] {
                 continue;
@@ -292,8 +294,16 @@ impl Chart {
             let instrument_changed = study.set_instrument(instrument.as_ref());
             let clock_changed = study.set_bar_clock(&clock);
             let events_changed = study.set_time_scale_events(events);
-            let background = study.update_ready();
-            if instrument_changed || clock_changed || events_changed || background {
+            // A study that names the chart's colours, as Pine's `chart.fg_color` does, follows a
+            // theme change.
+            let colors_changed = study.set_chart_colors(background, foreground);
+            let background_run = study.update_ready();
+            if instrument_changed
+                || clock_changed
+                || events_changed
+                || colors_changed
+                || background_run
+            {
                 self.pending_from[at] = Some(0);
                 self.element_studies.dirty = true;
                 self.readout_revision = crate::model::next_revision();
@@ -995,6 +1005,66 @@ mod tests {
         settle(&mut chart);
         assert!((output(&chart, 3).unwrap() - 125.0 / 3.0).abs() < 1e-8);
     }
+    /// A study that records the chart colours it is told about, as a Pine script reads them from
+    /// `chart.fg_color`.
+    struct Recoloured {
+        seen: Arc<std::sync::Mutex<(egui::Color32, egui::Color32)>>,
+        values: crate::studies::IndicatorValues,
+    }
+
+    impl Indicator for Recoloured {
+        fn name(&self) -> &str {
+            "Recoloured"
+        }
+        fn calculate(&mut self, _data: &[Bar]) {}
+        fn values(&self) -> &crate::studies::IndicatorValues {
+            &self.values
+        }
+        fn colors(&self) -> Vec<egui::Color32> {
+            Vec::new()
+        }
+        fn set_colors(&mut self, _colors: Vec<egui::Color32>) {}
+        fn set_visible(&mut self, _visible: bool) {}
+        fn set_chart_colors(
+            &mut self,
+            background: egui::Color32,
+            foreground: egui::Color32,
+        ) -> bool {
+            *self.seen.lock().unwrap() = (background, foreground);
+            false
+        }
+        fn clone_box(&self) -> Box<dyn Indicator> {
+            Box::new(Self {
+                seen: Arc::clone(&self.seen),
+                values: self.values.clone(),
+            })
+        }
+    }
+
+    /// The chart tells its studies which colours it draws text and background with, and a theme
+    /// change reaches them on the next frame.
+    #[test]
+    fn a_study_hears_the_chart_colours() {
+        let ctx = egui::Context::default();
+        let seen = Arc::new(std::sync::Mutex::new((
+            egui::Color32::TRANSPARENT,
+            egui::Color32::TRANSPARENT,
+        )));
+        let mut chart = Chart::new(BarData::from_bars(vec![bar(0, 1.0)]));
+        chart.add_indicator(Box::new(Recoloured {
+            seen: Arc::clone(&seen),
+            values: crate::studies::IndicatorValues::default(),
+        }));
+        shapes(&ctx, &mut chart, 0.0, Vec::new());
+        assert_eq!(
+            *seen.lock().unwrap(),
+            (chart.config().background_color, chart.config().text_color)
+        );
+        chart.config_mut().text_color = egui::Color32::from_rgb(1, 2, 3);
+        shapes(&ctx, &mut chart, 1.0, Vec::new());
+        assert_eq!(seen.lock().unwrap().1, egui::Color32::from_rgb(1, 2, 3));
+    }
+
     /// A flat bar at `close`, stamped `seconds` after 10:00.
     fn bar(seconds: i64, close: f64) -> Bar {
         let t =

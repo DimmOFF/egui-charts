@@ -3284,10 +3284,12 @@ fn inverse(
     Some(value)
 }
 
-/// The chart's own colours, as `chart.bg_color` and `chart.fg_color` answer them: a transparent
-/// background blends with any pane, and the foreground is the text of the app's dark theme.
-// shortcut: chart colours ignore the selected theme, pass it through `Context` if a light theme
-// needs them.
+/// The colours `chart.bg_color` and `chart.fg_color` answer when no chart supplied its palette,
+/// as in a host-less run: a transparent background blends with any pane, and the foreground is
+/// the text colour of the app's dark theme. A chart passes its own colours with
+/// [`Context::background`](crate::runtime::Context::background) and
+/// [`Context::foreground`](crate::runtime::Context::foreground), and input defaults folded from
+/// these names use this pair at parse time.
 pub const CHART_BG_COLOR: Color32 = Color32::TRANSPARENT;
 pub const CHART_FG_COLOR: Color32 = Color32::from_rgb(209, 212, 220);
 

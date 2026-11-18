@@ -711,6 +711,9 @@ impl Indicator for ConfiguredStudy {
     fn set_script_source(&mut self, source: &str) -> Result<(), String> {
         self.study.set_script_source(source)
     }
+    fn set_chart_colors(&mut self, background: Color32, foreground: Color32) -> bool {
+        self.study.set_chart_colors(background, foreground)
+    }
     fn help_url(&self) -> Option<&str> {
         self.settings
             .help_url

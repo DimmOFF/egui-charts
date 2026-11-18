@@ -148,6 +148,18 @@ impl PineStudy {
         Ok(())
     }
 
+    /// Takes the chart's own colours, which `chart.bg_color` and `chart.fg_color` read, and
+    /// returns whether they changed, so the chart recomputes the study.
+    pub fn set_chart_colors(&mut self, background: Color32, foreground: Color32) -> bool {
+        if self.context.background == background && self.context.foreground == foreground {
+            return false;
+        }
+        self.context.background = background;
+        self.context.foreground = foreground;
+        self.generation += 1;
+        true
+    }
+
     /// Takes `output`, a run over `bars` bars, as the values and drawings to draw.
     fn store(&mut self, output: RunOutput, bars: usize) {
         self.values = IndicatorValues::new();
@@ -239,6 +251,10 @@ impl Indicator for PineStudy {
 
     fn set_script_source(&mut self, source: &str) -> Result<(), String> {
         self.set_source(source)
+    }
+
+    fn set_chart_colors(&mut self, background: Color32, foreground: Color32) -> bool {
+        self.set_chart_colors(background, foreground)
     }
 
     fn calculate(&mut self, data: &[Bar]) {
@@ -794,6 +810,21 @@ mod tests {
         // A source that does not parse is refused and leaves the study as it was.
         assert!(study.set_source("indicator(").is_err());
         assert_eq!(study.inputs()[0].value, InputValue::Integer(21));
+    }
+
+    /// The chart hands the study its palette, so `chart.fg_color` is the colour the chart draws
+    /// its text with and a theme change recomputes the study.
+    #[test]
+    fn chart_colours_reach_the_script_and_are_reported_once() {
+        let mut study =
+            PineStudy::new("indicator(\"T\")\nplot(color.r(chart.fg_color))\n").unwrap();
+        study.calculate(&bars(&[1.0]));
+        assert_eq!(study.values().line(0), &[209.0]);
+        let (background, foreground) = (Color32::WHITE, Color32::from_rgb(16, 32, 48));
+        assert!(study.set_chart_colors(background, foreground));
+        assert!(!study.set_chart_colors(background, foreground));
+        study.calculate(&bars(&[1.0]));
+        assert_eq!(study.values().line(0), &[16.0]);
     }
 
     /// Saved instance settings key the inputs by these, so an edit above the call must not move

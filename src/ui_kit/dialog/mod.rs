@@ -260,6 +260,8 @@ pub struct DialogFooter {
     secondary_label: Option<String>,
     primary_enabled: bool,
     danger: bool,
+    accent_primary: bool,
+    filled_secondary: bool,
 }
 
 impl DialogFooter {
@@ -270,6 +272,8 @@ impl DialogFooter {
             secondary_label: None,
             primary_enabled: true,
             danger: false,
+            accent_primary: false,
+            filled_secondary: false,
         }
     }
 
@@ -288,6 +292,19 @@ impl DialogFooter {
     /// Mark the primary action as destructive: it is filled with the danger colour.
     pub fn danger(mut self) -> Self {
         self.danger = true;
+        self
+    }
+
+    /// Fill the primary action with the accent colour, as TradingView does, rather than with
+    /// the theme's strongest text colour.
+    pub fn accent_primary(mut self) -> Self {
+        self.accent_primary = true;
+        self
+    }
+
+    /// Fill the secondary action like a field instead of outlining it, as TradingView's Cancel.
+    pub fn filled_secondary(mut self) -> Self {
+        self.filled_secondary = true;
         self
     }
 
@@ -358,10 +375,26 @@ impl DialogFooter {
                         let outline = ui.visuals().widgets.inactive.fg_stroke.color;
                         let secondary_clicked =
                             self.secondary_label.as_ref().is_some_and(|label| {
-                                let hover = ui.visuals().widgets.hovered.bg_fill;
-                                let fill = [Color32::TRANSPARENT, hover, hover];
-                                let stroke = Stroke::new(DESIGN_TOKENS.stroke.hairline, outline);
-                                footer_button(ui, label, secondary_min_width, fill, outline, stroke)
+                                let (fill, text, stroke) = if self.filled_secondary {
+                                    let fill = colors.panel_bg_secondary;
+                                    (
+                                        [
+                                            fill,
+                                            fill.lerp_to_gamma(colors.text, 0.08),
+                                            fill.lerp_to_gamma(colors.text, 0.16),
+                                        ],
+                                        colors.text,
+                                        Stroke::NONE,
+                                    )
+                                } else {
+                                    let hover = ui.visuals().widgets.hovered.bg_fill;
+                                    (
+                                        [Color32::TRANSPARENT, hover, hover],
+                                        outline,
+                                        Stroke::new(DESIGN_TOKENS.stroke.hairline, outline),
+                                    )
+                                };
+                                footer_button(ui, label, secondary_min_width, fill, text, stroke)
                                     .clicked()
                             });
                         let (fill, text) = if self.danger {
@@ -371,6 +404,9 @@ impl DialogFooter {
                                 colors.danger_bg_active,
                             ];
                             (fill, colors.danger_text)
+                        } else if self.accent_primary {
+                            let fill = [colors.accent, colors.accent_hover, colors.accent_active];
+                            (fill, colors.accent_text)
                         } else {
                             // The text colour rather than the accent, so the confirming action
                             // has the strongest contrast in the dialog in every theme.

@@ -117,8 +117,10 @@ fn width_picker(ui: &mut egui::Ui, width: &mut f32) {
 /// A section heading above a group of inputs, as the settings dialog of TradingView draws it.
 fn section_heading(ui: &mut egui::Ui, title: &str, first: bool) {
     let theme = ui.active_theme();
-    if !first {
-        ui.add_space(theme.spacing.xxl);
+    if first {
+        ui.add_space(theme.spacing.lg);
+    } else {
+        ui.add_space(theme.spacing.xxxl - ui.spacing().item_spacing.y);
     }
     ui.add(
         egui::Label::new(
@@ -131,59 +133,88 @@ fn section_heading(ui: &mut egui::Ui, title: &str, first: bool) {
     ui.add_space(theme.spacing.md);
 }
 
-/// A checkbox as TradingView draws it: an outlined box that fills with the accent when checked.
+/// A checkbox as TradingView draws it: a filled rounded box that turns accent when checked, with
+/// a white tick and a label in the normal text colour.
 fn checkbox(
     ui: &mut egui::Ui,
     checked: &mut bool,
     label: impl Into<egui::WidgetText>,
 ) -> egui::Response {
     let theme = ui.active_theme();
-    let surface = ui.visuals().window_fill;
-    let border = surface.lerp_to_gamma(theme.ui.text, 0.25);
-    let hover = surface.lerp_to_gamma(theme.ui.text, 0.08);
+    let field = theme.ui.panel_bg_secondary;
+    let border = field.lerp_to_gamma(theme.ui.text, 0.16);
+    let size = ui.spacing().icon_width;
+    // egui paints its own box from the widget visuals; keep its input and accessibility and
+    // paint the TradingView box over it, as the chart settings checkboxes do.
     let previous = ui.visuals().widgets.clone();
     {
         let widgets = &mut ui.visuals_mut().widgets;
-        for state in [&mut widgets.inactive, &mut widgets.open] {
-            state.bg_fill = if *checked {
-                theme.ui.accent
-            } else {
-                egui::Color32::TRANSPARENT
-            };
-            state.bg_stroke = egui::Stroke::new(
-                crate::tokens::DESIGN_TOKENS.stroke.hairline,
-                if *checked { theme.ui.accent } else { border },
-            );
+        for state in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active] {
+            state.bg_fill = egui::Color32::TRANSPARENT;
+            state.bg_stroke = egui::Stroke::NONE;
+            state.fg_stroke.color = egui::Color32::TRANSPARENT;
         }
-        widgets.hovered.bg_fill = if *checked {
-            theme.ui.accent_hover
-        } else {
-            hover
-        };
-        widgets.hovered.bg_stroke = egui::Stroke::new(
-            crate::tokens::DESIGN_TOKENS.stroke.hairline,
-            if *checked {
-                theme.ui.accent
-            } else {
-                theme.ui.text_muted
-            },
-        );
-        widgets.active.bg_fill = theme.ui.accent_active;
     }
+    let label = egui::RichText::new(label.into().text()).color(theme.ui.text);
     let response = ui.checkbox(checked, label);
     ui.visuals_mut().widgets = previous;
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(response.rect.left(), response.rect.center().y - size / 2.0),
+        egui::Vec2::splat(size),
+    );
+    let fill = match (*checked, response.hovered()) {
+        (true, true) => theme.ui.accent_hover,
+        (true, false) => theme.ui.accent,
+        (false, true) => field.lerp_to_gamma(theme.ui.text, 0.10),
+        (false, false) => field,
+    };
+    let stroke = if *checked {
+        egui::Stroke::NONE
+    } else {
+        egui::Stroke::new(crate::tokens::DESIGN_TOKENS.stroke.hairline, border)
+    };
+    ui.painter().rect(
+        rect,
+        theme.radius.sm,
+        fill,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    if *checked {
+        let tick = rect.shrink(size * 0.28);
+        ui.painter().add(egui::Shape::line(
+            vec![tick.left_center(), tick.center_bottom(), tick.right_top()],
+            egui::Stroke::new(crate::tokens::DESIGN_TOKENS.stroke.medium, theme.ui.accent_text),
+        ));
+    }
+    crate::styles::focus::draw_focus_ring(ui, &response, theme.radius.sm);
     response
 }
 
-/// The question mark through which TradingView shows an input's tooltip.
+/// The circled `i` through which TradingView shows an input's tooltip.
 fn tooltip_mark(ui: &mut egui::Ui, tooltip: &str) {
     let theme = ui.active_theme();
-    let response = ui.add(
-        crate::icons::icons::WIDGET_BAR_HELP
-            .as_image_tinted(egui::vec2(14.0, 14.0), theme.ui.text_muted)
-            .sense(egui::Sense::hover()),
+    let diameter = 14.0;
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(diameter, diameter), egui::Sense::hover());
+    let color = if response.hovered() {
+        theme.ui.text
+    } else {
+        theme.ui.text_muted
+    };
+    let painter = ui.painter();
+    let stroke = egui::Stroke::new(1.0, color);
+    painter.circle_stroke(rect.center(), diameter / 2.0 - 0.5, stroke);
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "i",
+        egui::FontId::proportional(9.0),
+        color,
     );
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), "?"));
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), "Info")
+    });
     response.on_hover_text(l10n::text(ui.ctx(), tooltip));
 }
 
@@ -370,7 +401,7 @@ impl IndicatorSettingsDialog {
         let title = l10n::format_text(ctx, "{name} settings", &[("name", self.title.as_str())]);
         Modal::new("indicator_settings", title)
             .width(500.0)
-            .height(560.0)
+            .min_height(400.0)
             .top(120.0)
             .draggable(true)
             .show(ctx, &mut open, |ui| {
@@ -379,25 +410,37 @@ impl IndicatorSettingsDialog {
                     &mut self.tab,
                 )
                 .show(ui);
-                ui.separator();
                 if let Some(error) = &self.templates.error {
                     ui.colored_label(ui.visuals().error_fg_color, l10n::text(ui.ctx(), error));
                 }
-                // TradingView's fields are outlined boxes on the dialog surface, with
-                // roomier rows than the panels around them.
+                // TradingView's settings surface: filled rounded fields without an outline, a
+                // roomier row than the panels around them, and square, small checkboxes.
                 let theme = ui.active_theme();
-                let surface = ui.visuals().window_fill;
-                let widgets = &mut ui.visuals_mut().widgets;
-                for state in [&mut widgets.inactive, &mut widgets.open] {
-                    state.bg_fill = egui::Color32::TRANSPARENT;
-                    state.weak_bg_fill = egui::Color32::TRANSPARENT;
-                    state.bg_stroke = egui::Stroke::new(
-                        crate::tokens::DESIGN_TOKENS.stroke.hairline,
-                        surface.lerp_to_gamma(theme.ui.text, 0.25),
-                    );
+                let field = theme.ui.panel_bg_secondary;
+                let hover = field.lerp_to_gamma(theme.ui.text, 0.08);
+                let corner = theme.radius.md.into();
+                {
+                    let widgets = &mut ui.visuals_mut().widgets;
+                    for state in [&mut widgets.inactive, &mut widgets.open] {
+                        state.bg_fill = field;
+                        state.weak_bg_fill = field;
+                        state.bg_stroke = egui::Stroke::NONE;
+                        state.corner_radius = corner;
+                    }
+                    for state in [&mut widgets.hovered, &mut widgets.active] {
+                        state.bg_fill = hover;
+                        state.weak_bg_fill = hover;
+                        state.bg_stroke = egui::Stroke::NONE;
+                        state.corner_radius = corner;
+                    }
                 }
-                ui.spacing_mut().item_spacing.y = theme.spacing.md;
-                ui.spacing_mut().interact_size.y = 22.0;
+                // Text edits paint their fill from `extreme_bg_color`, not from the widgets.
+                ui.visuals_mut().extreme_bg_color = field;
+                ui.spacing_mut().item_spacing.y = theme.spacing.lg;
+                ui.spacing_mut().interact_size.y = 26.0;
+                ui.spacing_mut().button_padding = egui::vec2(theme.spacing.lg, theme.spacing.sm);
+                ui.spacing_mut().icon_width = 16.0;
+                ui.spacing_mut().icon_width_inner = 10.0;
                 egui::ScrollArea::vertical()
                     .max_height((ui.available_height() - 72.0).max(0.0))
                     .show(ui, |ui| match self.tab {
@@ -540,10 +583,16 @@ impl IndicatorSettingsDialog {
                                             || (ui.available_width() * 0.4).clamp(120.0, 240.0),
                                             |width| width + 24.0,
                                         );
+                                        // TradingView puts the tooltip mark by the label.
+                                        let mark = if input.tooltip.is_some() {
+                                            20.0
+                                        } else {
+                                            0.0
+                                        };
                                         let label = ui
                                             .allocate_ui_with_layout(
                                                 egui::vec2(
-                                                    (ui.available_width() - fields).max(0.0),
+                                                    (ui.available_width() - fields - mark).max(0.0),
                                                     ui.spacing().interact_size.y,
                                                 ),
                                                 egui::Layout::left_to_right(
@@ -560,12 +609,12 @@ impl IndicatorSettingsDialog {
                                                 },
                                             )
                                             .inner;
+                                        if let Some(tooltip) = &input.tooltip {
+                                            tooltip_mark(ui, tooltip);
+                                        }
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
-                                                if let Some(tooltip) = &input.tooltip {
-                                                    tooltip_mark(ui, tooltip);
-                                                }
                                                 crate::ui::strategy_report::inputs::show_input_control(
                                                     ui,
                                                     input,
@@ -933,6 +982,8 @@ impl IndicatorSettingsDialog {
                 let mut delete_template = None;
                 let mut save_template = false;
                 (apply, cancel) = DialogFooter::new("Ok")
+                    .accent_primary()
+                    .filled_secondary()
                     .primary_enabled(valid)
                     .secondary("Cancel")
                     .show_with_left(ui, |ui| {
@@ -955,7 +1006,16 @@ impl IndicatorSettingsDialog {
                             }
                         } else {
                             if self.tab == Tab::Inputs && !self.inputs.is_empty() {
-                                ui.menu_button(l10n::text(ui.ctx(), "Defaults"), |ui| {
+                                // TradingView offers the defaults behind a flat accent link.
+                                let link = ui.add(
+                                    egui::Button::new(egui::RichText::new(l10n::text(
+                                        ui.ctx(),
+                                        "Defaults",
+                                    ))
+                                    .color(theme.ui.accent))
+                                    .frame(false),
+                                );
+                                egui::Popup::menu(&link).show(|ui| {
                                     if ui
                                         .button(l10n::text(ui.ctx(), "Reset inputs"))
                                         .clicked()
@@ -987,10 +1047,15 @@ impl IndicatorSettingsDialog {
                                     }
                                 });
                             }
-                            if ui
-                                .button(l10n::text(ui.ctx(), "Save template"))
-                                .clicked()
-                            {
+                            let save = ui.add(
+                                egui::Button::new(egui::RichText::new(l10n::text(
+                                    ui.ctx(),
+                                    "Save template",
+                                ))
+                                .color(theme.ui.text_muted))
+                                .frame(false),
+                            );
+                            if save.clicked() {
                                 save_name = Some(String::new());
                             }
                         }
@@ -1173,6 +1238,9 @@ mod tests {
                     });
                 harness.run();
                 assert_eq!(harness.query_all_by_label("Latest value line").count(), 3);
+                // The narrow window scrolls the tail of the Style tab out of view.
+                harness.get_by_label("Band 1").scroll_to_me();
+                harness.run();
                 harness.get_by_label("Band 1").click();
                 harness.run();
                 harness.get_by_label(action).click();
@@ -2907,7 +2975,7 @@ mod tests {
         let heading = harness.get_by_label("ALERTS").rect();
         assert!(heading.top() >= fast.bottom(), "{heading:?} {fast:?}");
         let alerts = harness.get_by_label("Enable alerts").rect();
-        let mark = harness.get_by_label("?").rect();
+        let mark = harness.get_by_label("Info").rect();
         assert!(
             (mark.center().y - alerts.center().y).abs() < 1.0,
             "{mark:?} {alerts:?}"

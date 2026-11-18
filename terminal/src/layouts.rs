@@ -20,6 +20,9 @@ use egui_charts::widget::{
     Chart, ChartBuilder, ChartLayout, ChartLayoutMode, SavedLayout, SeriesId, ShortcutRequest,
 };
 
+/// The height of the strip of layout tabs, as TradingView's window tabs.
+const TAB_STRIP_HEIGHT: f32 = 26.0;
+
 /// An open layout. The one on show lives in the terminal; the others keep their slots here.
 struct Tab {
     name: String,
@@ -301,9 +304,6 @@ impl Terminal {
         let tab = &mut self.layouts.tabs[self.layouts.tab];
         tab.summary = summary;
         tab.change = change;
-        if self.layouts.tabs.len() <= 1 {
-            return;
-        }
         let ctx = ui.ctx().clone();
         let (close_hint, new_hint) = (
             l10n::text(&ctx, "Close layout"),
@@ -312,40 +312,68 @@ impl Terminal {
         let mut select = None;
         let mut close = None;
         let mut new = false;
+        let current = self.layouts.tab;
+        let strip = self.theme.ui.border;
+        let active = self.theme.ui.panel_bg;
+        let muted = self.theme.ui.text_muted;
+        // TradingView's window tabs: always on screen, the layout on show filled as the panel
+        // below it, the others on the strip colour, each with its close cross.
         egui::Panel::top("layout_tabs")
-            .exact_size(26.0)
+            .exact_size(TAB_STRIP_HEIGHT)
             .show_separator_line(false)
-            .frame(egui::Frame::new().fill(self.theme.ui.border))
+            .frame(egui::Frame::new().fill(strip))
             .show(ui, |ui| {
                 egui::ScrollArea::horizontal().show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
                         for (index, tab) in self.layouts.tabs.iter().enumerate() {
                             egui::Frame::new()
-                                .fill(if index == self.layouts.tab {
-                                    self.theme.ui.panel_bg
-                                } else {
-                                    self.theme.ui.border
-                                })
-                                .inner_margin(egui::Margin::symmetric(6, 0))
+                                .fill(if index == current { active } else { strip })
+                                .inner_margin(egui::Margin::symmetric(8, 0))
                                 .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        if ui
-                                            .add(egui::Button::new(&tab.summary).frame(false))
-                                            .on_hover_text(&tab.name)
-                                            .clicked()
-                                        {
-                                            select = Some(index);
-                                        }
-                                        let color = if tab.change >= 0.0 { up } else { down };
-                                        ui.colored_label(color, format!("{:+.2}%", tab.change));
-                                        if ui.small_button("×").on_hover_text(&close_hint).clicked()
-                                        {
-                                            close = Some(index);
-                                        }
-                                    });
+                                    ui.set_height(TAB_STRIP_HEIGHT);
+                                    ui.with_layout(
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.spacing_mut().item_spacing.x = 6.0;
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(&tab.summary)
+                                                        .frame(false)
+                                                        .wrap_mode(egui::TextWrapMode::Extend),
+                                                )
+                                                .on_hover_text(&tab.name)
+                                                .clicked()
+                                            {
+                                                select = Some(index);
+                                            }
+                                            let color = if tab.change >= 0.0 { up } else { down };
+                                            ui.colored_label(color, format!("{:+.2}%", tab.change));
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        egui::RichText::new("×").color(muted),
+                                                    )
+                                                    .frame(false),
+                                                )
+                                                .on_hover_text(&close_hint)
+                                                .clicked()
+                                            {
+                                                close = Some(index);
+                                            }
+                                        },
+                                    );
                                 });
                         }
-                        new = ui.small_button("+").on_hover_text(&new_hint).clicked();
+                        ui.add_space(6.0);
+                        new = ui
+                            .add(
+                                egui::Button::new("+")
+                                    .frame(false)
+                                    .min_size(egui::vec2(TAB_STRIP_HEIGHT, TAB_STRIP_HEIGHT)),
+                            )
+                            .on_hover_text(&new_hint)
+                            .clicked();
                     });
                 });
             });
@@ -697,7 +725,7 @@ mod tests {
             &mut terminal,
             LayoutAction::SelectGrid(ChartLayoutMode::Four),
         );
-        // One layout needs no strip, including on compact screens.
+        // The strip is always there, as TradingView's window tabs, even for one layout.
         let check_strip = |terminal: &mut Terminal, height| {
             let ctx = terminal.ctx();
             for width in [393.0, 599.0, 600.0, 1440.0] {
@@ -718,7 +746,7 @@ mod tests {
                 .drop_without_applying_deltas();
             }
         };
-        check_strip(&mut terminal, 0.0);
+        check_strip(&mut terminal, TAB_STRIP_HEIGHT);
         for (slot, width) in [(1, 0.6), (3, 0.9)] {
             terminal.activate_slot(slot);
             terminal.chart_mut().config_mut().candle_width = width;
@@ -748,7 +776,7 @@ mod tests {
         assert_eq!(terminal.layout.mode, ChartLayoutMode::Single);
         assert_eq!(terminal.charts.len(), 1);
         assert!(!terminal.chart().config().show_grid);
-        check_strip(&mut terminal, 26.0);
+        check_strip(&mut terminal, TAB_STRIP_HEIGHT);
         terminal
             .chart_mut()
             .user_action(|chart| chart.config_mut().show_grid = true);

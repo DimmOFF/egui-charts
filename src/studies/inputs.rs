@@ -51,6 +51,9 @@ pub struct StudyInput {
     pub inline: Option<String>,
     /// Help an editor shows beside the input.
     pub tooltip: Option<String>,
+    /// Keep the input's value out of the study's status line, as Pine's `display = display.none`
+    /// asks. Settings still list the input.
+    pub hidden_in_status: bool,
 }
 
 impl StudyInput {
@@ -71,6 +74,7 @@ impl StudyInput {
             group: None,
             inline: None,
             tooltip: None,
+            hidden_in_status: false,
         }
     }
 

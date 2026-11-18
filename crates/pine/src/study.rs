@@ -122,6 +122,32 @@ impl PineStudy {
         self.ctx = ctx;
     }
 
+    /// Re-parses `source` after the editor saved the script, keeping the values of the inputs the
+    /// script still declares. The chart's next update recomputes the study.
+    pub fn set_source(&mut self, source: &str) -> Result<(), String> {
+        let script = Script::parse(source)?;
+        let inputs: Vec<StudyInput> = script.inputs().iter().map(study_input).collect();
+        let previous: Vec<(String, InputValue)> = self
+            .inputs
+            .iter()
+            .map(|input| (input.id.clone(), input.value.clone()))
+            .collect();
+        self.name = script.program().title.clone();
+        self.overlay = script.program().overlay;
+        self.script = script;
+        self.inputs = inputs;
+        for (id, value) in previous {
+            // A value the new input no longer accepts falls back to the script's default.
+            let _ = self.set_input(&id, value);
+        }
+        if let Some(task) = self.task.take() {
+            task.cancel.store(true, Ordering::Relaxed);
+        }
+        self.clear_output();
+        self.generation += 1;
+        Ok(())
+    }
+
     /// Takes `output`, a run over `bars` bars, as the values and drawings to draw.
     fn store(&mut self, output: RunOutput, bars: usize) {
         self.values = IndicatorValues::new();
@@ -209,6 +235,10 @@ impl Indicator for PineStudy {
 
     fn script_editable(&self) -> bool {
         true
+    }
+
+    fn set_script_source(&mut self, source: &str) -> Result<(), String> {
+        self.set_source(source)
     }
 
     fn calculate(&mut self, data: &[Bar]) {
@@ -647,6 +677,7 @@ fn study_input(decl: &InputDecl) -> StudyInput {
     input.group = decl.group.clone();
     input.inline = decl.inline.clone();
     input.tooltip = decl.tooltip.clone();
+    input.hidden_in_status = decl.hidden;
     input
 }
 
@@ -739,6 +770,30 @@ mod tests {
                 .set_input(&fast, InputValue::Text("x".into()))
                 .is_err()
         );
+    }
+
+    /// Saving an edited source re-parses it in place: the study keeps the inputs the script still
+    /// declares and draws the new code, so the chart needs no remove and add.
+    #[test]
+    fn a_reloaded_script_keeps_its_inputs_and_takes_the_new_code() {
+        let data = bars(&[1.0, 2.0]);
+        let mut study = PineStudy::new(
+            "indicator(\"T\")\nlen = input.int(2, \"Length\")\nplot(len)\n",
+        )
+        .unwrap();
+        study
+            .set_input("Length", InputValue::Integer(21))
+            .expect("the input accepts a length");
+        study
+            .set_source("indicator(\"T\")\nlen = input.int(2, \"Length\")\nplot(len * 2)\n")
+            .unwrap();
+        assert_eq!(study.name(), "T");
+        assert_eq!(study.inputs()[0].value, InputValue::Integer(21));
+        study.calculate(&data);
+        assert_eq!(study.values().line(0), &[42.0, 42.0]);
+        // A source that does not parse is refused and leaves the study as it was.
+        assert!(study.set_source("indicator(").is_err());
+        assert_eq!(study.inputs()[0].value, InputValue::Integer(21));
     }
 
     /// Saved instance settings key the inputs by these, so an edit above the call must not move

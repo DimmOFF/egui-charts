@@ -209,6 +209,13 @@ pub trait Indicator: Send {
         false
     }
 
+    /// Re-parses `source` as the study's script after its editor saved it, so the chart shows the
+    /// edit without the study being removed and added again. The values of the inputs the script
+    /// still declares are kept. Studies that are not scripts leave this unsupported.
+    fn set_script_source(&mut self, _source: &str) -> Result<(), String> {
+        Err("the study is not a script".into())
+    }
+
     /// Optional study help article, opened by the host from the legend or context menu.
     /// Built-ins default to their API article; custom studies can supply a host URL.
     fn help_url(&self) -> Option<&str> {

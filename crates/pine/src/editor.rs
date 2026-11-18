@@ -102,6 +102,9 @@ pub struct PineScripts {
     cursor_char: usize,
     /// The compiled script the host should put on the chart.
     pending: Option<ChartPush>,
+    /// Scripts whose source a save replaced, as the name the chart knows them by and the new
+    /// source; the host reloads their studies from these.
+    changed_scripts: Vec<(String, String)>,
     /// Whether the script name is being edited in place.
     renaming: bool,
     rename_draft: String,
@@ -130,6 +133,7 @@ impl Default for PineScripts {
             code_focused: false,
             cursor_char: 0,
             pending: None,
+            changed_scripts: Vec::new(),
             renaming: false,
             rename_draft: String::new(),
             rename_focus: false,
@@ -427,6 +431,12 @@ impl PineScripts {
         self.open = true;
     }
 
+    /// Takes the scripts a save changed, as the name the chart knows them by and the new source.
+    /// The host reloads the studies drawn from them, so an edit shows without re-adding.
+    pub fn take_changed_scripts(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.changed_scripts)
+    }
+
     fn current(&self) -> Option<&SavedScript> {
         self.editing.and_then(|at| self.scripts.get(at))
     }
@@ -704,7 +714,19 @@ impl PineScripts {
                 self.rename_draft = self.current().map_or_else(String::new, |s| s.name.clone());
                 self.rename_focus = true;
             }
-            Some(MenuAction::Save) => changed |= self.apply(),
+            Some(MenuAction::Save) => {
+                let before = self
+                    .current()
+                    .map(|script| (script.name.clone(), script.source.clone()));
+                let applied = self.apply();
+                if applied
+                    && let Some((name, source)) = before
+                    && source != self.draft
+                {
+                    self.changed_scripts.push((name, self.draft.clone()));
+                }
+                changed |= applied;
+            }
             Some(MenuAction::Copy) => changed |= self.make_copy(),
             Some(MenuAction::Import) => changed |= self.import(),
             Some(MenuAction::Export) => self.export(),

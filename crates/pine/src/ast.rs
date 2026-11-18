@@ -47,6 +47,9 @@ pub struct InputDecl {
     pub inline: Option<String>,
     /// The `tooltip` shown beside the input.
     pub tooltip: Option<String>,
+    /// The script asked for the input's value to stay out of the study's status line, as
+    /// `display = display.none` does in TradingView. Settings still list the input.
+    pub hidden: bool,
 }
 
 /// Fills [`InputDecl::key`] for the inputs of one script.

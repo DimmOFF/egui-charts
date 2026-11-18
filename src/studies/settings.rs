@@ -708,6 +708,9 @@ impl Indicator for ConfiguredStudy {
     fn script_editable(&self) -> bool {
         self.study.script_editable()
     }
+    fn set_script_source(&mut self, source: &str) -> Result<(), String> {
+        self.study.set_script_source(source)
+    }
     fn help_url(&self) -> Option<&str> {
         self.settings
             .help_url

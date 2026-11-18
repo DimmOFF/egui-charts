@@ -104,6 +104,10 @@ fn main() -> eframe::Result {
             if pine.show(ui, on_chart) {
                 terminal.set_indicator_factory(pine.factory());
             }
+            // A save re-applies the edited script to the studies already on the chart.
+            for (name, source) in pine.take_changed_scripts() {
+                terminal.reload_script(&name, &source);
+            }
             // Add to chart and Update compile the script and hand it over from the editor.
             if let Some(push) = pine.take_chart_push() {
                 let chart = terminal.chart_mut();

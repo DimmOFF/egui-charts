@@ -37,11 +37,13 @@ pub(super) struct State {
     recorded: Option<String>,
 }
 
-/// The legend caption of a study: its inputs, in order.
+/// The legend caption of a study: its inputs, in order. An input the script hid from the status
+/// line, as `display = display.none` asks, keeps its value out of the caption.
 pub(super) fn study_input_summary(study: &dyn Indicator) -> String {
     study
         .inputs()
         .iter()
+        .filter(|input| !input.hidden_in_status)
         .map(|input| match (&input.kind, &input.value) {
             (InputKind::Choice(choices), InputValue::Choice(index)) => {
                 choices.get(*index).cloned().unwrap_or_default()
@@ -71,6 +73,34 @@ impl Terminal {
     /// Replaces the study catalogue, such as after the host edited its scripts.
     pub fn set_indicator_factory(&mut self, factory: IndicatorFactory) {
         self.studies.indicators.set_factory(factory);
+    }
+
+    /// Re-applies the saved source of the script `name` to every study drawn from it, keeping
+    /// each study's inputs and pane, so an edit in the editor shows without the study being
+    /// removed and added again. Returns how many studies were reloaded.
+    pub fn reload_script(&mut self, name: &str, source: &str) -> usize {
+        let mut reloaded = 0;
+        for chart in &mut self.charts {
+            let ids: Vec<SeriesId> = chart
+                .indicators()
+                .filter(|(_, study)| study.name() == name)
+                .map(|(id, _)| id)
+                .collect();
+            for id in ids {
+                let inputs = {
+                    let Some(study) = chart.indicator_mut(id) else {
+                        continue;
+                    };
+                    if study.set_script_source(source).is_err() {
+                        continue;
+                    }
+                    reloaded += 1;
+                    study_input_summary(study)
+                };
+                chart.set_indicator_inputs(id, inputs);
+            }
+        }
+        reloaded
     }
 
     /// Lists the whole symbol catalog when the search opens, instead of the recently opened
@@ -549,6 +579,7 @@ mod tests {
     use egui_charts::config::BackgroundStyle;
     use egui_charts::model::LineStyle;
     use egui_charts::studies::SMA;
+    use egui_charts::studies::StudyInput;
     use egui_charts::ui::dialogs::SeriesContextMenuAction;
     use egui_charts::widget::settings::{BackgroundType, PrecisionMode, WatermarkMode};
     use std::sync::Arc;
@@ -968,5 +999,127 @@ mod tests {
             let visible = visible(&terminal);
             assert!(visible.len() >= 2 && visible.iter().all(|v| *v == shown));
         }
+    }
+
+    /// `display = display.none` in Pine hides an input's value from the legend's caption while
+    /// the settings keep listing the input.
+    #[test]
+    fn a_hidden_input_keeps_its_value_out_of_the_status_line() {
+        let mut secret = StudyInput::new(
+            "secret",
+            "Secret",
+            InputValue::Integer(8),
+            InputKind::Integer(1, 100),
+        );
+        secret.hidden_in_status = true;
+        let study = egui_charts::studies::CustomIndicator::new("Host script", |_| Vec::new())
+            .with_inputs(
+                vec![
+                    StudyInput::new(
+                        "shown",
+                        "Shown",
+                        InputValue::Integer(7),
+                        InputKind::Integer(1, 100),
+                    ),
+                    secret,
+                ],
+                |_, _| Vec::new(),
+            )
+            .expect("the inputs are valid");
+        assert_eq!(study_input_summary(&study), "7");
+        assert_eq!(study.inputs().len(), 2);
+    }
+
+    /// A study that reads its new source the way a Pine script re-parses after a save.
+    struct ScriptStudy {
+        name: String,
+        inputs: Vec<StudyInput>,
+        values: egui_charts::studies::IndicatorValues,
+    }
+
+    impl Indicator for ScriptStudy {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn calculate(&mut self, _data: &[egui_charts::model::Bar]) {}
+
+        fn values(&self) -> &egui_charts::studies::IndicatorValues {
+            &self.values
+        }
+
+        fn inputs(&self) -> Vec<StudyInput> {
+            self.inputs.clone()
+        }
+
+        fn set_script_source(&mut self, source: &str) -> Result<(), String> {
+            let period = source.parse::<i32>().map_err(|error| error.to_string())?;
+            self.inputs[0] = StudyInput::new(
+                "period",
+                "Period",
+                InputValue::Integer(period),
+                InputKind::Integer(1, 100),
+            );
+            Ok(())
+        }
+
+        fn colors(&self) -> Vec<Color32> {
+            Vec::new()
+        }
+
+        fn set_colors(&mut self, _colors: Vec<Color32>) {}
+
+        fn set_visible(&mut self, _visible: bool) {}
+
+        fn clone_box(&self) -> Box<dyn Indicator> {
+            Box::new(Self {
+                name: self.name.clone(),
+                inputs: self.inputs.clone(),
+                values: egui_charts::studies::IndicatorValues::new(),
+            })
+        }
+    }
+
+    /// Saving an edited script re-applies it to the studies drawn from it, leaving the ones of
+    /// other scripts alone, and refreshes the caption the legend shows.
+    #[test]
+    fn a_saved_script_reloads_the_studies_drawn_from_it() {
+        let mut terminal = terminal();
+        let study = ScriptStudy {
+            name: "My script".into(),
+            inputs: vec![StudyInput::new(
+                "period",
+                "Period",
+                InputValue::Integer(3),
+                InputKind::Integer(1, 100),
+            )],
+            values: egui_charts::studies::IndicatorValues::new(),
+        };
+        let id = terminal.chart_mut().add_indicator(Box::new(study));
+        assert_eq!(terminal.reload_script("My script", "9"), 1);
+        let score = |terminal: &Terminal| {
+            let (_, study) = terminal
+                .chart()
+                .indicators()
+                .find(|(candidate, _)| *candidate == id)
+                .expect("the study stays on the chart");
+            study.inputs()[0].value.clone()
+        };
+        let caption = |terminal: &Terminal| {
+            terminal
+                .chart()
+                .indicator_inputs(id)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert_eq!(score(&terminal), InputValue::Integer(9));
+        // The legend's caption is rebuilt too; the chart's own wrapper adds inputs after the
+        // script's.
+        assert!(caption(&terminal).starts_with('9'));
+        // A source the study refuses leaves it as it was, and other names match nothing.
+        assert_eq!(terminal.reload_script("My script", "not a number"), 0);
+        assert_eq!(score(&terminal), InputValue::Integer(9));
+        assert!(caption(&terminal).starts_with('9'));
+        assert_eq!(terminal.reload_script("Another script", "1"), 0);
     }
 }

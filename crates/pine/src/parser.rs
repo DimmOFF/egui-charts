@@ -1425,6 +1425,10 @@ fn input_declaration(
     let group = setting("group");
     let inline = setting("inline");
     let tooltip = setting("tooltip");
+    // `display = display.none` keeps the value out of the study's status line.
+    let hidden = arg(args, "display")
+        .and_then(path_of)
+        .is_some_and(|path| path.join(".") == "display.none");
     let options = arg(args, "options").and_then(|expr| match expr {
         Expr::Array(items) => Some(
             items
@@ -1529,6 +1533,7 @@ fn input_declaration(
         group,
         inline,
         tooltip,
+        hidden,
     })
 }
 

@@ -160,11 +160,11 @@ mod tests {
     #[test]
     fn legacy_and_modern_inputs_keep_their_defaults() {
         let script = Script::parse(
-            "//@version=4\nstudy(\"W\")\nn = input(title=\"Periods\", defval=2, minval=2, type=input.integer)\nmode = input(title=\"Mode\", defval=\"3\", options=[\"3\", \"5\"])\nlen = input.int(14, \"Length\")\ncolor = input.color(color.red, \"Color\")\ntint = input.color(color.new(color.gray, 85), \"Tint\")\nbull = input.color(color.rgb(103, 154, 129), \"Bullish\")\nfg = input.color(chart.fg_color, \"Foreground\")\nfaded = input.color(color.new(chart.fg_color, 50), \"Faded\")\n",
+            "//@version=4\nstudy(\"W\")\nn = input(title=\"Periods\", defval=2, minval=2, type=input.integer)\nmode = input(title=\"Mode\", defval=\"3\", options=[\"3\", \"5\"])\nlen = input.int(14, \"Length\")\ncolor = input.color(color.red, \"Color\")\ntint = input.color(color.new(color.gray, 85), \"Tint\")\nbull = input.color(color.rgb(103, 154, 129), \"Bullish\")\nfg = input.color(chart.fg_color, \"Foreground\")\nfaded = input.color(color.new(chart.fg_color, 50), \"Faded\")\nhidden = input.int(5, \"Hidden\", display = display.none)\n",
         )
         .unwrap();
         let inputs = script.inputs();
-        assert_eq!(inputs.len(), 8);
+        assert_eq!(inputs.len(), 9);
         assert_eq!(inputs[0].title, "Periods");
         assert_eq!(inputs[0].default, Value::Num(2.0));
         assert!(matches!(inputs[1].kind, ast::InputKind::Choice(_)));
@@ -187,6 +187,9 @@ mod tests {
             inputs[7].default,
             Value::Color(egui::Color32::from_rgba_unmultiplied(209, 212, 220, 128))
         );
+        // `display = display.none` keeps the value out of the status line, not out of settings.
+        assert!(inputs[8].hidden);
+        assert!(!inputs[7].hidden);
     }
 
     /// A function body on its own line may start with `not`: the word negates the expression

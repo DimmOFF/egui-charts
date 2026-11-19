@@ -275,7 +275,6 @@ pub(super) const ZONES: &[(&str, &str)] = &[
     ("Asia/Kuwait", "(GMT+03:00) Kuwait"),
     ("Asia/Nicosia", "(GMT+03:00) Nicosia"),
     ("Asia/Qatar", "(GMT+03:00) Qatar"),
-    ("Asia/Tel_Aviv", "(GMT+03:00) Tel Aviv"),
     ("Asia/Riyadh", "(GMT+03:00) Kuwait, Riyadh"),
     ("Europe/Athens", "(GMT+03:00) Athens"),
     ("Europe/Bucharest", "(GMT+03:00) Bucharest"),

@@ -316,16 +316,19 @@ impl Terminal {
         let rect = ui.max_rect();
         let ctx = ui.ctx().clone();
         let page_bg = self.theme.ui.panel_bg;
-        let (text, border, accent) = (
-            self.theme.ui.text,
-            self.theme.ui.border,
-            self.theme.ui.accent,
-        );
-        let card = self.theme.ui.panel_bg_secondary;
+        let (text, border) = (self.theme.ui.text, self.theme.ui.border);
+        let outline = self.theme.ui.border_control;
+        let (card, hover_bg) = (self.theme.ui.panel_bg_floating, self.theme.ui.btn_bg_hover);
+        let muted = self.theme.ui.text_muted;
+        // TradingView's gold star; darker on the light theme so that it stays legible.
+        let gold = if self.theme.dark {
+            egui::Color32::from_rgb(245, 166, 35)
+        } else {
+            egui::Color32::from_rgb(196, 124, 0)
+        };
         let (radius, gap) = (self.theme.radius.md, self.theme.spacing.md);
         let (heading, title) = (self.theme.text.dialog_title, self.theme.text.title);
         let small = self.theme.text.small;
-        let muted = self.theme.ui.text_muted;
         let top = self.theme.spacing.xxl;
         // Starred layouts come first, as the layout menu lists them.
         let favorites = self.top_toolbar.layout_menu.favorites.clone();
@@ -336,6 +339,7 @@ impl Terminal {
         let mut create = false;
         let mut open = None;
         let mut open_tab = None;
+        let mut copy = None;
         let mut remove = None;
         let mut star = None;
         egui::Area::new(egui::Id::unique("tv_start_page"))
@@ -357,39 +361,37 @@ impl Terminal {
                                 .color(text),
                         );
                         ui.add_space(gap);
-                        let tile = ((ui.available_width() - 3.0 * gap) / 4.0).clamp(150.0, 260.0);
+                        // TradingView's cards: about 260 wide, as many per row as fit.
+                        let columns = (((ui.available_width() + gap) / (260.0 + gap)).floor()
+                            as usize)
+                            .max(1);
+                        let tile = ((ui.available_width() - (columns - 1) as f32 * gap)
+                            / columns as f32)
+                            .min(260.0);
                         let size = egui::vec2(tile, 84.0);
                         let items = std::iter::once(None)
                             .chain(names.iter().map(Some))
                             .collect::<Vec<_>>();
-                        for row in items.chunks(4) {
+                        for row in items.chunks(columns) {
                             ui.horizontal(|ui| {
                                 for name in row {
                                     let Some(name) = name else {
                                         let (rect, response) =
                                             ui.allocate_exact_size(size, egui::Sense::click());
                                         let painter = ui.painter().clone();
-                                        let corners = [
-                                            rect.left_top(),
-                                            rect.right_top(),
-                                            rect.right_bottom(),
-                                            rect.left_bottom(),
-                                            rect.left_top(),
-                                        ];
-                                        for pair in corners.windows(2) {
-                                            painter.extend(egui::Shape::dashed_line(
-                                                pair,
-                                                egui::Stroke::new(1.0, border),
-                                                5.0,
-                                                4.0,
-                                            ));
-                                        }
+                                        painter.rect(
+                                            rect,
+                                            radius,
+                                            card,
+                                            egui::Stroke::new(1.0, outline),
+                                            egui::StrokeKind::Inside,
+                                        );
                                         painter.text(
                                             rect.center(),
                                             egui::Align2::CENTER_CENTER,
                                             format!("+  {create_hint}"),
                                             egui::FontId::proportional(title),
-                                            accent,
+                                            text,
                                         );
                                         if response.clicked() {
                                             create = true;
@@ -405,18 +407,47 @@ impl Terminal {
                                         rect,
                                         radius,
                                         card,
-                                        egui::Stroke::new(1.0, border),
+                                        egui::Stroke::new(1.0, outline),
                                         egui::StrokeKind::Inside,
                                     );
-                                    painter.text(
+                                    // The star sits above the name, as in TradingView.
+                                    let star_rect = egui::Rect::from_min_size(
                                         rect.left_top() + egui::vec2(12.0, 10.0),
+                                        egui::vec2(22.0, 22.0),
+                                    );
+                                    let star_response = ui.interact(
+                                        star_rect,
+                                        ui.scope_id().with(("start_star", name)),
+                                        egui::Sense::click(),
+                                    );
+                                    let (star_icon, star_color) = if starred {
+                                        (egui_charts::icons::icons::STAR_FILLED, gold)
+                                    } else {
+                                        (egui_charts::icons::icons::STAR_EMPTY, muted)
+                                    };
+                                    star_icon
+                                        .as_image_tinted(egui::Vec2::splat(16.0), star_color)
+                                        .paint_at(ui, star_rect.shrink(3.0));
+                                    // No bold face is installed, so the name is painted twice a
+                                    // fraction of a point apart to read as bold.
+                                    let name_pos = rect.left_top() + egui::vec2(16.0, 36.0);
+                                    let name_font = egui::FontId::proportional(title);
+                                    painter.text(
+                                        name_pos,
                                         egui::Align2::LEFT_TOP,
                                         name,
-                                        egui::FontId::proportional(title),
+                                        name_font.clone(),
+                                        text,
+                                    );
+                                    painter.text(
+                                        name_pos + egui::vec2(0.4, 0.0),
+                                        egui::Align2::LEFT_TOP,
+                                        name,
+                                        name_font,
                                         text,
                                     );
                                     // What the layout shows and when it was last saved.
-                                    if let Some(info) = info.get(name) {
+                                    let shows = info.get(name).map(|info| {
                                         let interval = info
                                             .interval
                                             .map(|interval| interval.as_str().into_owned())
@@ -426,66 +457,60 @@ impl Terminal {
                                             .filter(|part| !part.is_empty())
                                             .collect::<Vec<_>>()
                                             .join(", ");
-                                        if !shows.is_empty() {
-                                            painter.text(
-                                                rect.left_top() + egui::vec2(12.0, 34.0),
-                                                egui::Align2::LEFT_TOP,
-                                                shows,
-                                                egui::FontId::proportional(small),
-                                                muted,
-                                            );
-                                        }
-                                        if let Some(saved) = info.saved_at.and_then(|seconds| {
-                                            chrono::DateTime::from_timestamp(seconds, 0)
-                                        }) {
-                                            painter.text(
-                                                rect.left_top() + egui::vec2(12.0, 52.0),
-                                                egui::Align2::LEFT_TOP,
+                                        let saved = info
+                                            .saved_at
+                                            .and_then(|seconds| {
+                                                chrono::DateTime::from_timestamp(seconds, 0)
+                                            })
+                                            .map(|saved| {
                                                 saved
                                                     .with_timezone(&chrono::Local)
-                                                    .format("%d %b '%y, %H:%M")
-                                                    .to_string(),
-                                                egui::FontId::proportional(small),
-                                                muted,
-                                            );
-                                        }
+                                                    .format("%d %b '%y")
+                                                    .to_string()
+                                            });
+                                        [shows, saved.unwrap_or_default()]
+                                            .into_iter()
+                                            .filter(|part| !part.is_empty())
+                                            .collect::<Vec<_>>()
+                                            .join(" • ")
+                                    });
+                                    if let Some(shows) = shows.filter(|shows| !shows.is_empty()) {
+                                        painter.text(
+                                            rect.left_top() + egui::vec2(16.0, 56.0),
+                                            egui::Align2::LEFT_TOP,
+                                            shows,
+                                            egui::FontId::proportional(small),
+                                            muted,
+                                        );
                                     }
-                                    let star_rect = egui::Rect::from_min_size(
-                                        rect.right_top() + egui::vec2(-30.0, 8.0),
-                                        egui::vec2(22.0, 22.0),
-                                    );
-                                    let star_response = ui.interact(
-                                        star_rect,
-                                        ui.scope_id().with(("start_star", name)),
-                                        egui::Sense::click(),
-                                    );
-                                    painter.text(
-                                        star_rect.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        if starred { "★" } else { "☆" },
-                                        egui::FontId::proportional(title),
-                                        if starred { accent } else { border },
-                                    );
-                                    let menu_rect = egui::Rect::from_min_size(
-                                        rect.right_top() + egui::vec2(-56.0, 8.0),
-                                        egui::vec2(22.0, 22.0),
+                                    // The menu button: three dots down the right edge.
+                                    let menu_rect = egui::Rect::from_center_size(
+                                        rect.right_center() - egui::vec2(18.0, 0.0),
+                                        egui::vec2(28.0, 28.0),
                                     );
                                     let menu_response = ui.interact(
                                         menu_rect,
                                         ui.scope_id().with(("start_menu", name)),
                                         egui::Sense::click(),
                                     );
-                                    painter.text(
-                                        menu_rect.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        "⋯",
-                                        egui::FontId::proportional(title),
-                                        border,
-                                    );
+                                    if menu_response.hovered() {
+                                        painter.rect_filled(menu_rect, radius, hover_bg);
+                                    }
+                                    for offset in [-5.0, 0.0, 5.0] {
+                                        painter.circle_filled(
+                                            menu_rect.center() + egui::vec2(0.0, offset),
+                                            1.4,
+                                            muted,
+                                        );
+                                    }
                                     egui::Popup::menu(&menu_response).show(|ui| {
                                         if ui.button(l10n::text(&ctx, "Open in new tab")).clicked()
                                         {
                                             open_tab = Some(name.clone());
+                                            ui.close();
+                                        }
+                                        if ui.button(l10n::text(&ctx, "Make a copy…")).clicked() {
+                                            copy = Some(name.clone());
                                             ui.close();
                                         }
                                         if ui.button(l10n::text(&ctx, "Remove layout")).clicked() {
@@ -523,6 +548,9 @@ impl Terminal {
             if self.new_layout(None) {
                 self.top_toolbar.layout_menu.open(&name);
             }
+        }
+        if let Some(name) = copy {
+            self.top_toolbar.layout_menu.duplicate(&name);
         }
         if let Some(name) = remove {
             self.perform_layout_action(LayoutAction::Delete(name));

@@ -65,6 +65,8 @@ enum Request {
     Open(String),
     /// Reads a layout only to learn what its card on the start page shows.
     Info(String),
+    /// Copies the named layout under a free name.
+    Duplicate(String),
     Save(String, String),
     /// Saving under the second name, then deleting the first.
     Rename(String, String, String),
@@ -238,7 +240,7 @@ impl LayoutMenu {
         };
         match &request {
             Request::List => storage.list(self.kind, self.inbox.reply(0)),
-            Request::Open(name) | Request::Info(name) => {
+            Request::Open(name) | Request::Info(name) | Request::Duplicate(name) => {
                 storage.load(self.kind, name, self.inbox.reply(0));
             }
             Request::Save(name, document) | Request::Rename(_, name, document) => {
@@ -306,6 +308,23 @@ impl LayoutMenu {
     /// Deletes the layout `name`.
     pub fn delete(&mut self, name: &str) {
         self.request(Request::Delete(name.to_owned()));
+    }
+
+    /// Copies the layout `name` under a free name, which the next list shows.
+    pub fn duplicate(&mut self, name: &str) {
+        self.request(Request::Duplicate(name.to_owned()));
+    }
+
+    /// A name no listed layout uses, for a copy of `name`.
+    fn free_name(&self, name: &str) -> String {
+        let base = format!("{name} copy");
+        let mut copy = base.clone();
+        let mut suffix = 2;
+        while self.layouts.contains(&copy) {
+            copy = format!("{base} {suffix}");
+            suffix += 1;
+        }
+        copy
     }
 
     /// Receives storage's answers, updating the list, and wakes the UI on the next answer.
@@ -405,6 +424,39 @@ impl LayoutMenu {
                             self.info.insert(name, LayoutInfo::from(&layout));
                         }
                     }
+                    Request::Duplicate(name) => {
+                        let answer = *answer
+                            .downcast::<Result<Option<String>, FeedError>>()
+                            .expect("layout load");
+                        let copied = answer
+                            .ok()
+                            .flatten()
+                            .and_then(|document| SavedLayout::from_json(&document).ok());
+                        let Some(mut layout) = copied else {
+                            self.error = Some(l10n::format_text(
+                                ctx,
+                                "Could not copy {name}",
+                                &[("name", name.as_str())],
+                            ));
+                            continue;
+                        };
+                        layout.saved_at = Some(chrono::Utc::now().timestamp());
+                        let copy = self.free_name(&name);
+                        self.info.insert(copy.clone(), LayoutInfo::from(&layout));
+                        match layout.to_json() {
+                            Ok(document) => self.requests.push_back(Request::Save(copy, document)),
+                            Err(error) => {
+                                self.error = Some(l10n::format_text(
+                                    ctx,
+                                    "Could not copy {name}: {error}",
+                                    &[
+                                        ("name", name.as_str()),
+                                        ("error", error.to_string().as_str()),
+                                    ],
+                                ));
+                            }
+                        }
+                    }
                     request => {
                         let answer = *answer
                             .downcast::<Result<(), FeedError>>()
@@ -468,9 +520,13 @@ impl LayoutMenu {
                                     ],
                                 ));
                             }
-                            (Request::List | Request::Open(_) | Request::Info(_), _) => {
-                                unreachable!("not a write")
-                            }
+                            (
+                                Request::List
+                                | Request::Open(_)
+                                | Request::Info(_)
+                                | Request::Duplicate(_),
+                                _,
+                            ) => unreachable!("not a write"),
                         }
                     }
                 }
@@ -1003,6 +1059,45 @@ mod tests {
         menu.curr_layout = Some("A".into());
         at(10.0, &mut |ctx| assert!(!menu.autosave_due(ctx, 99)));
         at(20.0, &mut |ctx| assert!(!menu.autosave_due(ctx, 99)));
+    }
+
+    /// Making a copy saves the same layout under a free name and stamps it as saved now.
+    #[test]
+    fn a_copy_is_saved_under_a_free_name() {
+        let ctx = egui::Context::default();
+        let settle = |menu: &mut LayoutMenu| {
+            for _ in 0..4 {
+                ctx.run_ui(egui::RawInput::default(), |ui| {
+                    menu.poll(ui.ctx());
+                })
+                .drop_without_applying_deltas();
+            }
+        };
+        let layout = SavedLayout {
+            mode: crate::widget::ChartLayoutMode::Single,
+            charts: Vec::new(),
+            sizing: None,
+            saved_at: Some(1_700_000_000),
+        };
+        let host = Arc::new(Host::default());
+        host.0
+            .lock()
+            .unwrap()
+            .insert("A".into(), layout.to_json().unwrap());
+        let mut menu = LayoutMenu::new();
+        menu.set_storage(host.clone());
+        settle(&mut menu);
+        assert_eq!(menu.layouts, ["A"]);
+        menu.duplicate("A");
+        settle(&mut menu);
+        assert_eq!(menu.layouts, ["A", "A copy"]);
+        assert!(menu.info["A copy"].saved_at.is_some());
+        // A second copy takes the next free name.
+        menu.duplicate("A");
+        settle(&mut menu);
+        assert_eq!(menu.layouts, ["A", "A copy", "A copy 2"]);
+        let copy = SavedLayout::from_json(&host.0.lock().unwrap()["A copy"]).unwrap();
+        assert!(copy.saved_at > Some(1_700_000_000));
     }
 
     #[test]

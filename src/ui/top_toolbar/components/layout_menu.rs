@@ -63,10 +63,34 @@ pub enum LayoutAction {
 enum Request {
     List,
     Open(String),
+    /// Reads a layout only to learn what its card on the start page shows.
+    Info(String),
     Save(String, String),
     /// Saving under the second name, then deleting the first.
     Rename(String, String, String),
     Delete(String),
+}
+
+/// What a saved layout shows, for its card on the start page.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LayoutInfo {
+    /// The symbol of the layout's first chart.
+    pub symbol: String,
+    /// The interval of that chart.
+    pub interval: Option<crate::model::Timeframe>,
+    /// When the layout was last saved, in Unix seconds.
+    pub saved_at: Option<i64>,
+}
+
+impl From<&SavedLayout> for LayoutInfo {
+    fn from(layout: &SavedLayout) -> Self {
+        let chart = layout.charts.first();
+        Self {
+            symbol: chart.map(|chart| chart.symbol.clone()).unwrap_or_default(),
+            interval: chart.and_then(|chart| chart.interval),
+            saved_at: layout.saved_at,
+        }
+    }
 }
 
 /// Named layout menu. The host handles the returned intents, capturing a [`SavedLayout`] for
@@ -81,6 +105,8 @@ pub struct LayoutMenu {
     kind: StoreKind,
     /// The layouts available to open, sorted by name when read from storage.
     pub layouts: Vec<String>,
+    /// What each saved layout shows, by name, for the start page cards.
+    pub info: std::collections::HashMap<String, LayoutInfo>,
     /// Menu sizing.
     pub config: LayoutMenuConfig,
     /// Whether the current layout is saved after each change; see
@@ -115,6 +141,7 @@ impl std::fmt::Debug for LayoutMenu {
         f.debug_struct("LayoutMenu")
             .field("curr_layout", &self.curr_layout)
             .field("layouts", &self.layouts)
+            .field("info", &self.info)
             .field("config", &self.config)
             .field("autosave", &self.autosave)
             .field("favorites", &self.favorites)
@@ -150,6 +177,7 @@ impl LayoutMenu {
             curr_layout: Some("Unnamed".into()),
             kind,
             layouts: Vec::new(),
+            info: std::collections::HashMap::new(),
             config: LayoutMenuConfig::default(),
             autosave: false,
             favorites: Vec::new(),
@@ -181,6 +209,7 @@ impl LayoutMenu {
         self.requests.clear();
         self.pending = None;
         self.layouts.clear();
+        self.info.clear();
         self.saved_edits = None;
         self.changed = None;
         self.storage = Some(storage);
@@ -209,7 +238,9 @@ impl LayoutMenu {
         };
         match &request {
             Request::List => storage.list(self.kind, self.inbox.reply(0)),
-            Request::Open(name) => storage.load(self.kind, name, self.inbox.reply(0)),
+            Request::Open(name) | Request::Info(name) => {
+                storage.load(self.kind, name, self.inbox.reply(0));
+            }
             Request::Save(name, document) | Request::Rename(_, name, document) => {
                 storage.save(self.kind, name, document.clone(), self.inbox.reply(0));
             }
@@ -228,7 +259,10 @@ impl LayoutMenu {
         self.curr_layout = Some(name.to_owned());
         self.saved_edits = Some(self.edits);
         match layout.to_json() {
-            Ok(document) => self.request(Request::Save(name.to_owned(), document)),
+            Ok(document) => {
+                self.info.insert(name.to_owned(), LayoutInfo::from(layout));
+                self.request(Request::Save(name.to_owned(), document));
+            }
             Err(error) => {
                 self.error = Some(l10n::format_text_or_english(
                     self.ctx.as_ref(),
@@ -254,7 +288,11 @@ impl LayoutMenu {
         let old = self.curr_layout.clone().unwrap_or_default();
         self.saved_edits = Some(self.edits);
         match layout.to_json() {
-            Ok(document) => self.request(Request::Rename(old, name.to_owned(), document)),
+            Ok(document) => {
+                self.info.remove(&old);
+                self.info.insert(name.to_owned(), LayoutInfo::from(layout));
+                self.request(Request::Rename(old, name.to_owned(), document));
+            }
             Err(error) => {
                 self.error = Some(l10n::format_text_or_english(
                     self.ctx.as_ref(),
@@ -298,6 +336,10 @@ impl LayoutMenu {
                         {
                             Ok(mut names) => {
                                 names.sort();
+                                self.info.retain(|name, _| names.contains(name));
+                                // Read each layout so that its card can show what it holds.
+                                self.requests
+                                    .extend(names.iter().map(|name| Request::Info(name.clone())));
                                 self.layouts = names;
                             }
                             Err(error) => {
@@ -316,6 +358,7 @@ impl LayoutMenu {
                         match answer {
                             Ok(Some(document)) => match SavedLayout::from_json(&document) {
                                 Ok(layout) => {
+                                    self.info.insert(name.clone(), LayoutInfo::from(&layout));
                                     self.curr_layout = Some(name.clone());
                                     self.saved_edits = None;
                                     opened = Some((name, layout));
@@ -352,6 +395,16 @@ impl LayoutMenu {
                             }
                         }
                     }
+                    Request::Info(name) => {
+                        let answer = *answer
+                            .downcast::<Result<Option<String>, FeedError>>()
+                            .expect("layout load");
+                        if let Ok(Some(document)) = answer
+                            && let Ok(layout) = SavedLayout::from_json(&document)
+                        {
+                            self.info.insert(name, LayoutInfo::from(&layout));
+                        }
+                    }
                     request => {
                         let answer = *answer
                             .downcast::<Result<(), FeedError>>()
@@ -378,6 +431,7 @@ impl LayoutMenu {
                             (Request::Delete(name), Ok(())) => {
                                 self.layouts.retain(|layout| *layout != name);
                                 self.favorites.retain(|layout| *layout != name);
+                                self.info.remove(&name);
                             }
                             (Request::Save(name, _), Err(error)) => {
                                 if report {
@@ -414,7 +468,9 @@ impl LayoutMenu {
                                     ],
                                 ));
                             }
-                            (Request::List | Request::Open(_), _) => unreachable!("not a write"),
+                            (Request::List | Request::Open(_) | Request::Info(_), _) => {
+                                unreachable!("not a write")
+                            }
                         }
                     }
                 }
@@ -674,6 +730,9 @@ impl LayoutMenu {
             );
         }
         let mut starred = None;
+        // A thin, solid bar keeps the delete buttons clear of it.
+        ui.spacing_mut().scroll.bar_width = 4.0;
+        ui.spacing_mut().scroll.floating = false;
         egui::ScrollArea::vertical()
             .max_height(ui.available_height().clamp(0.0, 240.0))
             .show(ui, |ui| {
@@ -874,6 +933,7 @@ mod tests {
             mode: crate::widget::ChartLayoutMode::TwoHorizontal,
             charts: Vec::new(),
             sizing: None,
+            saved_at: None,
         };
         let host = Arc::new(Host::default());
         host.0

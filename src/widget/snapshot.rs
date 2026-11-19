@@ -1024,6 +1024,10 @@ pub struct SavedLayout {
     /// preset proportions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sizing: Option<ChartLayoutSizing>,
+    /// When the layout was last saved, in Unix seconds, as its card on the start page shows it;
+    /// `None` in documents saved before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_at: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1044,6 +1048,7 @@ impl SavedLayout {
             mode,
             charts,
             sizing: None,
+            saved_at: None,
         }
     }
 
@@ -1136,6 +1141,7 @@ mod tests {
             mode: ChartLayoutMode::Single,
             charts: vec![chart.snapshot_with(&factory).unwrap()],
             sizing: None,
+            saved_at: None,
         }
         .to_json()
         .unwrap();
@@ -1287,6 +1293,7 @@ mod tests {
             mode: ChartLayoutMode::Single,
             charts: vec![chart.snapshot().unwrap()],
             sizing: None,
+            saved_at: None,
         }
         .to_json()
         .unwrap();
@@ -1484,6 +1491,7 @@ mod tests {
             mode: ChartLayoutMode::Single,
             charts: vec![original.snapshot().unwrap()],
             sizing: None,
+            saved_at: None,
         }
         .to_json()
         .unwrap();
@@ -1557,6 +1565,7 @@ mod tests {
                     mode: ChartLayoutMode::Single,
                     charts: vec![snapshot],
                     sizing: None,
+                    saved_at: None,
                 }
                 .to_json()
                 .unwrap();
@@ -1920,6 +1929,7 @@ mod tests {
                 mode: ChartLayoutMode::Single,
                 charts: vec![chart.snapshot().unwrap()],
                 sizing: None,
+                saved_at: None,
             };
             let mut document: serde_json::Value =
                 serde_json::from_str(&layout.to_json().unwrap()).unwrap();

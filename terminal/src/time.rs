@@ -425,6 +425,7 @@ impl Terminal {
                     }
                 });
                 egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
                     .max_height(420.0)
                     .show(ui, |ui| {
                         let rows = std::iter::once(("UTC", "UTC")).chain(ZONES.iter().copied());

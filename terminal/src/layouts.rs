@@ -324,14 +324,19 @@ impl Terminal {
         let card = self.theme.ui.panel_bg_secondary;
         let (radius, gap) = (self.theme.radius.md, self.theme.spacing.md);
         let (heading, title) = (self.theme.text.dialog_title, self.theme.text.title);
+        let small = self.theme.text.small;
+        let muted = self.theme.ui.text_muted;
         let top = self.theme.spacing.xxl;
         // Starred layouts come first, as the layout menu lists them.
         let favorites = self.top_toolbar.layout_menu.favorites.clone();
+        let info = self.top_toolbar.layout_menu.info.clone();
         let mut names = self.top_toolbar.layout_menu.layouts.clone();
         names.sort_by_key(|name| !favorites.contains(name));
         let create_hint = l10n::text(&ctx, "Create new layout");
         let mut create = false;
         let mut open = None;
+        let mut open_tab = None;
+        let mut remove = None;
         let mut star = None;
         egui::Area::new(egui::Id::unique("tv_start_page"))
             .fixed_pos(rect.min)
@@ -347,13 +352,13 @@ impl Terminal {
                     .show(ui, |ui| {
                         ui.add_space(top);
                         ui.label(
-                            egui::RichText::new(l10n::text(&ctx, "Supercharts"))
+                            egui::RichText::new(l10n::text(&ctx, "Layouts"))
                                 .size(heading)
                                 .color(text),
                         );
                         ui.add_space(gap);
                         let tile = ((ui.available_width() - 3.0 * gap) / 4.0).clamp(150.0, 260.0);
-                        let size = egui::vec2(tile, 64.0);
+                        let size = egui::vec2(tile, 84.0);
                         let items = std::iter::once(None)
                             .chain(names.iter().map(Some))
                             .collect::<Vec<_>>();
@@ -404,12 +409,47 @@ impl Terminal {
                                         egui::StrokeKind::Inside,
                                     );
                                     painter.text(
-                                        rect.left_top() + egui::vec2(12.0, 12.0),
+                                        rect.left_top() + egui::vec2(12.0, 10.0),
                                         egui::Align2::LEFT_TOP,
                                         name,
                                         egui::FontId::proportional(title),
                                         text,
                                     );
+                                    // What the layout shows and when it was last saved.
+                                    if let Some(info) = info.get(name) {
+                                        let interval = info
+                                            .interval
+                                            .map(|interval| interval.as_str().into_owned())
+                                            .unwrap_or_default();
+                                        let shows = [info.symbol.as_str(), interval.as_str()]
+                                            .into_iter()
+                                            .filter(|part| !part.is_empty())
+                                            .collect::<Vec<_>>()
+                                            .join(", ");
+                                        if !shows.is_empty() {
+                                            painter.text(
+                                                rect.left_top() + egui::vec2(12.0, 34.0),
+                                                egui::Align2::LEFT_TOP,
+                                                shows,
+                                                egui::FontId::proportional(small),
+                                                muted,
+                                            );
+                                        }
+                                        if let Some(saved) = info.saved_at.and_then(|seconds| {
+                                            chrono::DateTime::from_timestamp(seconds, 0)
+                                        }) {
+                                            painter.text(
+                                                rect.left_top() + egui::vec2(12.0, 52.0),
+                                                egui::Align2::LEFT_TOP,
+                                                saved
+                                                    .with_timezone(&chrono::Local)
+                                                    .format("%d %b '%y, %H:%M")
+                                                    .to_string(),
+                                                egui::FontId::proportional(small),
+                                                muted,
+                                            );
+                                        }
+                                    }
                                     let star_rect = egui::Rect::from_min_size(
                                         rect.right_top() + egui::vec2(-30.0, 8.0),
                                         egui::vec2(22.0, 22.0),
@@ -426,9 +466,36 @@ impl Terminal {
                                         egui::FontId::proportional(title),
                                         if starred { accent } else { border },
                                     );
+                                    let menu_rect = egui::Rect::from_min_size(
+                                        rect.right_top() + egui::vec2(-56.0, 8.0),
+                                        egui::vec2(22.0, 22.0),
+                                    );
+                                    let menu_response = ui.interact(
+                                        menu_rect,
+                                        ui.scope_id().with(("start_menu", name)),
+                                        egui::Sense::click(),
+                                    );
+                                    painter.text(
+                                        menu_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "⋯",
+                                        egui::FontId::proportional(title),
+                                        border,
+                                    );
+                                    egui::Popup::menu(&menu_response).show(|ui| {
+                                        if ui.button(l10n::text(&ctx, "Open in new tab")).clicked()
+                                        {
+                                            open_tab = Some(name.clone());
+                                            ui.close();
+                                        }
+                                        if ui.button(l10n::text(&ctx, "Remove layout")).clicked() {
+                                            remove = Some(name.clone());
+                                            ui.close();
+                                        }
+                                    });
                                     if star_response.clicked() {
                                         star = Some(name.clone());
-                                    } else if response.clicked() {
+                                    } else if !menu_response.hovered() && response.clicked() {
                                         open = Some(name.clone());
                                     }
                                 }
@@ -450,6 +517,15 @@ impl Terminal {
         }
         if let Some(name) = open {
             self.top_toolbar.layout_menu.open(&name);
+        }
+        if let Some(name) = open_tab {
+            // A new tab shows the saved layout instead of the chart it copies to start with.
+            if self.new_layout(None) {
+                self.top_toolbar.layout_menu.open(&name);
+            }
+        }
+        if let Some(name) = remove {
+            self.perform_layout_action(LayoutAction::Delete(name));
         }
         if let Some(name) = star {
             let favorites = &mut self.top_toolbar.layout_menu.favorites;
@@ -964,6 +1040,7 @@ impl Terminal {
             .find(|sizes| sizes.mode == mode);
         let mut layout = SavedLayout::new(mode, charts);
         layout.sizing = sizing;
+        layout.saved_at = Some(chrono::Utc::now().timestamp());
         Ok(layout)
     }
 
@@ -1641,6 +1718,12 @@ mod tests {
             .expect("the open layout is stored on close");
         let layout = SavedLayout::from_json(&document).unwrap();
         assert!(!layout.charts[0].config.as_ref().unwrap().show_grid);
+        // The card of the saved layout has what it shows and when it was saved.
+        assert!(layout.saved_at.is_some(), "the save time is kept");
+        let info = &terminal.top_toolbar.layout_menu.info["Unnamed"];
+        assert_eq!(info.symbol, "AAPL");
+        assert!(info.interval.is_some());
+        assert!(info.saved_at.is_some());
     }
 
     #[test]

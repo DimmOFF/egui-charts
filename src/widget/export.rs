@@ -1268,6 +1268,7 @@ mod tests {
                 mode: ChartLayoutMode::Single,
                 charts: vec![chart.snapshot().unwrap()],
                 sizing: None,
+                saved_at: None,
             }
             .to_json()
             .unwrap();
@@ -1313,6 +1314,7 @@ mod tests {
                 mode: ChartLayoutMode::Single,
                 charts: vec![chart.snapshot().unwrap()],
                 sizing: None,
+                saved_at: None,
             }
             .to_json()
             .unwrap();

@@ -33,7 +33,7 @@ pub use chart_grid_selector::ChartGridSelector;
 pub use sync_button::SyncButton;
 
 // From layout_menu
-pub use layout_menu::{LayoutAction, LayoutMenu, LayoutMenuConfig};
+pub use layout_menu::{LayoutAction, LayoutInfo, LayoutMenu, LayoutMenuConfig};
 
 // From settings_menu
 pub use settings_menu::{SettingsAction, SettingsDialog, SettingsDialogConfig, SettingsTab};

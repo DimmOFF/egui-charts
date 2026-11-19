@@ -137,6 +137,22 @@ pub(crate) fn study_controls(
                 Sense::hover()
             },
         );
+        // A hidden study keeps its crossed-out eye on show, as TradingView does.
+        let hidden_eye = index == 0 && !visible;
+        if hidden_eye {
+            #[cfg(feature = "icons")]
+            crate::icons::icons::EYE_HIDE
+                .as_image_tinted(Vec2::splat(18.0), theme.ui.text)
+                .paint_at(ui, rect.shrink(3.0));
+            #[cfg(not(feature = "icons"))]
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "+",
+                FontId::proportional(16.0),
+                theme.ui.text,
+            );
+        }
         if !revealed || !shown {
             return response;
         }
@@ -160,7 +176,7 @@ pub(crate) fn study_controls(
             {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(url));
             }
-        } else {
+        } else if !hidden_eye {
             #[cfg(feature = "icons")]
             {
                 let icon = match index {
@@ -589,14 +605,8 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    let (buttons, _) = study_controls(
-                        ui,
-                        row,
-                        controls,
-                        None,
-                        egui::Id::unique("script"),
-                        &study,
-                    );
+                    let (buttons, _) =
+                        study_controls(ui, row, controls, None, egui::Id::unique("script"), &study);
                     clicked = buttons.map(|response| response.clicked());
                 },
             )

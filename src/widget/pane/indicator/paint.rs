@@ -557,7 +557,7 @@ impl IndicatorPane {
         let theme = painter.ctx().active_theme();
         let galley = self.legend_galley(painter, rect, indicator, theme.ui.text);
         let width = crate::chart::rendering::controls_width(indicator);
-        let x = (rect.left() + theme.spacing.sm + galley.size().x + theme.spacing.md)
+        let x = (rect.left() + theme.spacing.sm + galley.size().x + theme.spacing.xs)
             .min(rect.right() - width - if self.pane_controls { 40.0 } else { 0.0 })
             .max(rect.left());
         Some(

@@ -634,6 +634,8 @@ impl Terminal {
             .show_separator_line(false)
             .frame(egui::Frame::new().fill(strip))
             .show(ui, |ui| {
+                // A tab is a click target, not selectable text: hovering it keeps the arrow.
+                ui.style_mut().interaction.selectable_labels = false;
                 egui::ScrollArea::horizontal().show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;

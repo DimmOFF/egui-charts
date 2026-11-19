@@ -3,6 +3,9 @@ use crate::theme::ThemeExt;
 use egui::FontId;
 use egui::{Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
 
+/// Side of a study legend button.
+const BUTTON_SIZE: f32 = 20.0;
+
 /// Width of the study's buttons: a read-only study keeps hide, a script's edit button and, with
 /// an article, help.
 pub(crate) fn controls_width(study: &dyn crate::studies::Indicator) -> f32 {
@@ -10,7 +13,7 @@ pub(crate) fn controls_width(study: &dyn crate::studies::Indicator) -> f32 {
         + 3 * usize::from(study.user_edit_enabled())
         + usize::from(study.script_editable())
         + usize::from(study.help_url().is_some());
-    20.0 * buttons as f32
+    BUTTON_SIZE * buttons as f32
 }
 
 /// The row outline and its hide, settings, edit-script, remove, more-actions and help buttons.
@@ -89,6 +92,10 @@ pub(crate) fn study_controls(
         && ui.input(|input| input.pointer.hover_pos().is_some())
         && ui.rect_contains_pointer(row);
     let revealed = selected || focused || hovered;
+    // A legend line is not a chart hit: keep the arrow instead of the chart's crosshair.
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+    }
     if revealed {
         if let Some(backdrop) = backdrop {
             ui.painter()
@@ -104,8 +111,8 @@ pub(crate) fn study_controls(
     let buttons: [Response; 6] = std::array::from_fn(|index| {
         let slot = (0..index).filter(|other| shown(*other)).count();
         let rect = Rect::from_min_size(
-            controls.min + Vec2::new(slot as f32 * 20.0, 0.0),
-            Vec2::splat(20.0),
+            controls.min + Vec2::new(slot as f32 * BUTTON_SIZE, 0.0),
+            Vec2::splat(BUTTON_SIZE),
         )
         .intersect(controls);
         let label = l10n::text(
@@ -145,7 +152,7 @@ pub(crate) fn study_controls(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 "?",
-                FontId::proportional(14.0),
+                FontId::proportional(16.0),
                 theme.ui.text,
             );
             if response.clicked()
@@ -164,15 +171,15 @@ pub(crate) fn study_controls(
                     3 => &crate::icons::icons::TRASH,
                     _ => &crate::icons::icons::UI_MORE_HORIZONTAL,
                 };
-                icon.as_image_tinted(Vec2::splat(14.0), theme.ui.text)
-                    .paint_at(ui, rect.shrink(3.0));
+                icon.as_image_tinted(Vec2::splat(18.0), theme.ui.text)
+                    .paint_at(ui, rect.shrink(1.0));
             }
             #[cfg(not(feature = "icons"))]
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 [if visible { "−" } else { "+" }, "...", "{}", "×", "•••"][index],
-                FontId::proportional(14.0),
+                FontId::proportional(16.0),
                 theme.ui.text,
             );
         }
@@ -532,6 +539,33 @@ mod tests {
                 "the full wrapped study row must respond to a tap"
             );
         }
+    }
+
+    /// The legend line is a label, not a chart hit: hovering it shows the arrow, not the
+    /// crosshair the chart sets.
+    #[test]
+    fn hovering_the_legend_row_shows_the_arrow() {
+        let theme = crate::theme::Theme::dark();
+        let ctx = Context::default();
+        crate::theme::apply_to_egui(&ctx, &theme);
+        let study = crate::studies::CustomIndicator::new("Plain", |_| Vec::new());
+        let row = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(220.0, 20.0));
+        let controls = Rect::from_min_size(Pos2::new(150.0, 10.0), Vec2::new(80.0, 20.0));
+        let output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![Event::PointerMoved(row.center())],
+                ..Default::default()
+            },
+            |ui| {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                study_controls(ui, row, controls, None, egui::Id::unique("arrow"), &study);
+            },
+        );
+        assert_eq!(
+            output.platform_output.cursor_icon,
+            egui::CursorIcon::Default
+        );
+        output.drop_without_applying_deltas();
     }
 
     /// A script study offers its edit button between the settings and the remove one.

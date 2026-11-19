@@ -81,7 +81,10 @@ pub use quotes::Quotes;
 pub use search::{ExpressionError, SymbolExpression, SymbolQuery, SymbolSearch};
 #[cfg(feature = "widget")]
 #[cfg_attr(docsrs, doc(cfg(feature = "widget")))]
-pub use settings::{MarketHeatmapSelection, SettingsStore, UserSettings};
+pub use settings::{
+    MarketHeatmapSelection, SettingsStore, TabSettings, TabTitlePart, UserSettings,
+    default_tab_title,
+};
 pub use sharing::{ShareKind, ShareLink, ShareOffer, Sharing};
 pub use signals::{SignalEvent, Signals};
 pub use storage::{ConflictChoice, Revision, SaveOutcome, Storage, StoreKind, Versioned};

@@ -77,6 +77,8 @@ enum Request {
 pub struct LayoutMenu {
     /// Name of the current layout.
     pub curr_layout: Option<String>,
+    /// The namespace the layouts are kept in.
+    kind: StoreKind,
     /// The layouts available to open, sorted by name when read from storage.
     pub layouts: Vec<String>,
     /// Menu sizing.
@@ -137,10 +139,16 @@ impl Default for LayoutMenu {
 }
 
 impl LayoutMenu {
-    /// Creates an unnamed layout menu.
+    /// Creates an unnamed layout menu, keeping its layouts in [`StoreKind::Layouts`].
     pub fn new() -> Self {
+        Self::new_in(StoreKind::Layouts)
+    }
+
+    /// Creates an unnamed menu, keeping its layouts in `kind`.
+    pub fn new_in(kind: StoreKind) -> Self {
         Self {
             curr_layout: Some("Unnamed".into()),
+            kind,
             layouts: Vec::new(),
             config: LayoutMenuConfig::default(),
             autosave: false,
@@ -200,17 +208,12 @@ impl LayoutMenu {
             return;
         };
         match &request {
-            Request::List => storage.list(StoreKind::Layouts, self.inbox.reply(0)),
-            Request::Open(name) => storage.load(StoreKind::Layouts, name, self.inbox.reply(0)),
+            Request::List => storage.list(self.kind, self.inbox.reply(0)),
+            Request::Open(name) => storage.load(self.kind, name, self.inbox.reply(0)),
             Request::Save(name, document) | Request::Rename(_, name, document) => {
-                storage.save(
-                    StoreKind::Layouts,
-                    name,
-                    document.clone(),
-                    self.inbox.reply(0),
-                );
+                storage.save(self.kind, name, document.clone(), self.inbox.reply(0));
             }
-            Request::Delete(name) => storage.delete(StoreKind::Layouts, name, self.inbox.reply(0)),
+            Request::Delete(name) => storage.delete(self.kind, name, self.inbox.reply(0)),
         }
         self.pending = Some(request);
     }

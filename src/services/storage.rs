@@ -28,6 +28,9 @@ pub enum StoreKind {
     /// Named chart layouts: the arrangement of the charts and the symbol, interval, chart type,
     /// studies, panes, scales, settings and drawings of each.
     Layouts,
+    /// The terminal's open tabs, one document per tab, named `tab <id>`: a layout's charts with
+    /// the tab's own later edits, kept apart from the saved layouts.
+    Tabs,
     /// Recently opened instruments, newest first.
     RecentSymbols,
     /// Named screener screens: the universe, column set, filters, sort order and description.

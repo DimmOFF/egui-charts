@@ -7,6 +7,7 @@
 pub mod alert;
 pub mod autocomplete;
 pub mod buttons;
+pub mod checkbox;
 pub mod color_picker;
 pub mod command_palette;
 pub mod dialog;

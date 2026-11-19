@@ -576,6 +576,8 @@ mod tests {
             .top_toolbar
             .chart_type_selector
             .set_preferences(chart_types.clone());
+        assert!(!first.flush_storage(), "the tab is written next");
+        frame(&mut first, SIZE, vec![]);
         assert!(first.flush_storage());
         drop(first);
 

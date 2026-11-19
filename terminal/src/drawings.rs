@@ -1673,6 +1673,8 @@ mod tests {
             if held {
                 assert!(!terminal.flush_storage(), "a write is unanswered");
                 storage.release();
+                assert!(!terminal.flush_storage(), "the tab is written next");
+                frame(&mut terminal, SIZE, vec![]);
                 assert!(terminal.flush_storage());
             }
             drop(terminal);

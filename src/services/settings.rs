@@ -14,7 +14,7 @@ use std::time::Duration;
 /// `settings` that [`SettingsStore`] reads and writes.
 ///
 /// Build it with `Default` and assign fields: later releases add fields without a breaking change.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[non_exhaustive]
 pub struct UserSettings {
@@ -53,6 +53,20 @@ pub struct UserSettings {
     pub layout_autosave: bool,
     /// The names of the starred layouts.
     pub layout_favorites: Vec<String>,
+    /// The terminal's open tabs, in tab order.
+    #[serde(deserialize_with = "known_items")]
+    pub tabs: Vec<TabSettings>,
+    /// The document of the tab on show, in [`StoreKind::Tabs`].
+    pub active_tab: Option<u64>,
+    /// Whether the tabs open at exit come back on start.
+    #[serde(default = "default_true")]
+    pub tabs_auto_restore: bool,
+    /// The parts of a tab title, in order.
+    #[serde(default = "default_tab_title", deserialize_with = "known_items")]
+    pub tab_title: Vec<TabTitlePart>,
+    /// The parts of a tab title the user hid, in the order they were hidden.
+    #[serde(deserialize_with = "known_items")]
+    pub tab_title_hidden: Vec<TabTitlePart>,
     /// Factory names of the starred studies of the indicator dialog, in order.
     pub indicator_favorites: Vec<String>,
     /// The intervals starred in the interval menu, in order. An interval this release does not
@@ -90,6 +104,91 @@ pub struct UserSettings {
     /// The theme those settings were saved under, `"dark"` or `"light"`. Their colours come
     /// from it, so a chart opening under another theme keeps that theme's colours.
     pub chart_settings_theme: Option<String>,
+}
+
+// A manual `Default` so that it matches a document written without these fields, which the
+// serde defaults give the tab title and auto-restore.
+impl Default for UserSettings {
+    fn default() -> Self {
+        Self {
+            theme: None,
+            drawing_sort: BTreeMap::new(),
+            symbol: None,
+            interval: None,
+            drawing_favorites: Vec::new(),
+            cursor_favorites: Vec::new(),
+            drawing_favorites_hidden: false,
+            drawing_favorites_pos: None,
+            magnet_hint_dismissed: false,
+            layout: None,
+            layout_autosave: false,
+            layout_favorites: Vec::new(),
+            tabs: Vec::new(),
+            active_tab: None,
+            tabs_auto_restore: true,
+            tab_title: default_tab_title(),
+            tab_title_hidden: Vec::new(),
+            indicator_favorites: Vec::new(),
+            interval_favorites: Vec::new(),
+            custom_intervals: Vec::new(),
+            hidden_intervals: Vec::new(),
+            chart_type_favorites: Vec::new(),
+            drawing_defaults: BTreeMap::new(),
+            watchlists: Vec::new(),
+            market_heatmap: MarketHeatmapSelection::default(),
+            replay_session: None,
+            chart_settings: None,
+            chart_settings_theme: None,
+        }
+    }
+}
+
+/// One of the terminal's open tabs. Its charts are the [`StoreKind::Tabs`] document
+/// `tab <id>`, which keeps the tab's state even when its layout is saved under another name.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TabSettings {
+    /// The tab's number, which names its document.
+    pub id: u64,
+    /// The name the tab saves its layout under until it shows one.
+    pub name: String,
+    /// The title the user gave the tab; the ticker and prices of [`UserSettings::tab_title`]
+    /// when `None`.
+    pub title: Option<String>,
+    /// The saved layout the tab was opened from, if any.
+    pub layout: Option<String>,
+}
+
+/// A part of a tab title, as TradingView builds them. A release that adds one leaves it out of
+/// the documents it reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum TabTitlePart {
+    /// The instrument's ticker.
+    Ticker,
+    /// The arrow the price change points.
+    ChangeIcon,
+    /// The last price.
+    LastPrice,
+    /// The price change in percent.
+    ChangePercent,
+    /// The name of the layout the tab shows.
+    LayoutName,
+}
+
+/// The parts of a tab title unless the user chose others, as TradingView shows them.
+pub fn default_tab_title() -> Vec<TabTitlePart> {
+    vec![
+        TabTitlePart::Ticker,
+        TabTitlePart::ChangeIcon,
+        TabTitlePart::LastPrice,
+        TabTitlePart::ChangePercent,
+    ]
+}
+
+/// Whether the tabs open at exit come back on start unless the user chose otherwise.
+fn default_true() -> bool {
+    true
 }
 
 /// What the market heatmap shows, by the identifiers the host gave its universes and metrics.

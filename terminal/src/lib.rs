@@ -35,6 +35,7 @@ mod drawings;
 mod layout;
 mod layouts;
 mod panels;
+mod preferences;
 mod replay;
 mod services;
 mod studies;
@@ -116,6 +117,7 @@ pub struct Terminal {
     panels: panels::State,
     trading: trading::State,
     layouts: layouts::State,
+    preferences: preferences::State,
     #[allow(dead_code, reason = "the group keeps its state here")]
     compare: compare::State,
     commands: commands::State,
@@ -185,6 +187,7 @@ impl Terminal {
             panels: Default::default(),
             trading: Default::default(),
             layouts: Default::default(),
+            preferences: Default::default(),
             compare: Default::default(),
             commands: Default::default(),
         };
@@ -243,7 +246,10 @@ impl Terminal {
         {
             self.save_layout();
         }
+        // The tab on show keeps its own document, which may hold edits after its layout's.
+        self.flush_tab();
         flushed &= self.top_toolbar.layout_menu.is_idle();
+        flushed &= self.tabs_idle();
         if self.settings.is_some() {
             let current = self.user_settings();
             if let Some(settings) = &mut self.settings {

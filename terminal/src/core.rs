@@ -3,6 +3,7 @@
 use super::{Action, ExportContents, ExportFile, Terminal};
 use egui_charts::Chart;
 use egui_charts::data::FeedStatus;
+use egui_charts::icons::icons;
 use egui_charts::localization as l10n;
 use egui_charts::model::{ChartType, Timeframe};
 use egui_charts::services::{ConflictChoice, Notification, SettingsStore, UserSettings};
@@ -12,6 +13,7 @@ use egui_charts::ui::app_state::ChartAppState;
 use egui_charts::ui::dialogs::StorageConflictDialog;
 use egui_charts::ui::floating_replay_control::ReplayControlAction;
 use egui_charts::ui::top_toolbar::TopToolbarAction;
+use egui_charts::ui_kit::list_item::ListItem;
 use egui_charts::widget::SeriesId;
 
 /// Whether settings are being read into the terminal or written from it.
@@ -234,6 +236,7 @@ impl Terminal {
             || self.panels_modal()
             || self.trading_modal()
             || self.layouts_modal()
+            || self.preferences.open
             || self.compare_modal()
             || self.commands_modal()
             || self.settings.as_ref().is_some_and(SettingsStore::conflict)
@@ -257,9 +260,21 @@ impl Terminal {
         toolbar.chart_type_selector.current = chart.chart_type();
         toolbar.state.can_undo = chart.can_undo();
         toolbar.state.can_redo = chart.can_redo();
-        let action = toolbar.show_with_state(ui, &state);
+        let mut open_settings = false;
+        let action = toolbar.show_with_menu(ui, &state, |ui| {
+            if ListItem::new()
+                .show_with_icon(ui, "App settings", &icons::SETTINGS_NUT)
+                .clicked()
+            {
+                open_settings = true;
+                ui.close();
+            }
+        });
         if action != TopToolbarAction::None {
             self.emit(Action::TopToolbar(action));
+        }
+        if open_settings {
+            self.preferences_open();
         }
     }
 

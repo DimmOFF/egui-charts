@@ -161,6 +161,7 @@ impl Terminal {
         self.alerts_show(ui, region);
         self.trading_show(ui, region);
         self.layouts_show(ui, region);
+        self.preferences_show(ui, region);
         self.compare_show(ui, region);
         self.commands_show(ui, region);
     }

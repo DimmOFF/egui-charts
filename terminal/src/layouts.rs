@@ -10,63 +10,154 @@ use super::layout::Region;
 use super::{Action, Terminal};
 use egui_charts::config::KeyboardAction;
 use egui_charts::localization as l10n;
-use egui_charts::services::UserSettings;
+use egui_charts::services::{
+    StoreKind, TabSettings, TabTitlePart, UserSettings, default_tab_title,
+};
 use egui_charts::ui::Control;
 use egui_charts::ui::export::{ExportConfig, ExportFormat, ExportResponse};
 use egui_charts::ui::floating_replay_control::ReplayControlAction;
-use egui_charts::ui::top_toolbar::{LayoutAction, TopToolbarAction};
+use egui_charts::ui::top_toolbar::{LayoutAction, LayoutMenu, TopToolbarAction};
+use egui_charts::ui_kit::dialog::DialogFooter;
 use egui_charts::ui_kit::modal::Modal;
 use egui_charts::widget::{
     Chart, ChartBuilder, ChartLayout, ChartLayoutMode, SavedLayout, SeriesId, ShortcutRequest,
 };
+use std::collections::VecDeque;
 
 /// The height of the strip of layout tabs, as TradingView's window tabs.
 const TAB_STRIP_HEIGHT: f32 = 26.0;
 
-/// An open layout. The one on show lives in the terminal; the others keep their slots here.
+/// An open tab. The one on show lives in the terminal; the others keep their slots here.
 struct Tab {
+    /// The tab's number, which names its document in [`StoreKind::Tabs`].
+    id: u64,
+    /// The name a layout is saved under while the tab shows none.
     name: String,
+    /// The title the user gave the tab; the parts of the tab title when `None`.
+    title: Option<String>,
+    /// The saved layout the tab shows, if any.
+    layout: Option<String>,
+    /// The edits the tab's own document was last written at, so closing does not write it again.
+    saved: Option<u64>,
     workspace: Option<Workspace>,
-    summary: String,
+    /// The ticker, last price and price change of the tab's first chart, for the strip.
+    ticker: String,
+    last: f64,
     change: f64,
 }
 
-/// The chart slots of a layout that is not on show.
+/// The chart slots of a tab that is not on show.
 struct Workspace {
     charts: Vec<Chart>,
     layout: ChartLayout,
     active: usize,
 }
 
+/// The tabs read from the settings, which reopen their own documents one at a time.
+struct Restore {
+    /// The tabs the settings had, kept while they are reopened.
+    saved: Vec<TabSettings>,
+    /// The tabs still to read, after the one being read.
+    pending: VecDeque<TabSettings>,
+    /// The tab being read, to notice one whose document the store could not read and skip it.
+    current: Option<TabSettings>,
+    /// Whether the tab on show has taken the first stored one.
+    filled: bool,
+    /// The tab to show once the list is back.
+    active: Option<u64>,
+}
+
 impl Tab {
-    fn unnamed() -> Self {
+    fn unnamed(id: u64) -> Self {
         Self {
+            id,
             name: "Unnamed".into(),
+            title: None,
+            layout: None,
+            saved: None,
             workspace: None,
-            summary: String::new(),
+            ticker: String::new(),
+            last: 0.0,
             change: 0.0,
         }
     }
 }
 
-#[derive(Default)]
 pub(super) struct State {
     tabs: Vec<Tab>,
     /// The tab on show.
     tab: usize,
     /// Whether the open-layout chooser is open.
     chooser: bool,
+    /// The tab whose title the user is editing, with the title being entered.
+    renaming: Option<(usize, String)>,
     /// Grid changes, counted with the chart edits so autosave sees them.
     grid_edits: u64,
     /// The slot that was active at the last poll, to notice a change of slot.
     seen_active: usize,
+    /// Reads and writes the tabs' own documents, apart from the saved layouts.
+    store: LayoutMenu,
+    /// The tabs being reopened after a restart, until the list is back.
+    restoring: Option<Restore>,
+    /// Whether the tabs were read from the settings; a change by another window leaves them.
+    restored: bool,
+    /// Whether the tabs open at exit come back on start.
+    pub(super) auto_restore: bool,
+    /// The parts of a tab title, in order.
+    pub(super) title_parts: Vec<TabTitlePart>,
+    /// The parts of a tab title the user hid.
+    pub(super) title_hidden: Vec<TabTitlePart>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            tabs: Vec::new(),
+            tab: 0,
+            chooser: false,
+            renaming: None,
+            grid_edits: 0,
+            seen_active: 0,
+            store: LayoutMenu::new_in(StoreKind::Tabs),
+            restoring: None,
+            restored: false,
+            auto_restore: true,
+            title_parts: default_tab_title(),
+            title_hidden: Vec::new(),
+        }
+    }
+}
+
+/// The name of the document of the tab numbered `id`.
+fn tab_document(id: u64) -> String {
+    format!("tab {id}")
+}
+
+/// Fills the ticker, last price and price change of `tab` from its first chart.
+fn refresh_tab_market(charts: &[Chart], tab: &mut Tab) {
+    let Some(chart) = charts.first() else {
+        return;
+    };
+    let bars = chart.bars(SeriesId::MAIN);
+    let last = bars.last().map_or(0.0, |bar| bar.close);
+    let previous = bars
+        .get(bars.len().saturating_sub(2))
+        .map_or(last, |bar| bar.close);
+    tab.ticker = chart.symbol().to_owned();
+    tab.last = last;
+    tab.change = if previous == 0.0 {
+        0.0
+    } else {
+        (last / previous - 1.0) * 100.0
+    };
 }
 
 impl Terminal {
     pub(super) fn layouts_init(&mut self) {
-        self.layouts.tabs.push(Tab::unnamed());
+        self.layouts.tabs.push(Tab::unnamed(1));
         if let Some(storage) = self.services.storage.clone() {
-            self.top_toolbar.layout_menu.set_storage(storage);
+            self.top_toolbar.layout_menu.set_storage(storage.clone());
+            self.layouts.store.set_storage(storage);
             self.set_control_visible(Control::Layouts, true);
         }
     }
@@ -77,13 +168,9 @@ impl Terminal {
             self.layouts.seen_active = self.active;
             self.layout_stop_replay();
         }
-        let previous = self.top_toolbar.layout_menu.curr_layout.clone();
+        self.restore_poll(ctx);
         if let Some((name, layout)) = self.top_toolbar.layout_menu.poll(ctx) {
             self.restore_layout(name, layout);
-        } else if self.top_toolbar.layout_menu.curr_layout != previous
-            && let Some(name) = &self.top_toolbar.layout_menu.curr_layout
-        {
-            self.layouts.tabs[self.layouts.tab].name = name.clone();
         }
         self.refresh_layout_menu();
         if let Some(error) = self.top_toolbar.layout_menu.take_error() {
@@ -109,7 +196,10 @@ impl Terminal {
             Region::Top => self.show_layout_tabs(ui),
             // The toolbar has been drawn: its grid selector holds this frame's sync options.
             Region::Left => self.layout.sync = self.top_toolbar.chart_grid_selector.sync.clone(),
-            Region::Windows => self.show_open_layout(ui.ctx()),
+            Region::Windows => {
+                self.show_open_layout(ui.ctx());
+                self.show_rename_tab(ui.ctx());
+            }
             _ => {}
         }
     }
@@ -143,28 +233,72 @@ impl Terminal {
     }
 
     pub(super) fn layouts_settings(&mut self, settings: &mut UserSettings, direction: Direction) {
-        let menu = &mut self.top_toolbar.layout_menu;
         match direction {
             Direction::Save => {
-                settings.layout = menu
-                    .curr_layout
+                let menu = &self.top_toolbar.layout_menu;
+                let tab = &self.layouts.tabs[self.layouts.tab];
+                settings.layout = tab
+                    .layout
                     .clone()
                     .filter(|name| menu.layouts.contains(name));
                 settings.layout_autosave = menu.autosave;
                 settings.layout_favorites = menu.favorites.clone();
+                settings.tabs_auto_restore = self.layouts.auto_restore;
+                settings.tab_title = self.layouts.title_parts.clone();
+                settings.tab_title_hidden = self.layouts.title_hidden.clone();
+                // While the tabs are reopened, the settings keep the list they had.
+                match &self.layouts.restoring {
+                    Some(restoring) => {
+                        settings.tabs = restoring.saved.clone();
+                        settings.active_tab = restoring.active;
+                    }
+                    None => {
+                        settings.active_tab = Some(tab.id);
+                        settings.tabs = self
+                            .layouts
+                            .tabs
+                            .iter()
+                            .map(|tab| TabSettings {
+                                id: tab.id,
+                                name: tab.name.clone(),
+                                title: tab.title.clone(),
+                                layout: tab.layout.clone(),
+                            })
+                            .collect();
+                    }
+                }
             }
             Direction::Load => {
-                menu.autosave = settings.layout_autosave;
-                menu.favorites = settings.layout_favorites.clone();
-                if let Some(layout) = &settings.layout {
-                    menu.open(layout);
+                self.top_toolbar.layout_menu.autosave = settings.layout_autosave;
+                self.top_toolbar.layout_menu.favorites = settings.layout_favorites.clone();
+                self.layouts.auto_restore = settings.tabs_auto_restore;
+                self.layouts.title_parts = settings.tab_title.clone();
+                self.layouts.title_hidden = settings.tab_title_hidden.clone();
+                // A change by another window leaves the tabs, and their unsaved edits, as they are.
+                if self.layouts.restored {
+                    return;
+                }
+                self.layouts.restored = true;
+                if self.layouts.auto_restore && !settings.tabs.is_empty() {
+                    // The first tab fills the one on show; the others are parked beside it as
+                    // the store answers, one per poll.
+                    self.layouts.restoring = Some(Restore {
+                        saved: settings.tabs.clone(),
+                        pending: settings.tabs.iter().cloned().collect(),
+                        current: None,
+                        filled: false,
+                        active: settings.active_tab,
+                    });
+                    self.restore_next();
+                } else if let Some(layout) = &settings.layout {
+                    self.top_toolbar.layout_menu.open(layout);
                 }
             }
         }
     }
 
     pub(super) fn layouts_modal(&self) -> bool {
-        self.layouts.chooser
+        self.layouts.chooser || self.layouts.renaming.is_some()
     }
 
     fn perform_layout_action(&mut self, action: LayoutAction) -> Option<Action> {
@@ -202,19 +336,38 @@ impl Terminal {
                 Err(error) => self.toasts.error(error),
             },
             LayoutAction::Open(name) => {
-                match self.layouts.tabs.iter().position(|tab| tab.name == name) {
+                match self
+                    .layouts
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.layout.as_deref() == Some(name.as_str()))
+                {
                     Some(index) if index != self.layouts.tab => self.select_layout(index),
-                    // The current layout opens again as it was saved.
+                    // The current tab opens the layout again as it was saved.
                     _ => self.top_toolbar.layout_menu.open(&name),
                 }
             }
-            LayoutAction::Delete(name) => self.top_toolbar.layout_menu.delete(&name),
+            LayoutAction::Delete(name) => {
+                self.top_toolbar.layout_menu.delete(&name);
+                for tab in &mut self.layouts.tabs {
+                    if tab.layout.as_deref() == Some(name.as_str()) {
+                        tab.layout = None;
+                    }
+                }
+            }
             LayoutAction::Rename(_, new)
                 if !new.trim().is_empty()
-                    && !self.layouts.tabs.iter().any(|tab| tab.name == new) =>
+                    && !self
+                        .layouts
+                        .tabs
+                        .iter()
+                        .any(|tab| tab.layout.as_deref() == Some(new.as_str())) =>
             {
                 match self.capture_layout() {
-                    Ok(layout) => self.top_toolbar.layout_menu.rename(&new, &layout),
+                    Ok(layout) => {
+                        self.top_toolbar.layout_menu.rename(&new, &layout);
+                        self.layouts.tabs[self.layouts.tab].layout = Some(new.clone());
+                    }
                     Err(error) => self.toasts.error(error),
                 }
             }
@@ -289,33 +442,25 @@ impl Terminal {
 
     fn show_layout_tabs(&mut self, ui: &mut egui::Ui) {
         let chart = self.chart();
-        let bars = chart.bars(SeriesId::MAIN);
-        let last = bars.last().map_or(0.0, |bar| bar.close);
-        let previous = bars
-            .get(bars.len().saturating_sub(2))
-            .map_or(last, |bar| bar.close);
-        let summary = format!("{}  {last:.2}", chart.symbol());
-        let change = if previous == 0.0 {
-            0.0
-        } else {
-            (last / previous - 1.0) * 100.0
-        };
         let (up, down) = (chart.config().bullish_color, chart.config().bearish_color);
-        let tab = &mut self.layouts.tabs[self.layouts.tab];
-        tab.summary = summary;
-        tab.change = change;
+        let current = self.layouts.tab;
+        let tab = &mut self.layouts.tabs[current];
+        refresh_tab_market(&self.charts, tab);
         let ctx = ui.ctx().clone();
-        let (close_hint, new_hint) = (
+        let (close_hint, new_hint, rename_hint) = (
             l10n::text(&ctx, "Close layout"),
             l10n::text(&ctx, "New layout"),
+            l10n::text(&ctx, "Customize tab title…"),
         );
         let mut select = None;
         let mut close = None;
+        let mut rename = None;
         let mut new = false;
-        let current = self.layouts.tab;
         let strip = self.theme.ui.border;
         let active = self.theme.ui.panel_bg;
         let muted = self.theme.ui.text_muted;
+        let body = self.theme.text.body;
+        let parts = self.layouts.title_parts.clone();
         // TradingView's window tabs: always on screen, the layout on show filled as the panel
         // below it, the others on the strip colour, each with its close cross.
         egui::Panel::top("layout_tabs")
@@ -327,7 +472,8 @@ impl Terminal {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;
                         for (index, tab) in self.layouts.tabs.iter().enumerate() {
-                            egui::Frame::new()
+                            let mut closed = false;
+                            let frame = egui::Frame::new()
                                 .fill(if index == current { active } else { strip })
                                 .inner_margin(egui::Margin::symmetric(8, 0))
                                 .show(ui, |ui| {
@@ -335,35 +481,118 @@ impl Terminal {
                                     ui.with_layout(
                                         egui::Layout::left_to_right(egui::Align::Center),
                                         |ui| {
-                                            ui.spacing_mut().item_spacing.x = 6.0;
-                                            if ui
-                                                .add(
-                                                    egui::Button::new(&tab.summary)
-                                                        .frame(false)
-                                                        .wrap_mode(egui::TextWrapMode::Extend),
-                                                )
-                                                .on_hover_text(&tab.name)
-                                                .clicked()
-                                            {
-                                                select = Some(index);
+                                            ui.spacing_mut().item_spacing.x = 5.0;
+                                            if let Some(title) = &tab.title {
+                                                ui.label(
+                                                    egui::RichText::new(title).size(body).color(
+                                                        if index == current {
+                                                            self.theme.ui.text
+                                                        } else {
+                                                            self.theme.ui.text_secondary
+                                                        },
+                                                    ),
+                                                );
+                                            } else {
+                                                let color =
+                                                    if tab.change >= 0.0 { up } else { down };
+                                                for part in &parts {
+                                                    match part {
+                                                        TabTitlePart::Ticker => {
+                                                            ui.label(
+                                                                egui::RichText::new(&tab.ticker)
+                                                                    .size(body)
+                                                                    .color(self.theme.ui.text),
+                                                            );
+                                                        }
+                                                        TabTitlePart::ChangeIcon => {
+                                                            ui.label(
+                                                                egui::RichText::new(
+                                                                    if tab.change >= 0.0 {
+                                                                        "↑"
+                                                                    } else {
+                                                                        "↓"
+                                                                    },
+                                                                )
+                                                                .size(body)
+                                                                .color(color),
+                                                            );
+                                                        }
+                                                        TabTitlePart::LastPrice => {
+                                                            ui.label(
+                                                                egui::RichText::new(format!(
+                                                                    "{:.2}",
+                                                                    tab.last
+                                                                ))
+                                                                .size(body)
+                                                                .color(self.theme.ui.text),
+                                                            );
+                                                        }
+                                                        TabTitlePart::ChangePercent => {
+                                                            ui.label(
+                                                                egui::RichText::new(format!(
+                                                                    "{:+.2}%",
+                                                                    tab.change
+                                                                ))
+                                                                .size(body)
+                                                                .color(color),
+                                                            );
+                                                        }
+                                                        TabTitlePart::LayoutName => {
+                                                            if let Some(layout) = &tab.layout {
+                                                                ui.label(
+                                                                    egui::RichText::new(layout)
+                                                                        .size(body)
+                                                                        .color(
+                                                                            self.theme
+                                                                                .ui
+                                                                                .text_muted,
+                                                                        ),
+                                                                );
+                                                            }
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
                                             }
-                                            let color = if tab.change >= 0.0 { up } else { down };
-                                            ui.colored_label(color, format!("{:+.2}%", tab.change));
-                                            if ui
+                                            let close = ui
                                                 .add(
                                                     egui::Button::new(
                                                         egui::RichText::new("×").color(muted),
                                                     )
                                                     .frame(false),
                                                 )
-                                                .on_hover_text(&close_hint)
-                                                .clicked()
-                                            {
-                                                close = Some(index);
-                                            }
+                                                .on_hover_text(&close_hint);
+                                            closed = close.clicked();
+                                            close.rect
                                         },
-                                    );
+                                    )
+                                    .inner
                                 });
+                            // The close cross keeps its own clicks; the rest of the tab selects it
+                            // and opens its context menu.
+                            let mut hit = frame.response.rect;
+                            hit.max.x = hit.max.x.min(frame.inner.left());
+                            let click = ui.interact(
+                                hit,
+                                ui.scope_id().with(("layout_tab", tab.id)),
+                                egui::Sense::click(),
+                            );
+                            click.clone().context_menu(|ui| {
+                                if ui.button(rename_hint.as_str()).clicked() {
+                                    rename = Some((index, tab.title.clone().unwrap_or_default()));
+                                    ui.close();
+                                }
+                                if ui.button(close_hint.as_str()).clicked() {
+                                    close = Some(index);
+                                    ui.close();
+                                }
+                            });
+                            if click.clicked() && !closed {
+                                select = Some(index);
+                            }
+                            if closed {
+                                close = Some(index);
+                            }
                         }
                         ui.add_space(6.0);
                         new = ui
@@ -377,6 +606,9 @@ impl Terminal {
                     });
                 });
             });
+        if let Some((index, title)) = rename {
+            self.layouts.renaming = Some((index, title));
+        }
         if let Some(index) = select {
             self.select_layout(index);
         }
@@ -393,12 +625,9 @@ impl Terminal {
         if index == self.layouts.tab {
             return;
         }
-        // Autosave keeps stored layouts current and stores a layout never saved before, such as
-        // the unnamed one, the first time it leaves the screen.
-        if self.top_toolbar.layout_menu.autosave {
-            self.save_layout();
-        }
-        self.layout_stop_replay();
+        // A tab is kept as it is left, so that it comes back after a restart.
+        refresh_tab_market(&self.charts, &mut self.layouts.tabs[self.layouts.tab]);
+        self.save_tab();
         let Some(next) = self
             .layouts
             .tabs
@@ -407,6 +636,7 @@ impl Terminal {
         else {
             return;
         };
+        self.layout_stop_replay();
         self.layouts.tabs[self.layouts.tab].workspace = Some(Workspace {
             charts: std::mem::replace(&mut self.charts, next.charts),
             layout: std::mem::replace(&mut self.layout, next.layout),
@@ -414,6 +644,7 @@ impl Terminal {
         });
         self.layouts.tab = index;
         self.layout.set_active(self.active);
+        refresh_tab_market(&self.charts, &mut self.layouts.tabs[index]);
         self.refresh_layout_menu();
         // The theme may have changed and other tabs may have edited the same symbol since this
         // layout was last on show.
@@ -450,17 +681,35 @@ impl Terminal {
             name = format!("{base} {suffix}");
             suffix += 1;
         }
-        self.layouts.tabs.push(Tab {
-            name,
-            summary: self.chart().symbol().to_owned(),
+        let id = self
+            .layouts
+            .tabs
+            .iter()
+            .map(|tab| tab.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let mut tab = Tab {
+            id,
+            name: name.clone(),
+            title: None,
+            layout: duplicate.then_some(name),
+            saved: None,
+            workspace: None,
+            ticker: String::new(),
+            last: 0.0,
             change: 0.0,
-            workspace: Some(Workspace {
-                charts,
-                layout,
-                active,
-            }),
+        };
+        refresh_tab_market(&charts, &mut tab);
+        tab.workspace = Some(Workspace {
+            charts,
+            layout,
+            active,
         });
+        self.layouts.tabs.push(tab);
         self.select_layout(self.layouts.tabs.len() - 1);
+        // The tab keeps its own document, so that it comes back after a restart.
+        self.save_tab();
         true
     }
 
@@ -468,12 +717,17 @@ impl Terminal {
         if self.layouts.tabs.len() == 1 {
             return;
         }
+        let id = self.layouts.tabs[index].id;
         if index == self.layouts.tab {
             self.select_layout(if index == 0 { 1 } else { index - 1 });
         }
         self.layouts.tabs.remove(index);
         if self.layouts.tab > index {
             self.layouts.tab -= 1;
+        }
+        // A closed tab leaves no document behind.
+        if self.services.storage.is_some() {
+            self.layouts.store.delete(&tab_document(id));
         }
     }
 
@@ -514,8 +768,46 @@ impl Terminal {
     }
 
     fn refresh_layout_menu(&mut self) {
+        let tab = &self.layouts.tabs[self.layouts.tab];
         self.top_toolbar.layout_menu.curr_layout =
-            Some(self.layouts.tabs[self.layouts.tab].name.clone());
+            Some(tab.layout.clone().unwrap_or_else(|| tab.name.clone()));
+    }
+
+    /// Asks for a title for the tab whose context menu chose to customize it.
+    fn show_rename_tab(&mut self, ctx: &egui::Context) {
+        let Some((index, mut title)) = self.layouts.renaming.clone() else {
+            return;
+        };
+        let mut open = true;
+        let mut apply = false;
+        let mut cancel = false;
+        let hint = l10n::text(ctx, "Leave empty for the default title");
+        Modal::new("rename_tab", l10n::text(ctx, "Customize tab title"))
+            .width(320.0)
+            .show(ctx, &mut open, |ui| {
+                ui.add_space(self.theme.spacing.lg);
+                ui.add(
+                    egui::TextEdit::singleline(&mut title)
+                        .hint_text(hint)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(self.theme.spacing.md);
+                let (ok, no) = DialogFooter::new(l10n::text(ui.ctx(), "Ok"))
+                    .secondary(l10n::text(ui.ctx(), "Cancel"))
+                    .show(ui);
+                apply = ok;
+                cancel = no;
+            });
+        let chosen = open && !cancel;
+        if chosen && apply {
+            let title = title.trim().to_owned();
+            self.layouts.tabs[index].title = (!title.is_empty()).then_some(title);
+            self.layouts.renaming = None;
+        } else if chosen {
+            self.layouts.renaming = Some((index, title));
+        } else {
+            self.layouts.renaming = None;
+        }
     }
 
     /// The layout on show: its arrangement, the charts it shows, in slot order, and the chart
@@ -542,64 +834,94 @@ impl Terminal {
         Ok(layout)
     }
 
-    /// Saves the layout on show under its tab's name.
+    /// Saves the layout on show under the layout of its tab, or under the tab's name while it
+    /// shows none, which the tab then shows.
     pub(super) fn save_layout(&mut self) {
-        let name = self.layouts.tabs[self.layouts.tab].name.clone();
+        let tab = &self.layouts.tabs[self.layouts.tab];
+        let name = tab.layout.clone().unwrap_or_else(|| tab.name.clone());
         match self.capture_layout() {
-            Ok(layout) => self.top_toolbar.layout_menu.save(&name, &layout),
+            Ok(layout) => {
+                self.top_toolbar.layout_menu.save(&name, &layout);
+                self.layouts.tabs[self.layouts.tab].layout = Some(name);
+            }
             Err(error) => self.toasts.error(error),
         }
     }
 
-    /// Shows a stored layout in the current tab, which takes its name.
+    /// Stores the tab on show as its own document, which brings it back after a restart with the
+    /// edits made after its layout was saved.
+    fn save_tab(&mut self) {
+        if self.services.storage.is_none() {
+            return;
+        }
+        let id = self.layouts.tabs[self.layouts.tab].id;
+        let edits = self.layout_edits();
+        match self.capture_layout() {
+            Ok(layout) => {
+                self.layouts.store.save(&tab_document(id), &layout);
+                self.layouts.tabs[self.layouts.tab].saved = Some(edits);
+            }
+            Err(error) => self.toasts.error(error),
+        }
+    }
+
+    /// Stores the tab on show at exit, ignoring a chart whose drawings are still loading so that
+    /// closing does not report it, and leaving a write already on its way or one that has the
+    /// tab's state already.
+    pub(super) fn flush_tab(&mut self) {
+        if self.services.storage.is_none() || !self.layouts.store.is_idle() {
+            return;
+        }
+        let edits = self.layout_edits();
+        let id = self.layouts.tabs[self.layouts.tab].id;
+        if self.layouts.tabs[self.layouts.tab].saved == Some(edits) {
+            return;
+        }
+        if let Ok(layout) = self.capture_layout() {
+            self.layouts.store.save(&tab_document(id), &layout);
+            self.layouts.tabs[self.layouts.tab].saved = Some(edits);
+        }
+    }
+
+    /// Whether storage has every tab document answered.
+    pub(super) fn tabs_idle(&self) -> bool {
+        self.layouts.store.is_idle()
+    }
+
+    /// Shows a stored layout in the current tab, which mentions it without taking its name.
     fn restore_layout(&mut self, name: String, layout: SavedLayout) {
-        if let Some(index) = self.layouts.tabs.iter().position(|tab| tab.name == name)
+        if let Some(index) = self
+            .layouts
+            .tabs
+            .iter()
+            .position(|tab| tab.layout.as_deref() == Some(name.as_str()))
             && index != self.layouts.tab
         {
             self.select_layout(index);
             return;
         }
-        if layout.charts.is_empty()
-            || layout.charts.len() > ChartLayoutMode::Tabs.chart_count()
-            || (layout.mode != ChartLayoutMode::Tabs
-                && layout.charts.len() != layout.mode.chart_count())
-        {
-            self.toasts
-                .error("Could not open layout: invalid chart count");
+        let Some(charts) = self.charts_of(&layout) else {
             return;
-        }
-        let source = self.chart();
-        let mut charts = Vec::with_capacity(layout.charts.len());
-        let mut skipped_drawings = 0;
-        for snapshot in &layout.charts {
-            let mut chart = ChartBuilder::new()
-                .with_feed(self.feed.clone())
-                .with_symbol(&snapshot.symbol)
-                .with_timeframe(snapshot.interval.unwrap_or_default())
-                .with_theme(self.theme.clone())
-                .with_drawing_registry(source.drawings().registry.clone())
-                .with_visible_candles(0)
-                .build();
-            match chart.restore_with(snapshot, self.studies.indicators.factory()) {
-                Err(error) => {
-                    self.toasts.error(format!("Could not open layout: {error}"));
-                    return;
-                }
-                Ok(skipped) => skipped_drawings += skipped.len(),
-            }
-            chart.set_study_limit(source.study_limit());
-            chart.set_price_targets_visible(source.price_targets_visible());
-            chart.set_event_visibility(source.event_visibility().clone());
-            chart.set_conversion(source.conversion().map(str::to_owned));
-            charts.push(chart);
-        }
-        if skipped_drawings > 0 {
-            self.toasts
-                .warning(format!("Skipped {skipped_drawings} unreadable drawings"));
-        }
+        };
+        self.install_charts(charts, &layout);
+        let tab = &mut self.layouts.tabs[self.layouts.tab];
+        tab.layout = Some(name);
+        refresh_tab_market(&self.charts, tab);
+    }
+
+    /// Shows `charts` in the slots their stored layout arranges, at its sizes.
+    fn install_charts(&mut self, charts: Vec<Chart>, layout: &SavedLayout) {
         self.layout_stop_replay();
-        self.layouts.tabs[self.layouts.tab].name = name;
+        // The drawing tool defaults come from the settings, not from a layout.
+        let defaults = self
+            .charts
+            .first()
+            .map(|chart| chart.drawings().tool_defaults.clone())
+            .unwrap_or_default();
         self.charts = charts;
+        for chart in &mut self.charts {
+            chart.drawings_mut().tool_defaults = defaults.clone();
+        }
         // A copy drops a divider drag in progress, which would overwrite the restored sizes.
         self.layout = self.layout.clone();
         self.layout.reset_sizes(true);
@@ -621,6 +943,168 @@ impl Terminal {
         for slot in 0..self.charts.len() {
             self.wire_slot(slot);
         }
+    }
+
+    /// The charts a stored layout shows, in this terminal's feed, theme and drawings.
+    fn charts_of(&mut self, layout: &SavedLayout) -> Option<Vec<Chart>> {
+        if layout.charts.is_empty()
+            || layout.charts.len() > ChartLayoutMode::Tabs.chart_count()
+            || (layout.mode != ChartLayoutMode::Tabs
+                && layout.charts.len() != layout.mode.chart_count())
+        {
+            self.toasts
+                .error("Could not open layout: invalid chart count");
+            return None;
+        }
+        let source = self.chart();
+        let registry = source.drawings().registry.clone();
+        let study_limit = source.study_limit();
+        let targets = source.price_targets_visible();
+        let events = source.event_visibility().clone();
+        let conversion = source.conversion().map(str::to_owned);
+        let mut charts = Vec::with_capacity(layout.charts.len());
+        let mut skipped_drawings = 0;
+        for snapshot in &layout.charts {
+            let mut chart = ChartBuilder::new()
+                .with_feed(self.feed.clone())
+                .with_symbol(&snapshot.symbol)
+                .with_timeframe(snapshot.interval.unwrap_or_default())
+                .with_theme(self.theme.clone())
+                .with_drawing_registry(registry.clone())
+                .with_visible_candles(0)
+                .build();
+            match chart.restore_with(snapshot, self.studies.indicators.factory()) {
+                Err(error) => {
+                    self.toasts.error(format!("Could not open layout: {error}"));
+                    return None;
+                }
+                Ok(skipped) => skipped_drawings += skipped.len(),
+            }
+            chart.set_study_limit(study_limit);
+            chart.set_price_targets_visible(targets);
+            chart.set_event_visibility(events.clone());
+            chart.set_conversion(conversion.clone());
+            charts.push(chart);
+        }
+        if skipped_drawings > 0 {
+            self.toasts
+                .warning(format!("Skipped {skipped_drawings} unreadable drawings"));
+        }
+        Some(charts)
+    }
+
+    /// Reopens one tab of the settings' list: the first fills the tab on show, the others wait
+    /// beside it, and the last one read brings the saved tab back to the front.
+    fn restore_tab(&mut self, layout: SavedLayout) {
+        let Some(tab) = self
+            .layouts
+            .restoring
+            .as_mut()
+            .and_then(|restoring| restoring.current.take())
+        else {
+            return;
+        };
+        let Some(charts) = self.charts_of(&layout) else {
+            self.restore_next();
+            return;
+        };
+        if self
+            .layouts
+            .restoring
+            .as_ref()
+            .is_some_and(|restoring| restoring.filled)
+        {
+            self.park_charts(charts, tab, &layout);
+        } else {
+            self.install_charts(charts, &layout);
+            let current = &mut self.layouts.tabs[self.layouts.tab];
+            current.id = tab.id;
+            current.name = tab.name;
+            current.title = tab.title;
+            current.layout = tab.layout;
+            refresh_tab_market(&self.charts, current);
+            if let Some(restoring) = &mut self.layouts.restoring {
+                restoring.filled = true;
+            }
+        }
+        self.restore_next();
+    }
+
+    /// Reads the tabs the settings had, one at a time, and shows the one saved last once they
+    /// are all back. A tab whose document the store cannot read leaves the rest to come back.
+    fn restore_poll(&mut self, ctx: &egui::Context) {
+        let opened = self.layouts.store.poll(ctx);
+        if let Some(error) = self.layouts.store.take_error() {
+            self.toasts.error(error);
+        }
+        if let Some((_, layout)) = opened {
+            self.restore_tab(layout);
+        } else if self
+            .layouts
+            .restoring
+            .as_ref()
+            .is_some_and(|restoring| restoring.current.is_some())
+            && self.layouts.store.is_idle()
+        {
+            if let Some(restoring) = &mut self.layouts.restoring {
+                restoring.current = None;
+            }
+            self.restore_next();
+        }
+    }
+
+    /// Asks for the next tab document of the restart.
+    fn restore_next(&mut self) {
+        let next = self.layouts.restoring.as_mut().and_then(|restoring| {
+            let next = restoring.pending.pop_front();
+            restoring.current = next.clone();
+            next
+        });
+        if let Some(tab) = next {
+            self.layouts.store.open(&tab_document(tab.id));
+            return;
+        }
+        let Some(restoring) = self.layouts.restoring.take() else {
+            return;
+        };
+        if let Some(active) = restoring.active
+            && let Some(index) = self.layouts.tabs.iter().position(|tab| tab.id == active)
+        {
+            self.select_layout(index);
+        }
+    }
+
+    /// Keeps the charts of a stored tab beside the one on show, without showing it.
+    fn park_charts(&mut self, charts: Vec<Chart>, tab: TabSettings, layout: &SavedLayout) {
+        let mut parked = ChartLayout::default();
+        parked.mode = layout.mode;
+        let sized = match &layout.sizing {
+            Some(sizing) if sizing.mode != layout.mode => Err("sizes of another arrangement"),
+            Some(sizing) => parked.set_sizes(std::slice::from_ref(sizing), true),
+            None => Ok(()),
+        };
+        if let Err(error) = sized {
+            self.toasts
+                .error(format!("Could not open chart sizes: {error}"));
+        }
+        let mut tab = Tab {
+            id: tab.id,
+            name: tab.name,
+            title: tab.title,
+            layout: tab.layout,
+            saved: None,
+            workspace: None,
+            ticker: String::new(),
+            last: 0.0,
+            change: 0.0,
+        };
+        refresh_tab_market(&charts, &mut tab);
+        tab.workspace = Some(Workspace {
+            charts,
+            layout: parked,
+            active: 0,
+        });
+        self.layouts.tabs.push(tab);
     }
 }
 
@@ -756,20 +1240,25 @@ mod tests {
             .chart_mut()
             .user_action(|chart| chart.config_mut().show_grid = false);
         terminal.top_toolbar.layout_menu.autosave = true;
+        layout(&mut terminal, LayoutAction::Save);
         layout(&mut terminal, LayoutAction::CreateNew);
         // The new layout is one slot with a copy of the active chart; the strip lists both.
         let names: Vec<_> = terminal.layouts.tabs.iter().map(|tab| &*tab.name).collect();
         assert_eq!(names, ["Unnamed", "Unnamed 2"]);
         assert!(
             storage.get(StoreKind::Layouts, "Unnamed").is_some(),
-            "autosave stores the layout it leaves, though it was never saved"
+            "the layout saved before the new tab stays stored"
+        );
+        assert!(
+            storage.get(StoreKind::Tabs, "tab 1").is_some(),
+            "the tab keeps the state it was left in as its own document"
         );
         assert!(
             terminal
                 .layouts
                 .tabs
                 .iter()
-                .all(|tab| !tab.summary.is_empty()),
+                .all(|tab| !tab.ticker.is_empty()),
             "the first layout has a label when the strip appears"
         );
         assert_eq!(terminal.layouts.tab, 1);
@@ -806,8 +1295,7 @@ mod tests {
                 .is_none()
         );
         // Checked before the next frame, which would restyle the chart anyway.
-        let open = Action::Layout(LayoutAction::Open("Unnamed 2".into()));
-        assert!(terminal.run(open).is_none());
+        terminal.select_layout(1);
         assert_eq!(terminal.chart().symbol(), "MSFT");
         assert_eq!(
             terminal.chart().config().background_color,
@@ -1008,7 +1496,8 @@ mod tests {
     }
 
     #[test]
-    fn saved_layouts_open_again_and_after_a_restart() {        let storage = Arc::new(MemoryStorage::default());
+    fn saved_layouts_open_again_and_after_a_restart() {
+        let storage = Arc::new(MemoryStorage::default());
         let mut terminal = new_terminal(&storage);
         settle(&mut terminal);
         layout(
@@ -1083,7 +1572,15 @@ mod tests {
             LayoutAction::Rename("Unnamed".into(), "Renamed".into()),
         );
         assert_eq!(terminal.top_toolbar.layout_menu.layouts, ["Renamed"]);
-        assert_eq!(terminal.layouts.tabs[0].name, "Renamed");
+        assert_eq!(
+            terminal.layouts.tabs[0].name, "Unnamed",
+            "a tab keeps its name"
+        );
+        assert_eq!(
+            terminal.layouts.tabs[0].layout.as_deref(),
+            Some("Renamed"),
+            "the tab shows the renamed layout"
+        );
         assert_eq!(terminal.top_toolbar.layout_menu.favorites, ["Renamed"]);
         saved(&terminal);
         layout(&mut terminal, LayoutAction::SaveAs("Copy".into()));
@@ -1182,5 +1679,102 @@ mod tests {
                 "{saved:?}, after a restart"
             );
         }
+    }
+
+    #[test]
+    fn the_open_tabs_come_back_after_a_restart() {
+        let storage = Arc::new(MemoryStorage::default());
+        let mut terminal = new_terminal(&storage);
+        settle(&mut terminal);
+        layout(&mut terminal, LayoutAction::CreateNew);
+        terminal.chart_mut().set_symbol("MSFT");
+        // A layout is copied or saved only once the active symbol's drawings have loaded, which
+        // takes the next frames.
+        settle(&mut terminal);
+        settle(&mut terminal);
+        layout(
+            &mut terminal,
+            LayoutAction::SelectGrid(ChartLayoutMode::TwoHorizontal),
+        );
+        layout(&mut terminal, LayoutAction::CreateNew);
+        terminal.chart_mut().set_symbol("NVDA");
+        settle(&mut terminal);
+        settle(&mut terminal);
+        let names: Vec<_> = terminal
+            .layouts
+            .tabs
+            .iter()
+            .map(|tab| tab.name.clone())
+            .collect();
+        assert_eq!(names, ["Unnamed", "Unnamed 2", "Unnamed 3"]);
+        // The middle tab was on show last.
+        terminal.select_layout(1);
+        terminal.run(Action::TopToolbar(TopToolbarAction::Save));
+        for _ in 0..6 {
+            frame(&mut terminal, SIZE, vec![]);
+        }
+        assert_eq!(terminal.layouts.tab, 1);
+        drop(terminal);
+
+        let mut terminal = new_terminal(&storage);
+        for _ in 0..8 {
+            frame(&mut terminal, SIZE, vec![]);
+        }
+        let reopened: Vec<_> = terminal
+            .layouts
+            .tabs
+            .iter()
+            .map(|tab| tab.name.clone())
+            .collect();
+        assert_eq!(reopened, names, "the tabs, in tab order");
+        assert_eq!(terminal.layouts.tab, 1, "the tab on show last");
+        assert_eq!(terminal.chart().symbol(), "MSFT");
+        assert_eq!(terminal.layout.mode, ChartLayoutMode::TwoHorizontal);
+        // The parked tabs kept their charts too.
+        let parked = |terminal: &Terminal, index: usize| {
+            let workspace = terminal.layouts.tabs[index].workspace.as_ref().unwrap();
+            (
+                workspace.charts[0].symbol().to_owned(),
+                workspace.charts.len(),
+            )
+        };
+        assert_eq!(parked(&terminal, 0), ("AAPL".into(), 1));
+        assert_eq!(parked(&terminal, 2), ("NVDA".into(), 1));
+    }
+
+    #[test]
+    fn a_tab_whose_layout_is_gone_leaves_the_rest_to_come_back() {
+        let storage = Arc::new(MemoryStorage::default());
+        let mut terminal = new_terminal(&storage);
+        settle(&mut terminal);
+        layout(&mut terminal, LayoutAction::CreateNew);
+        layout(&mut terminal, LayoutAction::CreateNew);
+        let names: Vec<_> = terminal
+            .layouts
+            .tabs
+            .iter()
+            .map(|tab| tab.name.clone())
+            .collect();
+        assert_eq!(names, ["Unnamed", "Unnamed 2", "Unnamed 3"]);
+        for _ in 0..6 {
+            frame(&mut terminal, SIZE, vec![]);
+        }
+        // Another window deleted the middle tab's document while this one was closed.
+        let gone = tab_document(terminal.layouts.tabs[1].id);
+        storage.remove(StoreKind::Tabs, &gone);
+        drop(terminal);
+
+        let mut terminal = new_terminal(&storage);
+        for _ in 0..16 {
+            frame(&mut terminal, SIZE, vec![]);
+        }
+        let reopened: Vec<_> = terminal
+            .layouts
+            .tabs
+            .iter()
+            .map(|tab| tab.name.clone())
+            .collect();
+        assert_eq!(reopened, [names[0].clone(), names[2].clone()]);
+        assert!(terminal.layouts.restoring.is_none(), "the restart finished");
     }
 }

@@ -1360,6 +1360,8 @@ mod tests {
                 .unwrap()
                 .alert_source(0);
             frames(&mut terminal);
+            assert!(!terminal.flush_storage(), "the tab is written next");
+            frame(&mut terminal, SIZE, vec![]);
             assert!(terminal.flush_storage());
             assert!(
                 storage

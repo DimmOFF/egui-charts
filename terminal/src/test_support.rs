@@ -122,6 +122,14 @@ impl MemoryStorage {
             .map(|stored| stored.document.clone())
     }
 
+    /// Forgets the document `name` of `kind`, as another window deleting it does.
+    pub(super) fn remove(&self, kind: StoreKind, name: &str) {
+        self.documents
+            .lock()
+            .unwrap()
+            .remove(&(kind, name.to_owned()));
+    }
+
     /// Holds every write unapplied and unanswered until [`release`](Self::release), as a storage
     /// that answers later does.
     pub(super) fn hold(&self) {

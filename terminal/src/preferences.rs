@@ -218,16 +218,19 @@ impl Terminal {
         let mut to = None;
         let title = &mut self.preferences.title;
         for index in 0..title.len() {
-            let id = ui.scope_id().with(("tab_title_part", index));
-            let row = ui.dnd_drag_source(id, index, |ui| {
+            let handle_id = ui.scope_id().with(("tab_title_handle", index));
+            let (part, shown) = &mut title[index];
+            let row = ui.horizontal(|ui| {
                 ui.set_width(ui.available_width());
-                let (part, shown) = &mut title[index];
-                ui.horizontal(|ui| {
-                    checkbox(ui, shown, l10n::text(ui.ctx(), part_label(*part)));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new("⠿").color(theme.ui.text_muted));
-                    });
-                });
+                checkbox(ui, shown, l10n::text(ui.ctx(), part_label(*part)));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Only the dots drag the part, so the checkbox keeps its clicks.
+                    ui.dnd_drag_source(handle_id, index, |ui| {
+                        ui.label(RichText::new("⠿").color(theme.ui.text_muted))
+                    })
+                    .response
+                    .on_hover_text(l10n::text(ui.ctx(), "Drag to reorder"));
+                })
             });
             let rect = row.response.rect;
             if row.response.dnd_hover_payload::<usize>().is_some() {

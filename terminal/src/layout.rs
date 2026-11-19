@@ -93,6 +93,8 @@ impl Terminal {
                     let mut slots: Vec<_> = self.charts.iter_mut().collect();
                     self.layout.show_with(ui, &mut slots, &mut render);
                 }
+                // A new tab asks what to show over its chart.
+                self.show_start_page(ui);
             });
         if self.layout.active() != self.active {
             self.activate_slot(self.layout.active());

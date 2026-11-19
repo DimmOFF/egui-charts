@@ -37,6 +37,9 @@ struct Tab {
     title: Option<String>,
     /// The saved layout the tab shows, if any.
     layout: Option<String>,
+    /// Whether the tab still asks what to open: a new tab shows the choice of a saved layout or
+    /// a new one until the user picks.
+    start: bool,
     /// The edits the tab's own document was last written at, so closing does not write it again.
     saved: Option<u64>,
     workspace: Option<Workspace>,
@@ -74,6 +77,7 @@ impl Tab {
             name: "Unnamed".into(),
             title: None,
             layout: None,
+            start: false,
             saved: None,
             workspace: None,
             ticker: String::new(),
@@ -299,6 +303,169 @@ impl Terminal {
 
     pub(super) fn layouts_modal(&self) -> bool {
         self.layouts.chooser || self.layouts.renaming.is_some()
+    }
+
+    /// Whether the tab on show still asks what to open, before it shows a chart.
+    pub(super) fn start_page(&self) -> bool {
+        self.layouts
+            .tabs
+            .get(self.layouts.tab)
+            .is_some_and(|tab| tab.start)
+    }
+
+    /// Draws the page a new tab opens with: a new layout, or one of the saved ones. It covers the
+    /// charts, which keep drawing underneath so that their drawings are ready for the next tab.
+    pub(super) fn show_start_page(&mut self, ui: &mut egui::Ui) {
+        if !self.start_page() {
+            return;
+        }
+        let rect = ui.max_rect();
+        let ctx = ui.ctx().clone();
+        let page_bg = self.theme.ui.panel_bg;
+        let (text, border, accent) = (
+            self.theme.ui.text,
+            self.theme.ui.border,
+            self.theme.ui.accent,
+        );
+        let card = self.theme.ui.panel_bg_secondary;
+        let (radius, gap) = (self.theme.radius.md, self.theme.spacing.md);
+        let (heading, title) = (self.theme.text.dialog_title, self.theme.text.title);
+        let top = self.theme.spacing.xxl;
+        // Starred layouts come first, as the layout menu lists them.
+        let favorites = self.top_toolbar.layout_menu.favorites.clone();
+        let mut names = self.top_toolbar.layout_menu.layouts.clone();
+        names.sort_by_key(|name| !favorites.contains(name));
+        let create_hint = l10n::text(&ctx, "Create new layout");
+        let mut create = false;
+        let mut open = None;
+        let mut star = None;
+        egui::Area::new(egui::Id::unique("tv_start_page"))
+            .fixed_pos(rect.min)
+            .order(egui::Order::Foreground)
+            .show(&ctx, |ui| {
+                ui.set_width(rect.width());
+                ui.set_height(rect.height());
+                // The page takes the clicks the chart underneath would get.
+                ui.interact(rect, ui.scope_id().with("start_page"), egui::Sense::click());
+                ui.painter().rect_filled(rect, 0.0, page_bg);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_space(top);
+                        ui.label(
+                            egui::RichText::new(l10n::text(&ctx, "Supercharts"))
+                                .size(heading)
+                                .color(text),
+                        );
+                        ui.add_space(gap);
+                        let tile = ((ui.available_width() - 3.0 * gap) / 4.0).clamp(150.0, 260.0);
+                        let size = egui::vec2(tile, 64.0);
+                        let items = std::iter::once(None)
+                            .chain(names.iter().map(Some))
+                            .collect::<Vec<_>>();
+                        for row in items.chunks(4) {
+                            ui.horizontal(|ui| {
+                                for name in row {
+                                    let Some(name) = name else {
+                                        let (rect, response) =
+                                            ui.allocate_exact_size(size, egui::Sense::click());
+                                        let painter = ui.painter().clone();
+                                        let corners = [
+                                            rect.left_top(),
+                                            rect.right_top(),
+                                            rect.right_bottom(),
+                                            rect.left_bottom(),
+                                            rect.left_top(),
+                                        ];
+                                        for pair in corners.windows(2) {
+                                            painter.extend(egui::Shape::dashed_line(
+                                                pair,
+                                                egui::Stroke::new(1.0, border),
+                                                5.0,
+                                                4.0,
+                                            ));
+                                        }
+                                        painter.text(
+                                            rect.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            format!("+  {create_hint}"),
+                                            egui::FontId::proportional(title),
+                                            accent,
+                                        );
+                                        if response.clicked() {
+                                            create = true;
+                                        }
+                                        continue;
+                                    };
+                                    let name = *name;
+                                    let (rect, response) =
+                                        ui.allocate_exact_size(size, egui::Sense::click());
+                                    let starred = favorites.contains(name);
+                                    let painter = ui.painter().clone();
+                                    painter.rect(
+                                        rect,
+                                        radius,
+                                        card,
+                                        egui::Stroke::new(1.0, border),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                    painter.text(
+                                        rect.left_top() + egui::vec2(12.0, 12.0),
+                                        egui::Align2::LEFT_TOP,
+                                        name,
+                                        egui::FontId::proportional(title),
+                                        text,
+                                    );
+                                    let star_rect = egui::Rect::from_min_size(
+                                        rect.right_top() + egui::vec2(-30.0, 8.0),
+                                        egui::vec2(22.0, 22.0),
+                                    );
+                                    let star_response = ui.interact(
+                                        star_rect,
+                                        ui.scope_id().with(("start_star", name)),
+                                        egui::Sense::click(),
+                                    );
+                                    painter.text(
+                                        star_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        if starred { "★" } else { "☆" },
+                                        egui::FontId::proportional(title),
+                                        if starred { accent } else { border },
+                                    );
+                                    if star_response.clicked() {
+                                        star = Some(name.clone());
+                                    } else if response.clicked() {
+                                        open = Some(name.clone());
+                                    }
+                                }
+                            });
+                            ui.add_space(gap);
+                        }
+                        if names.is_empty() {
+                            ui.label(
+                                egui::RichText::new(l10n::text(&ctx, "No saved layouts"))
+                                    .size(title)
+                                    .color(border),
+                            );
+                        }
+                    });
+            });
+        if create {
+            // The tab shows the copy of the active chart it was opened with.
+            self.layouts.tabs[self.layouts.tab].start = false;
+        }
+        if let Some(name) = open {
+            self.top_toolbar.layout_menu.open(&name);
+        }
+        if let Some(name) = star {
+            let favorites = &mut self.top_toolbar.layout_menu.favorites;
+            match favorites.iter().position(|favorite| *favorite == name) {
+                Some(at) => {
+                    favorites.remove(at);
+                }
+                None => favorites.push(name),
+            }
+        }
     }
 
     fn perform_layout_action(&mut self, action: LayoutAction) -> Option<Action> {
@@ -694,6 +861,8 @@ impl Terminal {
             name: name.clone(),
             title: None,
             layout: duplicate.then_some(name),
+            // A new tab asks what to show; a copy already shows the layout it duplicates.
+            start: !duplicate,
             saved: None,
             workspace: None,
             ticker: String::new(),
@@ -890,11 +1059,14 @@ impl Terminal {
 
     /// Shows a stored layout in the current tab, which mentions it without taking its name.
     fn restore_layout(&mut self, name: String, layout: SavedLayout) {
-        if let Some(index) = self
-            .layouts
-            .tabs
-            .iter()
-            .position(|tab| tab.layout.as_deref() == Some(name.as_str()))
+        // A new tab that is still asking what to open fills with the layout the user picks,
+        // even when another tab already shows it.
+        if !self.start_page()
+            && let Some(index) = self
+                .layouts
+                .tabs
+                .iter()
+                .position(|tab| tab.layout.as_deref() == Some(name.as_str()))
             && index != self.layouts.tab
         {
             self.select_layout(index);
@@ -906,6 +1078,7 @@ impl Terminal {
         self.install_charts(charts, &layout);
         let tab = &mut self.layouts.tabs[self.layouts.tab];
         tab.layout = Some(name);
+        tab.start = false;
         refresh_tab_market(&self.charts, tab);
     }
 
@@ -1092,6 +1265,7 @@ impl Terminal {
             name: tab.name,
             title: tab.title,
             layout: tab.layout,
+            start: false,
             saved: None,
             workspace: None,
             ticker: String::new(),
@@ -1776,5 +1950,37 @@ mod tests {
             .collect();
         assert_eq!(reopened, [names[0].clone(), names[2].clone()]);
         assert!(terminal.layouts.restoring.is_none(), "the restart finished");
+    }
+
+    /// A new tab asks what to show; picking one of the saved layouts fills the new tab with it,
+    /// even when another tab could show the same one.
+    #[test]
+    fn a_new_tab_offers_the_saved_layouts_before_showing_a_chart() {
+        let storage = Arc::new(MemoryStorage::default());
+        let mut terminal = new_terminal(&storage);
+        settle(&mut terminal);
+        layout(&mut terminal, LayoutAction::SaveAs("Second".into()));
+        assert!(
+            !terminal.layouts.tabs[1].start,
+            "a copy shows the layout it duplicates"
+        );
+        // Closing the tab leaves the layout saved but open in no tab.
+        terminal.close_layout(1);
+        settle(&mut terminal);
+        layout(&mut terminal, LayoutAction::CreateNew);
+        assert!(terminal.start_page(), "the new tab asks what to open");
+        layout(&mut terminal, LayoutAction::Open("Second".into()));
+        assert!(!terminal.start_page(), "the chosen layout is on show");
+        assert_eq!(
+            terminal.layouts.tabs[terminal.layouts.tab]
+                .layout
+                .as_deref(),
+            Some("Second")
+        );
+        assert_eq!(
+            terminal.layouts.tabs.len(),
+            2,
+            "the new tab keeps its place"
+        );
     }
 }

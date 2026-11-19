@@ -299,7 +299,10 @@ impl Storage for FileStorage {
 pub(crate) fn default_path() -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("config").join("storage.json")))
+        .and_then(|exe| {
+            exe.parent()
+                .map(|dir| dir.join("config").join("storage.json"))
+        })
         .unwrap_or_else(|| PathBuf::from("storage.json"))
 }
 
@@ -314,7 +317,10 @@ fn legacy_path() -> Option<PathBuf> {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
         })
         .map(|dir| dir.join("egui-charts-deriv").join("storage.json"));
-    beside.into_iter().chain(per_user).find(|path| path.exists())
+    beside
+        .into_iter()
+        .chain(per_user)
+        .find(|path| path.exists())
 }
 
 fn kind_key(kind: StoreKind) -> &'static str {
@@ -328,6 +334,7 @@ fn kind_key(kind: StoreKind) -> &'static str {
         StoreKind::IndicatorTemplates => "indicator_templates",
         StoreKind::SymbolNotes => "symbol_notes",
         StoreKind::Layouts => "layouts",
+        StoreKind::Tabs => "tabs",
         StoreKind::RecentSymbols => "recent_symbols",
         StoreKind::Screens => "screens",
         _ => "other",
@@ -345,6 +352,7 @@ fn kind_from_key(key: &str) -> Option<StoreKind> {
         "indicator_templates" => StoreKind::IndicatorTemplates,
         "symbol_notes" => StoreKind::SymbolNotes,
         "layouts" => StoreKind::Layouts,
+        "tabs" => StoreKind::Tabs,
         "recent_symbols" => StoreKind::RecentSymbols,
         "screens" => StoreKind::Screens,
         _ => return None,

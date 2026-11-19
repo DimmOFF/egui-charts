@@ -4,7 +4,7 @@ use egui::FontId;
 use egui::{Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
 
 /// Side of a study legend button.
-const BUTTON_SIZE: f32 = 20.0;
+const BUTTON_SIZE: f32 = 24.0;
 
 /// Width of the study's buttons: a read-only study keeps hide, a script's edit button and, with
 /// an article, help.
@@ -172,7 +172,7 @@ pub(crate) fn study_controls(
                     _ => &crate::icons::icons::UI_MORE_HORIZONTAL,
                 };
                 icon.as_image_tinted(Vec2::splat(18.0), theme.ui.text)
-                    .paint_at(ui, rect.shrink(1.0));
+                    .paint_at(ui, rect.shrink(3.0));
             }
             #[cfg(not(feature = "icons"))]
             ui.painter().text(
@@ -207,8 +207,8 @@ mod tests {
             // A translator that changes every key must reach the control labels.
             l10n::set_translator(&ctx, |english| Some(format!("{english}!")));
             let row = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(220.0, 20.0));
-            let controls = Rect::from_min_size(Pos2::new(150.0, 10.0), Vec2::new(80.0, 20.0));
-            let settings = controls.min + Vec2::new(30.0, 10.0);
+            let controls = Rect::from_min_size(Pos2::new(134.0, 10.0), Vec2::new(96.0, 20.0));
+            let settings = controls.min + Vec2::new(36.0, 10.0);
             let frame = |events| {
                 let mut clicked = [false; 4];
                 let mut menu = None;
@@ -350,7 +350,7 @@ mod tests {
                 // The menu opens below the more-actions button.
                 assert_eq!(
                     activated.3,
-                    (index == 4).then(|| controls.min + Vec2::new(60.0, 20.0))
+                    (index == 4).then(|| controls.min + Vec2::new(72.0, 20.0))
                 );
             }
 
@@ -365,7 +365,7 @@ mod tests {
                 .unwrap();
             let ctx = Context::default();
             crate::theme::apply_to_egui(&ctx, &theme);
-            let controls = Rect::from_min_size(Pos2::new(150.0, 10.0), Vec2::new(100.0, 20.0));
+            let controls = Rect::from_min_size(Pos2::new(150.0, 10.0), Vec2::new(120.0, 20.0));
             let row = row.union(controls);
             let frame = |events| {
                 let mut clicks = [false; 4];
@@ -403,7 +403,7 @@ mod tests {
             };
             for index in [1, 2, 3, 4, 0] {
                 let help_slot = index == 1;
-                let pos = controls.min + Vec2::new(index as f32 * 20.0 + 10.0, 10.0);
+                let pos = controls.min + Vec2::new(index as f32 * 24.0 + 12.0, 10.0);
                 frame(vec![Event::PointerMoved(pos)]);
                 let mut opened = Vec::new();
                 for pressed in [true, false] {
@@ -431,7 +431,7 @@ mod tests {
             study
                 .apply_settings(&[], serde_json::from_value(settings).unwrap())
                 .unwrap();
-            let pos = controls.min + Vec2::new(90.0, 10.0);
+            let pos = controls.min + Vec2::new(108.0, 10.0);
             let mut urls = Vec::new();
             for events in [
                 vec![Event::PointerMoved(pos)],
@@ -550,7 +550,7 @@ mod tests {
         crate::theme::apply_to_egui(&ctx, &theme);
         let study = crate::studies::CustomIndicator::new("Plain", |_| Vec::new());
         let row = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(220.0, 20.0));
-        let controls = Rect::from_min_size(Pos2::new(150.0, 10.0), Vec2::new(80.0, 20.0));
+        let controls = Rect::from_min_size(Pos2::new(134.0, 10.0), Vec2::new(96.0, 20.0));
         let output = ctx.run_ui(
             egui::RawInput {
                 events: vec![Event::PointerMoved(row.center())],
@@ -576,11 +576,11 @@ mod tests {
         crate::theme::apply_to_egui(&ctx, &theme);
         let study = crate::studies::CustomIndicator::new("Script", |_| Vec::new())
             .with_script_editable(true);
-        assert_eq!(controls_width(&study), 100.0);
-        let row = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(200.0, 20.0));
-        let controls = Rect::from_min_size(Pos2::new(150.0, 10.0), Vec2::new(100.0, 20.0));
+        assert_eq!(controls_width(&study), 120.0);
+        let row = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(260.0, 20.0));
+        let controls = Rect::from_min_size(Pos2::new(150.0, 10.0), Vec2::new(120.0, 20.0));
         // The second button after hide: hidden settings come first, then this one.
-        let pos = controls.min + Vec2::new(40.0 + 10.0, 10.0);
+        let pos = controls.min + Vec2::new(60.0, 10.0);
         let frame = |events| {
             let mut clicked = [false; 4];
             ctx.run_ui(

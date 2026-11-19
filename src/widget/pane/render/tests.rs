@@ -636,9 +636,9 @@ fn added_series_legend_controls_undo_as_one_step() {
     use crate::scales::PriceScaleMode;
     use crate::widget::{SeriesId, SeriesOptions};
     let limit = std::num::NonZeroUsize::new(1000);
-    // A name wider than the pane holds the controls at their rightmost place: 120 px from
-    // the plot's right edge, 20 px each, in the order hide, settings, remove.
-    for (control, removed) in [(110.0, false), (70.0, true)] {
+    // A name wider than the pane holds the controls at their rightmost place: 136 px from
+    // the plot's right edge, 24 px each, in the order hide, settings, remove, more.
+    for (control, removed) in [(124.0, false), (76.0, true)] {
         let ctx = Context::default();
         let mut chart = chart(&[100.0], &[110.0]);
         let series = chart.add_series(SeriesOptions {

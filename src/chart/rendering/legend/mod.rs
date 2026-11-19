@@ -826,7 +826,7 @@ impl<'a> Legend<'a> {
                 // a row of their own.
                 layout.row_end = layout.row_end.min(row_end);
                 let controls = layout
-                    .reserve(Vec2::new(controls_width(study.as_ref()), 20.0))
+                    .reserve(Vec2::new(controls_width(study.as_ref()), 24.0))
                     .intersect(bounds);
                 let row_right = if layout.pos.y > row_start.y {
                     row_end

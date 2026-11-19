@@ -1018,7 +1018,10 @@ impl Chart {
                                 .as_ref()
                                 .map_or(chart_rect.right() - 42.0, |r| {
                                     r.rect.left().min(chart_rect.right())
-                                }),
+                                })
+                                // Keep a strip of the row clickable as the pane header even when
+                                // the legend controls leave none in a narrow pane.
+                                .max((chart_rect.left() + 16.0).min(chart_rect.right())),
                             (chart_rect.top() + panel.legend_offset + legend_row_height)
                                 .min(chart_rect.bottom()),
                         ),

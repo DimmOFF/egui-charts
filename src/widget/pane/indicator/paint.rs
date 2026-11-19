@@ -566,9 +566,9 @@ impl IndicatorPane {
                     x,
                     rect.top()
                         + self.legend_offset
-                        + (theme.text.ohlc + theme.spacing.md - 20.0).max(0.0) / 2.0,
+                        + (theme.text.ohlc + theme.spacing.md - 24.0).max(0.0) / 2.0,
                 ),
-                egui::vec2(width, 20.0),
+                egui::vec2(width, 24.0),
             )
             .intersect(rect),
         )

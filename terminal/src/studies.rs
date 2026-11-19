@@ -38,7 +38,8 @@ pub(super) struct State {
 }
 
 /// The legend caption of a study: its inputs, in order. An input the script hid from the status
-/// line, as `display = display.none` asks, keeps its value out of the caption.
+/// line, as `display = display.none` asks, keeps its value out of the caption, and so does an
+/// input whose value the caption cannot print.
 pub(super) fn study_input_summary(study: &dyn Indicator) -> String {
     study
         .inputs()
@@ -54,6 +55,8 @@ pub(super) fn study_input_summary(study: &dyn Indicator) -> String {
             (_, InputValue::Toggle(value)) => value.to_string(),
             _ => String::new(),
         })
+        // A value the caption does not show must not leave its separator behind as a gap.
+        .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -1019,6 +1022,31 @@ mod tests {
             .expect("the inputs are valid");
         assert_eq!(study_input_summary(&study), "7");
         assert_eq!(study.inputs().len(), 2);
+    }
+
+    /// An input the caption cannot print leaves no gap between the printed ones.
+    #[test]
+    fn an_unprintable_input_leaves_no_gap_in_the_status_line() {
+        let study = egui_charts::studies::CustomIndicator::new("Host script", |_| Vec::new())
+            .with_inputs(
+                vec![
+                    StudyInput::new(
+                        "title",
+                        "Title",
+                        InputValue::Text("MTF HTF".into()),
+                        InputKind::Text,
+                    ),
+                    StudyInput::new(
+                        "length",
+                        "Length",
+                        InputValue::Integer(7),
+                        InputKind::Integer(1, 100),
+                    ),
+                ],
+                |_, _| Vec::new(),
+            )
+            .expect("the inputs are valid");
+        assert_eq!(study_input_summary(&study), "7");
     }
 
     /// A study that reads its new source the way a Pine script re-parses after a save.

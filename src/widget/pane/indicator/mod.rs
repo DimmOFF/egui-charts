@@ -488,7 +488,12 @@ impl IndicatorPane {
                     .iter()
                     .find_map(|item| item.custom_view(bars, &mapping)),
             });
-        let crosshair = hover.map(|(mut pos, options)| {
+        let crosshair = (if self.legend_hovered(painter, chart_rect, indicator, text_color) {
+            None
+        } else {
+            hover
+        })
+        .map(|(mut pos, options)| {
             if let Some(index) = self.bar_index {
                 pos.x = mapping.idx_to_x(index);
                 if options.mode.snaps()

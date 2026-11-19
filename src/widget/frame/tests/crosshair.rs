@@ -2521,3 +2521,46 @@ fn latched_touch_readout_is_the_reported_crosshair() {
         );
     }
 }
+
+/// TradingView turns the crosshair off while the pointer is over a legend row.
+#[test]
+fn hovering_a_legend_row_hides_the_crosshair() {
+    let ctx = egui::Context::default();
+    let mut chart = chart(&[100.0], &[110.0]);
+    chart.chart_options.tooltip.enabled = false;
+    chart.chart_options.crosshair.vert_line_color = egui::Color32::MAGENTA;
+    chart.chart_options.crosshair.horz_line_color = egui::Color32::MAGENTA;
+    chart.chart_options.crosshair.vert_line_style = crate::model::LineStyle::Solid;
+    chart.chart_options.crosshair.horz_line_style = crate::model::LineStyle::Solid;
+    let idle = shapes(&ctx, &mut chart, 0.0, vec![]);
+    let row = idle
+        .iter()
+        .find_map(|shape| match shape {
+            Shape::Text(text) if text.galley.text().starts_with("Vol") => {
+                Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+            }
+            _ => None,
+        })
+        .expect("volume legend row");
+    let magenta = |painted: &[Shape]| {
+        painted.iter().any(|shape| {
+            matches!(shape, Shape::LineSegment { stroke, .. }
+                if stroke.color == egui::Color32::MAGENTA)
+        })
+    };
+    let over_row = shapes(
+        &ctx,
+        &mut chart,
+        0.1,
+        vec![Event::PointerMoved(row.center())],
+    );
+    assert!(!magenta(&over_row), "crosshair over the legend row");
+    let plot = chart.get_rendered_price_rect();
+    let over_plot = shapes(
+        &ctx,
+        &mut chart,
+        0.2,
+        vec![Event::PointerMoved(plot.center())],
+    );
+    assert!(magenta(&over_plot), "no crosshair over the plot");
+}

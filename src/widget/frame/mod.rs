@@ -3355,6 +3355,8 @@ impl Chart {
         let mut study_action = None;
         let mut series_action = None;
         let mut legend_bottom = price_rect.top() + 8.0;
+        // TradingView hides the crosshair while the pointer is over a study row in the legend.
+        let mut legend_hovered = false;
         {
             // The local pointer takes precedence over a crosshair this chart received from a
             // linked chart or the host, as drawn below.
@@ -3454,7 +3456,7 @@ impl Chart {
                 {
                     legend.quantity = order_quantity;
                 }
-                let (quote_action, study_settings, bottom, quantity, main_action) = ui
+                let (quote_action, study_settings, bottom, quantity, main_action, hovered) = ui
                     .push_id(shown.id, |ui| {
                         legend.show_with_colors(
                             ui,
@@ -3487,6 +3489,7 @@ impl Chart {
                 study_action = study_settings;
                 series_action = main_action;
                 legend_bottom = bottom;
+                legend_hovered = hovered;
             }
         }
         let (legend_bottom, overlay_remove) = self.paint_secondary_legend(
@@ -3608,7 +3611,7 @@ impl Chart {
                 .map(|(_, index)| index);
             self.last_hover_whitespace = whitespace_time;
 
-            if !menu_open {
+            if !menu_open && !legend_hovered {
                 let mut tooltip_options = self.chart_options.tooltip.clone();
                 tooltip_options.enabled &= self.main_series_visible;
                 tooltip_options.show_volume &= self.chart_type.supports_volume();

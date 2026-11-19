@@ -594,13 +594,48 @@ impl IndicatorPane {
         let backdrop = Rect::from_min_size(pos, galley.size())
             .expand(2.0)
             .intersect(rect);
-        painter.rect_filled(
-            backdrop,
-            0.0,
-            self.background_at(painter.ctx(), backdrop.center())
-                .gamma_multiply(self.legend_backdrop.clamp(0.0, 1.0)),
-        );
+        // TradingView draws the backdrop only while the pointer is over the name.
+        if !egui::Popup::is_any_open(painter.ctx())
+            && painter
+                .ctx()
+                .pointer_hover_pos()
+                .is_some_and(|pointer| backdrop.contains(pointer))
+        {
+            painter.rect_filled(
+                backdrop,
+                0.0,
+                self.background_at(painter.ctx(), backdrop.center())
+                    .gamma_multiply(self.legend_backdrop.clamp(0.0, 1.0)),
+            );
+        }
         painter.galley(pos, galley, text_color);
+    }
+
+    /// Whether the pointer is over the legend name, where the chart hides its crosshair.
+    pub(super) fn legend_hovered(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        indicator: &dyn Indicator,
+        text_color: Color32,
+    ) -> bool {
+        if !self.config.show_legend || egui::Popup::is_any_open(painter.ctx()) {
+            return false;
+        }
+        let theme = painter.ctx().active_theme();
+        let galley = self.legend_galley(painter, rect, indicator, text_color);
+        let name = Rect::from_min_size(
+            Pos2::new(
+                rect.left() + theme.spacing.sm,
+                rect.top() + self.legend_offset + theme.spacing.sm.min(rect.height() / 2.0),
+            ),
+            galley.size(),
+        )
+        .expand(2.0);
+        painter
+            .ctx()
+            .pointer_hover_pos()
+            .is_some_and(|pointer| name.contains(pointer))
     }
 
     pub(in crate::widget) fn legend_galley(
@@ -1062,11 +1097,31 @@ mod tests {
             ]);
             study.calculate(&[]);
             let mut pane = IndicatorPane::with_config(IndicatorPaneConfig::default());
+            // The backdrop shows only while the pointer is on the name, so the idle frame gives
+            // the name's rect to hover in the frames below.
+            let idle = ctx.run_ui(egui::RawInput::default(), |ui| {
+                pane.draw_legend(ui.painter(), ui.max_rect(), &study, theme.ui.text);
+            });
+            let name = idle
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) => Some(Rect::from_min_size(t.pos, t.galley.size())),
+                    _ => None,
+                })
+                .expect("pane legend text");
+            idle.drop_without_applying_deltas();
             for opacity in [0.0, 0.35, 1.0] {
                 pane.legend_backdrop = opacity;
-                let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                    pane.draw_legend(ui.painter(), ui.max_rect(), &study, theme.ui.text);
-                });
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        events: vec![egui::Event::PointerMoved(name.center())],
+                        ..Default::default()
+                    },
+                    |ui| {
+                        pane.draw_legend(ui.painter(), ui.max_rect(), &study, theme.ui.text);
+                    },
+                );
                 let shapes = std::mem::take(&mut output.shapes);
                 output.drop_without_applying_deltas();
                 let text = shapes

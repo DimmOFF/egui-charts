@@ -253,7 +253,8 @@ impl<'a> Legend<'a> {
         (quote, study)
     }
 
-    /// Also returns the bottom of the legend and the quantity box, when the user clicked it.
+    /// Also returns the bottom of the legend, the quantity box when the user clicked it, and
+    /// whether the pointer is over a study row, where the chart hides its crosshair.
     /// The first row keeps its usual inset from `first_row_end`, where another control starts.
     pub(crate) fn show_with_colors(
         &self,
@@ -268,11 +269,12 @@ impl<'a> Legend<'a> {
         f32,
         Option<Rect>,
         Option<SeriesAction>,
+        bool,
     ) {
         let theme = ui.active_theme();
         let bounds = plot.shrink2(Vec2::new(theme.spacing.lg, theme.spacing.md));
         if !bounds.is_positive() {
-            return (None, None, plot.top(), None, None);
+            return (None, None, plot.top(), None, None, false);
         }
         #[cfg_attr(not(feature = "icons"), allow(unused_mut))]
         let mut series_action = None;
@@ -671,7 +673,17 @@ impl<'a> Legend<'a> {
             action
         });
 
-        layout.backdrop = self.study_backdrop.clamp(0.0, 1.0);
+        // TradingView draws a row's backdrop only while the pointer is on it, so the study rows
+        // start transparent; the symbol row above keeps its own.
+        layout.backdrop = 0.0;
+        let mut row_hover = false;
+        // A row's hover is read from the rect the previous frame stored for it, which is where
+        // the backdrop and the crosshair need it: before the row is painted.
+        let row_hovered = |ui: &Ui, id: egui::Id| {
+            ui.ctx()
+                .data(|data| data.get_temp::<Rect>(id))
+                .is_some_and(|row| ui.rect_contains_pointer(row))
+        };
         let mut study_settings = None;
         let collapsed = ui
             .ctx()
@@ -691,6 +703,15 @@ impl<'a> Legend<'a> {
                     .enumerate()
                     .any(|(idx, study)| study.is_volume() && on_pane(idx))
             {
+                let row_id = id.with("volume_row");
+                let hovered = row_hovered(ui, row_id);
+                row_hover |= hovered;
+                layout.backdrop = if hovered {
+                    self.study_backdrop.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let row_start = layout.pos;
                 layout.field(
                     &format!("{} ", l10n::text(ui.ctx(), "Vol")),
                     self.formatters
@@ -713,6 +734,12 @@ impl<'a> Legend<'a> {
                         }),
                     layout.bar_color(self.bar),
                 );
+                let row = Rect::from_min_max(
+                    row_start,
+                    Pos2::new(layout.pos.x, layout.pos.y + layout.height),
+                )
+                .intersect(bounds);
+                ui.ctx().data_mut(|data| data.insert_temp(row_id, row));
                 layout.new_row();
                 layout.pos.y += 4.0;
             }
@@ -726,6 +753,20 @@ impl<'a> Legend<'a> {
                     continue;
                 }
                 let (row_start, row_end) = (layout.pos, layout.row_end);
+                let row_id = id.with(("study_row", index));
+                let hovered = row_hovered(ui, row_id);
+                row_hover |= hovered;
+                layout.backdrop = if hovered {
+                    self.study_backdrop.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                // TradingView dims a hidden study's name, as it does the symbol's.
+                let name_color = if study.is_visible() {
+                    colors.text
+                } else {
+                    theme.ui.text_muted
+                };
                 // TradingView hides everything after a study's name, its inputs caption too,
                 // when "Values in status line" is off.
                 let status_values = study.settings().show_legend_values;
@@ -737,7 +778,7 @@ impl<'a> Legend<'a> {
                             study.name().to_owned()
                         },
                         theme.text.ohlc,
-                        colors.text,
+                        name_color,
                         bounds.width(),
                     );
                 }
@@ -835,6 +876,7 @@ impl<'a> Legend<'a> {
                 };
                 let row = Rect::from_min_max(row_start, Pos2::new(row_right, controls.bottom()))
                     .intersect(bounds);
+                ui.ctx().data_mut(|data| data.insert_temp(row_id, row));
                 // The next row's backdrop goes under this row's outline, which reaches into it.
                 layout.new_row();
                 let (responses, menu) = study_controls(
@@ -914,6 +956,7 @@ impl<'a> Legend<'a> {
             layout.pos.y + layout.height,
             quantity,
             series_action,
+            row_hover,
         )
     }
 
@@ -1129,7 +1172,7 @@ impl<'a> Layout<'a> {
             ),
         );
         let background = (self.chart_background)(rect.center());
-        if background.gamma_multiply(self.backdrop) != background {
+        if self.backdrop > 0.0 && background.gamma_multiply(self.backdrop) != background {
             // Profiles can be opaque or contain letters; protect the full content bounds.
             self.painter
                 .add(self.fill(rect.expand(2.0).intersect(self.bounds.expand(2.0)), 1.0));
@@ -1559,31 +1602,58 @@ mod layout_tests {
             let studies: Vec<Box<dyn crate::studies::Indicator>> = vec![Box::new(study)];
             let bar = Bar::new(Utc.timestamp_opt(0, 0).unwrap(), 1.0, 1.0, 1.0, 1.0, 240.0);
             let instrument = crate::model::Instrument::new("SAMPLE").with_price_decimals(2);
-            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                let mut legend = Legend::new("SAMPLE", "1m", &bar);
-                legend.studies = &studies;
-                legend.instrument = Some(&instrument);
-                legend.show(
-                    ui,
-                    Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0)),
-                );
-            });
-            output.textures_delta.clear();
-            for (at, shape) in output.shapes.iter().enumerate() {
-                if let Shape::Text(text) = &shape.shape {
+            let run = |pointer: Option<Pos2>| {
+                ctx.run_ui(
+                    egui::RawInput {
+                        events: pointer.map(Event::PointerMoved).into_iter().collect(),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let mut legend = Legend::new("SAMPLE", "1m", &bar);
+                        legend.studies = &studies;
+                        legend.instrument = Some(&instrument);
+                        legend.show(
+                            ui,
+                            Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0)),
+                        );
+                    },
+                )
+            };
+            // A row shows its backdrop only while the pointer is on it, so the idle frame gives
+            // each row's name to hover in the frames below.
+            let idle = run(None);
+            let centre = |starts: &str| {
+                idle.shapes.iter().find_map(|shape| match &shape.shape {
+                    Shape::Text(text) if text.galley.text().starts_with(starts) => {
+                        Some(Rect::from_min_size(text.pos, text.galley.size()).center())
+                    }
+                    _ => None,
+                })
+            };
+            let rows = [
+                (centre("Vol").expect("volume row"), vec!["Vol"]),
+                (
+                    centre("Profile readout").expect("study row"),
+                    vec!["Profile readout", "120.00"],
+                ),
+            ];
+            idle.drop_without_applying_deltas();
+            for (pointer, row) in rows {
+                let mut output = run(Some(pointer));
+                output.textures_delta.clear();
+                for (at, shape) in output.shapes.iter().enumerate() {
+                    let Shape::Text(text) = &shape.shape else {
+                        continue;
+                    };
+                    let label = text.galley.text();
+                    if !row.iter().any(|starts| label.starts_with(starts)) {
+                        continue;
+                    }
                     let bounds = Rect::from_min_size(text.pos, text.galley.size());
                     assert!(output.shapes[..at].iter().any(|shape| matches!(&shape.shape,
-                        Shape::Rect(rect) if rect.fill == theme.chart.bg && rect.rect.contains_rect(bounds)
-                    )), "unprotected {}", text.galley.text());
-                    if text.galley.text().starts_with("Vol ")
-                        || text.galley.text() == "Profile readout"
-                        || text.galley.text() == "120.00"
-                    {
-                        assert!(output.shapes[..at].iter().any(|shape| matches!(&shape.shape,
-                            Shape::Rect(rect) if rect.fill == theme.chart.bg && rect.rect.contains_rect(bounds.expand(2.0))
-                        )), "unprotected text padding");
-                    }
-                    if text.galley.text() == "120.00" {
+                        Shape::Rect(rect) if rect.fill == theme.chart.bg && rect.rect.contains_rect(bounds.expand(2.0))
+                    )), "unprotected text padding for {label}");
+                    if label == "120.00" {
                         let controls = Rect::from_min_size(
                             Pos2::new(bounds.right() + 8.0, bounds.center().y - 10.0),
                             egui::vec2(80.0, 20.0),
@@ -1593,8 +1663,8 @@ mod layout_tests {
                         )), "unprotected study controls");
                     }
                 }
+                output.drop_without_applying_deltas();
             }
-            output.drop_without_applying_deltas();
         }
     }
 
@@ -1650,6 +1720,71 @@ mod layout_tests {
             }
             output.drop_without_applying_deltas();
         }
+    }
+
+    /// A hidden study keeps its name in the legend, muted as TradingView does, and a row's
+    /// backdrop shows only while the pointer is on it.
+    #[cfg(feature = "studies")]
+    #[test]
+    fn hidden_study_names_are_muted_and_rows_back_only_on_hover() {
+        use crate::chart::rendering::Legend;
+        use crate::studies::{CustomIndicator, Indicator};
+        let theme = crate::theme::Theme::dark();
+        let ctx = Context::default();
+        crate::theme::apply_to_egui(&ctx, &theme);
+        let mut study = CustomIndicator::new("Hidden study", |_| Vec::new()).with_overlay(true);
+        study.set_visible(false);
+        let studies: Vec<Box<dyn Indicator>> = vec![Box::new(study)];
+        let bar = Bar::new(Utc.timestamp_opt(0, 0).unwrap(), 1.0, 1.0, 1.0, 1.0, 1.0);
+        let run = |pointer: Option<Pos2>| {
+            ctx.run_ui(
+                egui::RawInput {
+                    events: pointer.map(Event::PointerMoved).into_iter().collect(),
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut legend = Legend::new("SAMPLE", "1m", &bar);
+                    legend.studies = &studies;
+                    legend.show_volume = false;
+                    legend.show_ohlc = false;
+                    legend.show_change = false;
+                    legend.show_change_percent = false;
+                    legend.show(
+                        ui,
+                        Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 400.0)),
+                    );
+                },
+            )
+        };
+        let idle = run(None);
+        let (pos, size, color) = idle
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                Shape::Text(text) if text.galley.text() == "Hidden study" => Some((
+                    text.pos,
+                    text.galley.size(),
+                    text.galley.job.sections[0].format.color,
+                )),
+                _ => None,
+            })
+            .expect("hidden study name");
+        assert_eq!(color, theme.ui.text_muted, "a hidden study's name is muted");
+        let bounds = Rect::from_min_size(pos, size);
+        let backed = |shapes: &[egui::epaint::ClippedShape]| {
+            shapes.iter().any(|shape| {
+                matches!(&shape.shape,
+                Shape::Rect(rect) if rect.fill == theme.chart.bg && rect.rect.contains_rect(bounds))
+            })
+        };
+        assert!(!backed(&idle.shapes), "the row backs itself while idle");
+        idle.drop_without_applying_deltas();
+        let hovered = run(Some(bounds.center()));
+        assert!(
+            backed(&hovered.shapes),
+            "the row shows no backdrop on hover"
+        );
+        hovered.drop_without_applying_deltas();
     }
 
     /// Legend fields stay inside the plot and keep their positions during hover.
@@ -1937,15 +2072,40 @@ mod layout_tests {
             crate::theme::apply_to_egui(&ctx, &theme);
             let bar = Bar::new(Utc.timestamp_opt(0, 0).unwrap(), 1.0, 1.0, 1.0, 1.0, 240.0);
             let shaded = [Rect::from_min_max(Pos2::ZERO, Pos2::new(30.0, 600.0))];
-            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                let mut legend = Legend::new("SAMPLE", "1m", &bar);
-                legend.extended_hours = (&shaded, Color32::from_rgba_premultiplied(0, 0, 40, 40));
-                legend.show(
-                    ui,
-                    Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0)),
+            let frame = |pointer: Option<Pos2>| {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        events: pointer.map(Event::PointerMoved).into_iter().collect(),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let mut legend = Legend::new("SAMPLE", "1m", &bar);
+                        legend.extended_hours =
+                            (&shaded, Color32::from_rgba_premultiplied(0, 0, 40, 40));
+                        legend.show(
+                            ui,
+                            Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0)),
+                        );
+                    },
                 );
-            });
-            output.textures_delta.clear();
+                output.textures_delta.clear();
+                output
+            };
+            // The volume row shows its backdrop only while the pointer is on it, so the first
+            // frame records the row and the second hovers it.
+            let idle = frame(None);
+            let volume = idle
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    Shape::Text(text) if text.galley.text().starts_with("Vol") => {
+                        Some(text.pos + text.galley.size() / 2.0)
+                    }
+                    _ => None,
+                })
+                .expect("volume row");
+            idle.drop_without_applying_deltas();
+            let output = frame(Some(volume));
             let mut rects = Vec::new();
             for shape in &output.shapes {
                 unstroked(&shape.shape, &mut rects);

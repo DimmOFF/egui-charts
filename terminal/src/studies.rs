@@ -428,7 +428,12 @@ impl Terminal {
     fn apply_chart_settings(&mut self, state: ChartSettingsState) {
         let applied = self.user_action(|terminal| state.apply_to_chart(terminal.chart_mut()));
         match applied {
-            Ok(()) => self.studies.settings = state,
+            Ok(()) => {
+                self.studies.settings = state;
+                // The layout shares one time axis, so the dialog's zone reaches every chart.
+                let timezone = self.chart().chart_options().time_scale.timezone.clone();
+                self.set_layout_zone(&timezone);
+            }
             Err(error) => self.toasts.error(error.to_string()),
         }
     }

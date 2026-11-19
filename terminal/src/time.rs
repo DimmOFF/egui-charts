@@ -19,8 +19,14 @@ use egui_charts::ui_kit::dialog::DialogFooter;
 use egui_charts::ui_kit::modal::Modal;
 use egui_charts::widget::{SeriesId, ShortcutRequest, VisibleTimeRange};
 
-/// The zones the time zone menu offers, when the build can resolve them.
-const ZONES: [&str; 2] = ["UTC", "America/New_York"];
+use super::time_zones::ZONES;
+
+/// Which name the time zone menu shows for a zone: its IANA id or its location with the offset.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ZoneView {
+    Id,
+    Location,
+}
 
 pub(super) struct State {
     pub(super) bar: TimeframeToolbar,
@@ -29,6 +35,8 @@ pub(super) struct State {
     entry: Option<String>,
     /// Focus the entry field on the next frame the dialog is drawn.
     focus_entry: bool,
+    /// The names the time zone menu shows.
+    zone_view: ZoneView,
 }
 
 impl Default for State {
@@ -40,6 +48,7 @@ impl Default for State {
             picker: DatePicker::new(),
             entry: None,
             focus_entry: false,
+            zone_view: ZoneView::Id,
         }
     }
 }
@@ -275,7 +284,7 @@ impl Terminal {
         self.chart_mut().set_extended_hours(extended);
     }
 
-    /// Shows the zone on the active chart's time axis.
+    /// Shows the zone on every chart of the layout's time axis.
     fn set_zone(&mut self, name: &str) {
         let timezone = if name == "UTC" {
             TimezoneMode::Utc
@@ -284,10 +293,17 @@ impl Terminal {
         } else {
             return;
         };
-        let chart = self.chart_mut();
-        if chart.chart_options().time_scale.timezone != timezone {
+        self.set_layout_zone(&timezone);
+    }
+
+    /// Puts every chart of the layout in `timezone`, as a layout shares one time axis.
+    pub(super) fn set_layout_zone(&mut self, timezone: &TimezoneMode) {
+        for chart in &mut self.charts {
+            if chart.chart_options().time_scale.timezone == *timezone {
+                continue;
+            }
             let mut options = chart.chart_options().clone();
-            options.time_scale.timezone = timezone;
+            options.time_scale.timezone = timezone.clone();
             chart.set_chart_options(options);
         }
     }
@@ -393,16 +409,35 @@ impl Terminal {
         let mut open = true;
         let mut choice = None;
         Modal::new("timezone", "Chart timezone")
-            .width(320.0)
+            .width(420.0)
             .show(ctx, &mut open, |ui| {
-                for name in ZONES
-                    .into_iter()
-                    .filter(|name| name.parse::<TimezoneId>().is_ok())
-                {
-                    if ui.selectable_label(current == name, name).clicked() {
-                        choice = Some(name);
+                ui.horizontal(|ui| {
+                    for (view, label) in [
+                        (ZoneView::Id, "ID"),
+                        (ZoneView::Location, "Location (UTC offset)"),
+                    ] {
+                        if ui
+                            .selectable_label(self.time.zone_view == view, label)
+                            .clicked()
+                        {
+                            self.time.zone_view = view;
+                        }
                     }
-                }
+                });
+                egui::ScrollArea::vertical()
+                    .max_height(420.0)
+                    .show(ui, |ui| {
+                        let rows = std::iter::once(("UTC", "UTC")).chain(ZONES.iter().copied());
+                        for (id, location) in rows {
+                            let label = match self.time.zone_view {
+                                ZoneView::Id => id,
+                                ZoneView::Location => location,
+                            };
+                            if ui.selectable_label(current == id, label).clicked() {
+                                choice = Some(id);
+                            }
+                        }
+                    });
             });
         if let Some(name) = choice {
             self.user_action(|terminal| terminal.set_zone(name));
@@ -534,6 +569,8 @@ mod tests {
     use super::*;
     use egui::{Event, Key, Modifiers, vec2};
     use egui_charts::data::Datafeed;
+    use egui_charts::ui::top_toolbar::LayoutAction;
+    use egui_charts::widget::ChartLayoutMode;
     use std::sync::Arc;
 
     fn terminal(symbol: &str, timeframe: Timeframe) -> Terminal {
@@ -695,7 +732,7 @@ mod tests {
         terminal.run(Action::TopToolbar(TopToolbarAction::IntervalSelected(
             Timeframe::Hour1,
         )));
-        pick_zone(&mut terminal, "America/New_York");
+        pick_zone(&mut terminal, "Pacific/Honolulu");
         let min15 = Timeframe::Min15;
         for (action, timeframe, zone) in [
             (TopToolbarAction::Undo, Timeframe::Hour1, "UTC"),
@@ -703,7 +740,7 @@ mod tests {
             (TopToolbarAction::Undo, Timeframe::Min1, "UTC"),
             (TopToolbarAction::Redo, min15, "UTC"),
             (TopToolbarAction::Redo, Timeframe::Hour1, "UTC"),
-            (TopToolbarAction::Redo, Timeframe::Hour1, "America/New_York"),
+            (TopToolbarAction::Redo, Timeframe::Hour1, "Pacific/Honolulu"),
         ] {
             terminal.run(Action::TopToolbar(action));
             frame(&mut terminal, SIZE, vec![]);
@@ -865,18 +902,18 @@ mod tests {
         let day = |d| NaiveDate::from_ymd_opt(2025, 12, d).unwrap();
         let utc = |d, h| Utc.with_ymd_and_hms(2025, 12, d, h, 0, 0).unwrap();
         let mut terminal = terminal("AAPL", Timeframe::Hour1);
-        pick_zone(&mut terminal, "America/New_York");
-        // New York midnight is 05:00 UTC in winter. The first bar of the local day opens then.
+        pick_zone(&mut terminal, "Pacific/Honolulu");
+        // Honolulu midnight is 10:00 UTC. The first bar of the local day opens then.
         terminal.run(Action::DatePicker(DatePickerAction::GoToDate(day(29))));
         frame(&mut terminal, SIZE, vec![]);
         frame(&mut terminal, SIZE, vec![]);
         let span = terminal.chart().visible_time_range().unwrap();
         let centre = span.from + (span.to - span.from) / 2;
         assert!(
-            (centre - utc(29, 5)).abs() < Duration::minutes(30),
+            (centre - utc(29, 10)).abs() < Duration::minutes(30),
             "{span:?}"
         );
-        // The range holds both days: from 05:00 UTC on the 28th to 05:00 UTC on the 30th.
+        // The range holds both days: from 10:00 UTC on the 28th to 10:00 UTC on the 30th.
         terminal.run(Action::DatePicker(DatePickerAction::SetRange(
             day(28),
             day(29),
@@ -884,12 +921,58 @@ mod tests {
         frame(&mut terminal, SIZE, vec![]);
         let span = terminal.chart().visible_time_range().unwrap();
         assert!(
-            (span.from - utc(28, 5)).abs() <= Duration::hours(1),
+            (span.from - utc(28, 10)).abs() <= Duration::hours(1),
             "{span:?}"
         );
         assert!(
-            (span.to - utc(30, 5)).abs() <= Duration::hours(1),
+            (span.to - utc(30, 10)).abs() <= Duration::hours(1),
             "{span:?}"
         );
+    }
+
+    /// The menu names zones by id or by location, and a picked zone reaches every chart of the
+    /// layout, since the layout shares one time axis.
+    #[test]
+    fn a_picked_zone_reaches_every_chart_and_the_menu_names_zones_two_ways() {
+        let mut terminal = terminal("AAPL", Timeframe::Min1);
+        assert!(
+            terminal
+                .run(Action::Layout(LayoutAction::SelectGrid(
+                    ChartLayoutMode::Three
+                )))
+                .is_none()
+        );
+        for _ in 0..4 {
+            frame(&mut terminal, SIZE, vec![]);
+        }
+        assert_eq!(terminal.charts.len(), 3);
+
+        assert!(
+            terminal
+                .run(Action::BottomBar(TimeframeToolbarAction::OpenTimezoneMenu))
+                .is_none()
+        );
+        frame(&mut terminal, SIZE, vec![]);
+        let menu = frame(&mut terminal, SIZE, vec![]);
+        assert!(
+            menu.text_at("Etc/GMT+12").is_some(),
+            "the id view comes first"
+        );
+        let toggle = menu
+            .text_at("Location (UTC offset)")
+            .expect("the menu offers the location view");
+        assert!(click(&mut terminal, SIZE, toggle).is_empty());
+        let menu = frame(&mut terminal, SIZE, vec![]);
+        assert!(menu.text_at("Etc/GMT+12").is_none());
+        let row = menu
+            .text_at("(GMT-10:00) Hawaii")
+            .expect("Hawaii is near the top");
+        assert!(click(&mut terminal, SIZE, row).is_empty());
+        frame(&mut terminal, SIZE, vec![]);
+
+        let zone = TimezoneMode::Timezone("Pacific/Honolulu".parse().unwrap());
+        for chart in &terminal.charts {
+            assert_eq!(chart.chart_options().time_scale.timezone, zone);
+        }
     }
 }

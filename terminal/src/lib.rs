@@ -42,6 +42,7 @@ mod studies;
 #[cfg(test)]
 mod test_support;
 mod time;
+mod time_zones;
 mod trading;
 
 pub use action::Action;

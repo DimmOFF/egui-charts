@@ -938,6 +938,11 @@ impl Chart {
         &mut self.config
     }
 
+    /// The theme the chart paints with, if it has its own rather than the active one.
+    pub fn theme_override(&self) -> Option<&crate::theme::Theme> {
+        self.theme_override.as_ref()
+    }
+
     /// Apply a theme to this chart and to the UI in `ctx`, without changing data or pan and zoom.
     ///
     /// Unedited chart type style colours follow the theme; edited ones stay. Other charts sharing

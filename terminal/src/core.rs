@@ -144,7 +144,8 @@ impl Terminal {
         !self.hidden.contains(&control)
     }
 
-    /// Follows the user's theme choice, or the system appearance without one, on every slot.
+    /// Follows the user's theme choice, or the system appearance without one. The theme colours
+    /// the application only: the charts keep the colours of their own chart settings.
     pub(super) fn update_theme(&mut self, ctx: &egui::Context) {
         let dark = self
             .theme_choice
@@ -153,10 +154,14 @@ impl Terminal {
         if self.theme.dark == dark {
             return;
         }
-        self.theme = if dark { Theme::dark() } else { Theme::light() };
+        let theme = if dark { Theme::dark() } else { Theme::light() };
+        // The charts take the app theme they start under; later changes leave them alone.
         for chart in &mut self.charts {
-            chart.set_theme(ctx, &self.theme);
+            chart.pin_theme(&theme);
         }
+        self.theme = theme;
+        egui_charts::theme::apply_to_egui(ctx, &self.theme);
+        ctx.request_repaint();
     }
 
     /// Records the edits `edit` makes to the active chart as one undoable step.

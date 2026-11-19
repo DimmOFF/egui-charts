@@ -101,9 +101,6 @@ pub struct UserSettings {
     /// The chart's display settings, as the JSON of `ChartSettingsState`: candle colours, chart
     /// type, grid and scales. Absent in documents saved before they were kept.
     pub chart_settings: Option<serde_json::Value>,
-    /// The theme those settings were saved under, `"dark"` or `"light"`. Their colours come
-    /// from it, so a chart opening under another theme keeps that theme's colours.
-    pub chart_settings_theme: Option<String>,
 }
 
 // A manual `Default` so that it matches a document written without these fields, which the
@@ -138,7 +135,6 @@ impl Default for UserSettings {
             market_heatmap: MarketHeatmapSelection::default(),
             replay_session: None,
             chart_settings: None,
-            chart_settings_theme: None,
         }
     }
 }

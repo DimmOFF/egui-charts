@@ -8,16 +8,16 @@
 use super::core::Direction;
 use super::layout::Region;
 use super::{Action, Terminal};
-use egui_charts::config::KeyboardAction;
+use egui_charts::config::{ChartConfig, KeyboardAction};
 use egui_charts::localization as l10n;
 use egui_charts::services::{
     StoreKind, TabSettings, TabTitlePart, UserSettings, default_tab_title,
 };
+use egui_charts::theme::Theme;
 use egui_charts::ui::Control;
 use egui_charts::ui::export::{ExportConfig, ExportFormat, ExportResponse};
 use egui_charts::ui::floating_replay_control::ReplayControlAction;
 use egui_charts::ui::top_toolbar::{LayoutAction, LayoutMenu, TopToolbarAction};
-use egui_charts::ui_kit::dialog::DialogFooter;
 use egui_charts::ui_kit::modal::Modal;
 use egui_charts::widget::{
     Chart, ChartBuilder, ChartLayout, ChartLayoutMode, SavedLayout, SeriesId, ShortcutRequest,
@@ -93,8 +93,6 @@ pub(super) struct State {
     tab: usize,
     /// Whether the open-layout chooser is open.
     chooser: bool,
-    /// The tab whose title the user is editing, with the title being entered.
-    renaming: Option<(usize, String)>,
     /// Grid changes, counted with the chart edits so autosave sees them.
     grid_edits: u64,
     /// The slot that was active at the last poll, to notice a change of slot.
@@ -119,7 +117,6 @@ impl Default for State {
             tabs: Vec::new(),
             tab: 0,
             chooser: false,
-            renaming: None,
             grid_edits: 0,
             seen_active: 0,
             store: LayoutMenu::new_in(StoreKind::Tabs),
@@ -200,10 +197,7 @@ impl Terminal {
             Region::Top => self.show_layout_tabs(ui),
             // The toolbar has been drawn: its grid selector holds this frame's sync options.
             Region::Left => self.layout.sync = self.top_toolbar.chart_grid_selector.sync.clone(),
-            Region::Windows => {
-                self.show_open_layout(ui.ctx());
-                self.show_rename_tab(ui.ctx());
-            }
+            Region::Windows => self.show_open_layout(ui.ctx()),
             _ => {}
         }
     }
@@ -302,7 +296,7 @@ impl Terminal {
     }
 
     pub(super) fn layouts_modal(&self) -> bool {
-        self.layouts.chooser || self.layouts.renaming.is_some()
+        self.layouts.chooser
     }
 
     /// Whether the tab on show still asks what to open, before it shows a chart.
@@ -576,7 +570,12 @@ impl Terminal {
             .with_feed(self.feed.clone())
             .with_symbol(source.symbol())
             .with_timeframe(source.timeframe().unwrap_or_default())
-            .with_theme(self.theme.clone())
+            .with_theme(
+                source
+                    .theme_override()
+                    .cloned()
+                    .unwrap_or_else(|| self.theme.clone()),
+            )
             .with_drawing_registry(source.drawings().registry.clone())
             .with_visible_candles(0)
             .build();
@@ -621,7 +620,7 @@ impl Terminal {
         );
         let mut select = None;
         let mut close = None;
-        let mut rename = None;
+        let mut customize = false;
         let mut new = false;
         let strip = self.theme.ui.border;
         let active = self.theme.ui.panel_bg;
@@ -746,7 +745,7 @@ impl Terminal {
                             );
                             click.clone().context_menu(|ui| {
                                 if ui.button(rename_hint.as_str()).clicked() {
-                                    rename = Some((index, tab.title.clone().unwrap_or_default()));
+                                    customize = true;
                                     ui.close();
                                 }
                                 if ui.button(close_hint.as_str()).clicked() {
@@ -773,8 +772,8 @@ impl Terminal {
                     });
                 });
             });
-        if let Some((index, title)) = rename {
-            self.layouts.renaming = Some((index, title));
+        if customize {
+            self.preferences_open_tabs();
         }
         if let Some(index) = select {
             self.select_layout(index);
@@ -942,43 +941,6 @@ impl Terminal {
             Some(tab.layout.clone().unwrap_or_else(|| tab.name.clone()));
     }
 
-    /// Asks for a title for the tab whose context menu chose to customize it.
-    fn show_rename_tab(&mut self, ctx: &egui::Context) {
-        let Some((index, mut title)) = self.layouts.renaming.clone() else {
-            return;
-        };
-        let mut open = true;
-        let mut apply = false;
-        let mut cancel = false;
-        let hint = l10n::text(ctx, "Leave empty for the default title");
-        Modal::new("rename_tab", l10n::text(ctx, "Customize tab title"))
-            .width(320.0)
-            .show(ctx, &mut open, |ui| {
-                ui.add_space(self.theme.spacing.lg);
-                ui.add(
-                    egui::TextEdit::singleline(&mut title)
-                        .hint_text(hint)
-                        .desired_width(f32::INFINITY),
-                );
-                ui.add_space(self.theme.spacing.md);
-                let (ok, no) = DialogFooter::new(l10n::text(ui.ctx(), "Ok"))
-                    .secondary(l10n::text(ui.ctx(), "Cancel"))
-                    .show(ui);
-                apply = ok;
-                cancel = no;
-            });
-        let chosen = open && !cancel;
-        if chosen && apply {
-            let title = title.trim().to_owned();
-            self.layouts.tabs[index].title = (!title.is_empty()).then_some(title);
-            self.layouts.renaming = None;
-        } else if chosen {
-            self.layouts.renaming = Some((index, title));
-        } else {
-            self.layouts.renaming = None;
-        }
-    }
-
     /// The layout on show: its arrangement, the charts it shows, in slot order, and the chart
     /// sizes of the arrangement when its borders were moved.
     fn capture_layout(&self) -> Result<SavedLayout, String> {
@@ -1118,7 +1080,16 @@ impl Terminal {
         }
     }
 
-    /// The charts a stored layout shows, in this terminal's feed, theme and drawings.
+    /// The built-in theme the saved palette came from, or the app theme for a document that
+    /// saved none: a layout keeps the colours it was saved with.
+    fn layout_theme(&self, palette: Option<&ChartConfig>) -> Theme {
+        [Theme::light(), Theme::dark()]
+            .into_iter()
+            .find(|theme| palette == Some(&ChartConfig::default().with_theme(theme)))
+            .unwrap_or_else(|| self.theme.clone())
+    }
+
+    /// The charts a stored layout shows, in this terminal's feed and drawings.
     fn charts_of(&mut self, layout: &SavedLayout) -> Option<Vec<Chart>> {
         if layout.charts.is_empty()
             || layout.charts.len() > ChartLayoutMode::Tabs.chart_count()
@@ -1142,7 +1113,7 @@ impl Terminal {
                 .with_feed(self.feed.clone())
                 .with_symbol(&snapshot.symbol)
                 .with_timeframe(snapshot.interval.unwrap_or_default())
-                .with_theme(self.theme.clone())
+                .with_theme(self.layout_theme(snapshot.palette.as_ref()))
                 .with_drawing_registry(registry.clone())
                 .with_visible_candles(0)
                 .build();
@@ -1462,18 +1433,19 @@ mod tests {
         assert_eq!(terminal.chart().symbol(), "AAPL");
         assert!(terminal.chart_mut().undo(), "the edit stays undoable");
         assert!(terminal.chart().config().show_grid);
-        // A layout that was parked follows the theme change made meanwhile.
+        // The app theme changes the application alone; the charts keep their own colours.
+        terminal.select_layout(1);
+        assert_eq!(terminal.chart().symbol(), "MSFT");
+        let background = terminal.chart().config().background_color;
         assert!(
             terminal
                 .run(Action::TopToolbar(TopToolbarAction::ThemeToggle))
                 .is_none()
         );
-        // Checked before the next frame, which would restyle the chart anyway.
-        terminal.select_layout(1);
-        assert_eq!(terminal.chart().symbol(), "MSFT");
         assert_eq!(
             terminal.chart().config().background_color,
-            terminal.theme.chart.bg
+            background,
+            "the app theme leaves the chart settings' colours"
         );
         // The first close button belongs to the other layout: the one on show stays.
         let close = frame(&mut terminal, SIZE, vec![])

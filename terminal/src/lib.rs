@@ -673,8 +673,8 @@ mod tests {
             })
         };
         for initial in [None, Some(egui::Theme::Light), Some(egui::Theme::Dark)] {
-            let storage = Arc::new(MemoryStorage::default());
             for explicit in [false, true, true] {
+                let storage = Arc::new(MemoryStorage::default());
                 let mut terminal = Terminal::new(Arc::new(TestFeed))
                     .with_symbol("AAPL")
                     .with_storage(storage.clone());
@@ -684,12 +684,39 @@ mod tests {
                 if !explicit {
                     assert_eq!(terminal.theme.dark, initial == Some(egui::Theme::Dark));
                 }
+                // The chart starts with the app theme of the session.
+                let start = if terminal.theme.dark {
+                    Theme::dark()
+                } else {
+                    Theme::light()
+                };
+                assert_eq!(
+                    (
+                        terminal.chart().config().background_color,
+                        terminal.chart().config().bearish_color,
+                    ),
+                    (start.chart.bg, start.chart.candle_down),
+                    "the chart starts with the app theme"
+                );
                 if explicit {
                     terminal.run(Action::TopToolbar(TopToolbarAction::ThemeToggle));
                 }
                 let choice = explicit.then_some(terminal.theme.dark);
-                terminal.charts.push(ChartBuilder::new().build());
-                terminal.wire_slot(1);
+                let appearance = if terminal.theme.dark {
+                    egui::Theme::Dark
+                } else {
+                    egui::Theme::Light
+                };
+                system(&mut terminal, appearance);
+                let colours = (
+                    terminal.chart().config().background_color,
+                    terminal.chart().config().bearish_color,
+                );
+                assert_eq!(
+                    colours,
+                    (start.chart.bg, start.chart.candle_down),
+                    "the toggle leaves the chart settings' colours"
+                );
                 for appearance in [egui::Theme::Dark, egui::Theme::Light, egui::Theme::Dark] {
                     system(&mut terminal, appearance);
                     let expected = if choice.unwrap_or(appearance == egui::Theme::Dark) {
@@ -698,9 +725,15 @@ mod tests {
                         Theme::light()
                     };
                     assert_eq!(terminal.theme, expected);
-                    for chart in &terminal.charts {
-                        assert_eq!(chart.config().background_color, expected.chart.bg);
-                    }
+                    // The app theme colours the application; the charts keep their own.
+                    assert_eq!(
+                        (
+                            terminal.chart().config().background_color,
+                            terminal.chart().config().bearish_color,
+                        ),
+                        colours,
+                        "the app theme leaves the chart settings' colours"
+                    );
                     let ctx = terminal.ctx.clone().unwrap();
                     assert_eq!(egui_charts::theme::ThemeExt::active_theme(&ctx), expected);
                 }
@@ -715,12 +748,13 @@ mod tests {
                     choice.map(|dark| if dark { "dark" } else { "light" }.into())
                 );
                 assert_eq!(
-                    restored.chart().config().background_color,
-                    restored.theme.chart.bg
-                );
-                assert_eq!(
-                    restored.chart().config().bearish_color,
-                    restored.theme.chart.candle_down
+                    (
+                        restored.chart().config().background_color,
+                        restored.chart().config().bearish_color,
+                    ),
+                    colours,
+                    "the chart settings' colours survive a restart under another app theme \
+                     (initial {initial:?}, explicit {explicit}, colours {colours:?})"
                 );
             }
         }

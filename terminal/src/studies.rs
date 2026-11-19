@@ -237,20 +237,11 @@ impl Terminal {
                     state.scales_and_lines.price_to_bar_ratio = 1.0;
                 }
                 settings.chart_settings = serde_json::to_value(state).ok();
-                settings.chart_settings_theme =
-                    Some(if self.theme.dark { "dark" } else { "light" }.to_owned());
             }
             Direction::Load => {
                 let Some(value) = settings.chart_settings.take() else {
                     return;
                 };
-                // The saved colours come from the theme they were saved under; another theme
-                // brings its own colours instead.
-                if settings.chart_settings_theme.as_deref()
-                    != Some(if self.theme.dark { "dark" } else { "light" })
-                {
-                    return;
-                }
                 let Ok(mut state) = serde_json::from_value::<ChartSettingsState>(value) else {
                     return;
                 };

@@ -77,6 +77,12 @@ impl Terminal {
         }
     }
 
+    /// Opens the application settings on the Tabs pane, where the tab title is set up.
+    pub(super) fn preferences_open_tabs(&mut self) {
+        self.preferences_open();
+        self.preferences.pane = Pane::Tabs;
+    }
+
     pub(super) fn preferences_show(&mut self, ui: &mut Ui, region: Region) {
         if region != Region::Windows || !self.preferences.open {
             return;

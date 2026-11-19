@@ -54,9 +54,8 @@ pub(super) struct Services {
 }
 
 impl Terminal {
-    /// Connects chart slot `index` to the services the chart consumes and to the theme.
+    /// Connects chart slot `index` to the services the chart consumes.
     pub(super) fn wire_slot(&mut self, index: usize) {
-        let ctx = self.ctx();
         let services = &self.services;
         let chart = &mut self.charts[index];
         chart.config_mut().skip_background = true;
@@ -65,6 +64,5 @@ impl Terminal {
         }
         chart.set_mark_source(services.marks.clone());
         chart.set_signal_sources(services.signals.clone());
-        chart.set_theme(&ctx, &self.theme);
     }
 }

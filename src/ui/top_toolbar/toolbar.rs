@@ -15,7 +15,7 @@ use egui::{Role, Ui, WidgetInfo};
 
 use super::{
     actions::TopToolbarAction,
-    buttons::{IconTextButton, PillButton, TextButton, TextIconButton, ToolbarIconButton, Trigger},
+    buttons::{IconTextButton, PillButton, ToolbarIconButton, Trigger},
     components::{
         chart_grid_selector::ChartGridSelector,
         chart_type_selector::{ChartTypeAction, ChartTypeSelector},
@@ -47,7 +47,6 @@ enum Slot {
     Theme,
     Layouts,
     LayoutName,
-    Save,
     QuickSearch,
     Settings,
     Fullscreen,
@@ -78,7 +77,7 @@ const LEFT: &[&[Slot]] = &[
 
 /// Right-aligned part of the strip, in groups divided by separators.
 const RIGHT: &[&[Slot]] = &[
-    &[S::Layouts, S::LayoutName, S::Save],
+    &[S::Layouts, S::LayoutName],
     &[
         S::QuickSearch,
         S::Settings,
@@ -149,7 +148,6 @@ impl Slot {
                 "Toggle Theme",
                 A::ThemeToggle,
             ),
-            S::Save => (&embedded_icons::DATABASE, "Save chart", A::Save),
             S::QuickSearch => (
                 &embedded_icons::COMMAND_SEARCH,
                 "Quick Search",
@@ -174,7 +172,7 @@ impl Slot {
             S::Templates => Control::Templates,
             S::Alert => Control::Alerts,
             S::Replay => Control::Replay,
-            S::Save | S::Layouts | S::LayoutName => Control::Layouts,
+            S::Layouts | S::LayoutName => Control::Layouts,
             S::Symbol => Control::SymbolSearch,
             S::Interval => Control::Interval,
             S::ChartType => Control::ChartType,
@@ -524,10 +522,6 @@ impl TopToolbar {
             for &control in group.iter().filter(|&&c| self.is_shown(c)) {
                 width += match control {
                     S::LayoutName => self.layout_menu.width(ui),
-                    S::Save => {
-                        Self::save_button(&self.config).width(ui)
-                            + Self::save_menu_button(&self.config).width(ui)
-                    }
                     S::Trade => Self::trade_button().width(ui),
                     _ => self.config.btn_size,
                 };
@@ -630,26 +624,6 @@ impl TopToolbar {
                     .show(|ui| self.show_indicator_templates(ui, action));
                 return;
             }
-            S::Save => {
-                let response = Self::save_button(&self.config).show(ui);
-                let arrow = Self::save_menu_button(&self.config).show(ui);
-                egui::Popup::menu(&arrow)
-                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                    .align(egui::RectAlign::BOTTOM_START)
-                    .align_alternatives(&[])
-                    .frame(egui::Frame::popup(ui.style()).fill(ui.active_theme().ui.panel_bg))
-                    .show(|ui| {
-                        let layout_action = self.layout_menu.show_menu(ui);
-                        if layout_action != LayoutAction::None {
-                            *action = TopToolbarAction::Layout(layout_action);
-                        }
-                    });
-                if arrow.clicked() {
-                    return;
-                }
-                response
-            }
-
             S::Screenshot => {
                 let response = ToolbarIconButton::new(icon, label, &self.config).show(ui);
                 egui::Popup::menu(&response)
@@ -893,14 +867,6 @@ impl TopToolbar {
             tooltip: Some("Order ticket"),
             filled: false,
         }
-    }
-
-    fn save_button(config: &TopToolbarConfig) -> TextButton {
-        TextButton::new("Save".to_owned(), config).with_tooltip("Save chart")
-    }
-
-    fn save_menu_button(config: &TopToolbarConfig) -> TextIconButton<'static> {
-        TextIconButton::new("", &embedded_icons::CHEVRON_DOWN, "Layout options", config)
     }
 }
 
@@ -1148,7 +1114,6 @@ mod tests {
         for (slot, button, label, keys) in [
             (S::Indicators, "Indicators", "Indicators", &["/"][..]),
             (S::Alert, "Alert", "Create alert", &["Alt", "A"]),
-            (S::Save, "Layout options", "Layout options", &[]),
         ] {
             let mut harness = Harness::builder()
                 .with_size(vec2(400.0, 200.0))
@@ -1170,76 +1135,6 @@ mod tests {
             for key in keys {
                 let chip = harness.get_by_role_and_label(egui::accesskit::Role::Label, key);
                 assert_eq!(chip.rect().height(), 18.0, "the {key} chip of {label}");
-            }
-        }
-    }
-
-    #[test]
-    fn save_and_layout_options_have_separate_hover_and_focus_targets() {
-        use egui_kittest::{Harness, kittest::Queryable};
-        for (_, theme) in crate::theme::presets() {
-            let context_theme = theme.clone();
-            let mut harness = Harness::builder()
-                .with_size(vec2(300.0, 100.0))
-                .with_context_setup(move |ctx| {
-                    egui_extras::install_image_loaders(ctx);
-                    crate::theme::apply_to_egui(ctx, &context_theme);
-                    l10n::set_translator(ctx, |english| {
-                        assert!(
-                            !english.is_empty(),
-                            "icon-only arrows have no text to translate"
-                        );
-                        None
-                    });
-                })
-                .build_ui_state(
-                    |ui, toolbar: &mut TopToolbar| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            toolbar.show_control(
-                                ui,
-                                S::Save,
-                                "SAMPLE",
-                                &mut TopToolbarAction::None,
-                            );
-                        });
-                    },
-                    TopToolbar::new(),
-                );
-            harness.run();
-            let save = harness
-                .get_by_role_and_label(egui::accesskit::Role::Button, "Save chart")
-                .rect();
-            let options = harness
-                .get_by_role_and_label(egui::accesskit::Role::Button, "Layout options")
-                .rect();
-            assert!(save.right() <= options.left());
-            for (label, rect) in [("Save chart", save), ("Layout options", options)] {
-                harness
-                    .get_by_role_and_label(egui::accesskit::Role::Button, label)
-                    .hover();
-                harness.run();
-                let tiles: Vec<_> = harness
-                    .output()
-                    .shapes
-                    .iter()
-                    .filter_map(|shape| match &shape.shape {
-                        egui::Shape::Rect(tile) if tile.fill == theme.ui.btn_bg_hover => {
-                            Some(tile.rect)
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                assert_eq!(tiles, [rect], "{label} must hover independently");
-                harness
-                    .get_by_role_and_label(egui::accesskit::Role::Button, label)
-                    .focus();
-                harness.run();
-                assert!(
-                    harness
-                        .get_by_role_and_label(egui::accesskit::Role::Button, label)
-                        .is_focused()
-                );
             }
         }
     }
@@ -1525,8 +1420,6 @@ mod tests {
                         "Redo",
                         "Chart layout",
                         "Named layouts",
-                        "Save chart",
-                        "Layout options",
                         "Quick Search",
                         "Settings",
                         "Fullscreen",
@@ -1566,26 +1459,6 @@ mod tests {
                 ),
                 (S::Screenshot, "Copy link", TopToolbarAction::CopyImageLink),
                 (S::Screenshot, "Post image", TopToolbarAction::Publish),
-                (
-                    S::Save,
-                    "Save layout",
-                    TopToolbarAction::Layout(LayoutAction::Save),
-                ),
-                (
-                    S::Save,
-                    "Download chart data",
-                    TopToolbarAction::Layout(LayoutAction::DownloadData),
-                ),
-                (
-                    S::Save,
-                    "Create new layout",
-                    TopToolbarAction::Layout(LayoutAction::CreateNew),
-                ),
-                (
-                    S::Save,
-                    "Open layout",
-                    TopToolbarAction::Layout(LayoutAction::OpenLayout),
-                ),
                 (
                     S::Layouts,
                     "2x2 Grid",
@@ -1702,11 +1575,7 @@ mod tests {
                     (action, rect, labels)
                 };
                 let (_, rect, _) = frame(vec![]);
-                let pos = if slot == S::Save {
-                    pos2(rect.right() - 8.0, rect.center().y)
-                } else {
-                    rect.center()
-                };
+                let pos = rect.center();
                 frame(vec![Event::PointerMoved(pos)]);
                 let click = |pos, pressed| Event::PointerButton {
                     pos,
@@ -1827,10 +1696,6 @@ mod tests {
             (
                 |t| t.set_control_visible(Control::Compare, false),
                 &[TopToolbarAction::OpenCompare],
-            ),
-            (
-                |t| t.set_control_visible(Control::Layouts, false),
-                &[TopToolbarAction::Save],
             ),
             (
                 |t| t.set_control_visible(Control::Publish, false),

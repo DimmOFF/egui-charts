@@ -20,6 +20,21 @@ impl Chart {
         self.inherited_theme = Some(theme.clone());
     }
 
+    /// Stops following the active egui theme: the chart keeps the theme it has shown, and one
+    /// that has not been shown yet starts with `theme`.
+    ///
+    /// A host that themes only its own interface pins its charts this way when the app theme
+    /// changes, so that later changes leave the chart settings' colours alone.
+    pub fn pin_theme(&mut self, theme: &Theme) {
+        if self.theme_override.is_some() {
+            return;
+        }
+        match self.inherited_theme.clone() {
+            Some(inherited) => self.theme_override = Some(inherited),
+            None => self.set_theme_override(Some(theme.clone())),
+        }
+    }
+
     /// The colours the chart's unedited fields follow.
     pub(super) fn followed_palette(&self) -> ChartConfig {
         self.inherited_theme

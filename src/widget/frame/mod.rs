@@ -3969,7 +3969,8 @@ impl Chart {
                 }
             }
             if show_axis_settings
-                && rendering::axes::axis_settings_button(ui, axis_corner).clicked()
+                && rendering::axes::axis_settings_button(ui, axis_corner, self.config.text_color)
+                    .clicked()
             {
                 self.scale_settings_requested = true;
             }

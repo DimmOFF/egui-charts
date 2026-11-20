@@ -765,7 +765,7 @@ impl<'a> Legend<'a> {
                 let name_color = if study.is_visible() {
                     colors.text
                 } else {
-                    colors.text.gamma_multiply(0.7)
+                    colors.text.gamma_multiply(0.6)
                 };
                 // TradingView hides everything after a study's name, its inputs caption too,
                 // when "Values in status line" is off.
@@ -1773,7 +1773,7 @@ mod layout_tests {
             .expect("hidden study name");
         assert_eq!(
             color,
-            theme.ui.text.gamma_multiply(0.7),
+            theme.ui.text.gamma_multiply(0.6),
             "a hidden study's name fades, its icons do not"
         );
         let bounds = Rect::from_min_size(pos, size);

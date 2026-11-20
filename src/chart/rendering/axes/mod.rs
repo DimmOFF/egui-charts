@@ -886,9 +886,14 @@ pub(crate) fn crosshair_price_action_with_colors(
 
 /// A 24-point scale-settings target in the price/time-axis corner. The caller opens its
 /// existing scale menu when the returned response is clicked, before handling scale drags.
+/// `foreground` is the chart text colour, so the gear matches the axis labels.
 #[cfg(feature = "icons")]
 #[cfg_attr(docsrs, doc(cfg(feature = "icons")))]
-pub fn axis_settings_button(ui: &mut egui::Ui, corner: Rect) -> egui::Response {
+pub fn axis_settings_button(
+    ui: &mut egui::Ui,
+    corner: Rect,
+    foreground: Color32,
+) -> egui::Response {
     let target = Rect::from_center_size(corner.center(), Vec2::splat(24.0)).intersect(corner);
     let response = ui.interact(
         target,
@@ -896,7 +901,7 @@ pub fn axis_settings_button(ui: &mut egui::Ui, corner: Rect) -> egui::Response {
         egui::Sense::click(),
     );
     crate::icons::icons::SETTINGS
-        .as_image_tinted(Vec2::splat(16.0), ui.ctx().active_theme().ui.text)
+        .as_image_tinted(Vec2::splat(16.0), foreground)
         .paint_at(
             ui,
             Rect::from_center_size(target.center(), Vec2::splat(16.0)),
@@ -1465,7 +1470,8 @@ mod tests {
     fn axis_controls_emit_their_actions() {
         use egui::{Event, Modifiers, PointerButton};
         let mut custom = crate::theme::Theme::dark();
-        custom.ui.text = Color32::from_rgb(123, 100, 90);
+        custom.ui.text = Color32::from_rgb(10, 20, 30);
+        custom.chart.axis_text = Color32::from_rgb(123, 100, 90);
         for theme in crate::theme::presets()
             .into_iter()
             .map(|(_, theme)| theme)
@@ -1500,7 +1506,7 @@ mod tests {
                             assert_eq!(price, 704.64);
                             actions.push("add");
                         }
-                        if axis_settings_button(ui, corner).clicked() {
+                        if axis_settings_button(ui, corner, theme.chart.axis_text).clicked() {
                             actions.push("settings");
                         }
                     });
@@ -1508,7 +1514,7 @@ mod tests {
                         Shape::Rect(rect) if rect.brush.is_some() => Some(rect.fill),
                         _ => None,
                     });
-                    assert_eq!(ink, Some(theme.ui.text));
+                    assert_eq!(ink, Some(theme.chart.axis_text));
                     output.drop_without_applying_deltas();
                 }
                 assert_eq!(actions[before..].first().copied(), expected);

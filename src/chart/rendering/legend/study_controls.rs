@@ -161,12 +161,11 @@ pub(crate) fn study_controls(
         let response = response.on_hover_text(&label);
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
         if response.hovered() || ui.rect_contains_pointer(rect) {
-            // Mixed from the chart colours, so it stays subtle in light and dark themes.
-            ui.painter().rect_filled(
-                rect,
-                theme.radius.sm,
-                theme.chart.bg.lerp_to_gamma(foreground, 0.12),
-            );
+            // Mixed from the colours actually painted behind the buttons, so the chart's own
+            // theme cannot make the fill brighter than the chart it sits on.
+            let base = backdrop.unwrap_or(theme.chart.bg);
+            ui.painter()
+                .rect_filled(rect, theme.radius.sm, base.lerp_to_gamma(foreground, 0.12));
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         if index == 5 {
@@ -219,7 +218,7 @@ mod tests {
     use super::super::{Bar, Indicator, Legend};
     use super::*;
     use chrono::{TimeZone, Utc};
-    use egui::{Context, Event, Key, PointerButton, Shape};
+    use egui::{Color32, Context, Event, Key, PointerButton, Shape};
 
     #[test]
     fn study_controls_reveal_on_touch_and_dismiss_outside() {
@@ -601,10 +600,11 @@ mod tests {
         output.drop_without_applying_deltas();
     }
 
-    /// The button hover is mixed from the chart colours, so it stays subtle in both themes
-    /// instead of using the brighter UI hover fill.
+    /// The button hover is mixed from the colours painted behind it, so the chart's own theme
+    /// can neither brighten nor wash out the fill.
     #[test]
     fn study_button_hover_fill_follows_the_chart_colours() {
+        let backdrop = Color32::from_rgb(15, 15, 15);
         for theme in [crate::theme::Theme::light(), crate::theme::Theme::dark()] {
             let ctx = Context::default();
             crate::theme::apply_to_egui(&ctx, &theme);
@@ -626,7 +626,7 @@ mod tests {
                         ui,
                         row,
                         controls,
-                        None,
+                        Some(backdrop),
                         theme.chart.axis_text,
                         egui::Id::unique("hover fill"),
                         &study,
@@ -639,7 +639,7 @@ mod tests {
             });
             assert_eq!(
                 fill,
-                Some(theme.chart.bg.lerp_to_gamma(theme.chart.axis_text, 0.12))
+                Some(backdrop.lerp_to_gamma(theme.chart.axis_text, 0.12))
             );
             output.drop_without_applying_deltas();
         }

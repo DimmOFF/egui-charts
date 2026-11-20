@@ -635,7 +635,8 @@ impl<'a> Legend<'a> {
                         painter.rect_filled(
                             rect,
                             theme.radius.sm,
-                            theme.chart.bg.lerp_to_gamma(colors.text, 0.12),
+                            (layout.chart_background)(rect.center())
+                                .lerp_to_gamma(colors.text, 0.12),
                         );
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }

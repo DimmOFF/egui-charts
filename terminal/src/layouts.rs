@@ -138,6 +138,15 @@ fn tab_document(id: u64) -> String {
     format!("tab {id}")
 }
 
+/// The columns, card width and left inset of the start page grid: as many 260 px cards as the
+/// space takes, and no more columns than there are cards.
+fn start_page_grid(available: f32, gap: f32, cards: usize) -> (usize, f32, f32) {
+    let columns = (((available + gap) / (260.0 + gap)).floor() as usize).clamp(1, cards.max(1));
+    let tile = ((available - (columns - 1) as f32 * gap) / columns as f32).min(260.0);
+    let content = columns as f32 * tile + (columns - 1) as f32 * gap;
+    (columns, tile, ((available - content) / 2.0).max(0.0))
+}
+
 /// Fills the ticker, last price and price change of `tab` from its first chart.
 fn refresh_tab_market(charts: &[Chart], tab: &mut Tab) {
     let Some(chart) = charts.first() else {
@@ -361,16 +370,12 @@ impl Terminal {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        let columns = (((ui.available_width() + gap) / (260.0 + gap)).floor()
-                            as usize)
-                            .max(1);
-                        let tile = ((ui.available_width() - (columns - 1) as f32 * gap)
-                            / columns as f32)
-                            .min(260.0);
+                        let items = std::iter::once(None)
+                            .chain(names.iter().map(Some))
+                            .collect::<Vec<_>>();
+                        let (columns, tile, left) =
+                            start_page_grid(ui.available_width(), gap, items.len());
                         let size = egui::vec2(tile, 84.0);
-                        // TradingView centres the heading and the cards as one block.
-                        let content = columns as f32 * tile + (columns - 1) as f32 * gap;
-                        let left = ((ui.available_width() - content) / 2.0).max(0.0);
                         ui.add_space(top);
                         ui.horizontal(|ui| {
                             ui.add_space(left);
@@ -381,9 +386,6 @@ impl Terminal {
                             );
                         });
                         ui.add_space(top);
-                        let items = std::iter::once(None)
-                            .chain(names.iter().map(Some))
-                            .collect::<Vec<_>>();
                         for row in items.chunks(columns) {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = gap;
@@ -2193,6 +2195,18 @@ mod tests {
             2,
             "the new tab keeps its place"
         );
+    }
+
+    #[test]
+    fn the_start_page_grid_is_centred_on_the_cards_it_holds() {
+        // A wide window fits eight columns, but six cards make a six-column block, centred.
+        let (columns, tile, left) = start_page_grid(2200.0, 12.0, 6);
+        assert_eq!((columns, tile), (6, 260.0));
+        assert!((left - 290.0).abs() < 0.01);
+        // Enough cards fill every column the window fits.
+        let (columns, _, left) = start_page_grid(2200.0, 12.0, 30);
+        assert_eq!(columns, 8);
+        assert!((left - 18.0).abs() < 0.01);
     }
 
     #[test]

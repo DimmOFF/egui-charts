@@ -900,6 +900,9 @@ pub fn axis_settings_button(
         ui.scope_id().with("axis_settings"),
         egui::Sense::click(),
     );
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
     crate::icons::icons::SETTINGS
         .as_image_tinted(Vec2::splat(16.0), foreground)
         .paint_at(
@@ -1515,6 +1518,12 @@ mod tests {
                         _ => None,
                     });
                     assert_eq!(ink, Some(theme.chart.axis_text));
+                    if pos == corner.center() {
+                        assert_eq!(
+                            output.platform_output.cursor_icon,
+                            egui::CursorIcon::PointingHand
+                        );
+                    }
                     output.drop_without_applying_deltas();
                 }
                 assert_eq!(actions[before..].first().copied(), expected);

@@ -18,6 +18,8 @@ mod deriv_feed;
 mod deriv_services;
 #[path = "mt5_feed.rs"]
 mod mt5_feed;
+#[path = "providers.rs"]
+mod providers;
 
 use catalog::Catalog;
 use combined::{CombinedFeed, CombinedQuotes};
@@ -31,6 +33,7 @@ use egui_charts::widget::SeriesId;
 use egui_charts::widget::settings::ChartSettingsState;
 use egui_charts_pine::PineScripts;
 use egui_charts_terminal::{ExportContents, Terminal};
+use providers::Providers;
 use std::sync::Arc;
 
 const SYMBOL: &str = "R_100";
@@ -65,7 +68,9 @@ fn main() -> eframe::Result {
     // The catalogues decide which venue serves a symbol. Opening the window before they arrive
     // sent a saved Binance or MT5 symbol to Deriv, which answered `InvalidSymbol`, and the chart
     // only recovered when the symbol was picked again.
-    let catalog = Arc::new(Catalog::load());
+    // The settings gate every venue, so the feeds, the quotes and the search share them.
+    let providers = Providers::default();
+    let catalog = Arc::new(Catalog::load(providers.clone()));
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -95,7 +100,11 @@ fn main() -> eframe::Result {
                         .request_repaint_after(std::time::Duration::from_millis(100));
                     return;
                 }
-                terminal = Some(build_terminal(catalog.clone(), pine.factory()));
+                terminal = Some(build_terminal(
+                    catalog.clone(),
+                    providers.clone(),
+                    pine.factory(),
+                ));
             }
             let terminal = terminal.as_mut().expect("the terminal was built above");
             // A docked editor takes its width from the window before the terminal draws its
@@ -127,6 +136,8 @@ fn main() -> eframe::Result {
                     _ => {}
                 }
             }
+            // The data provider switches gate every venue on its next request.
+            providers.set(terminal.data_providers());
             // Charts open with a manual price scale. The empty chart has no range to freeze
             // yet, so this waits for its first bars. Once only: afterwards the user's own
             // auto-scale choice stands.
@@ -163,6 +174,7 @@ fn main() -> eframe::Result {
 /// The terminal every venue serves symbols through.
 fn build_terminal(
     catalog: Arc<Catalog>,
+    providers: Providers,
     factory: egui_charts::studies::IndicatorFactory,
 ) -> Terminal {
     let binance_symbols = catalog.binance();
@@ -173,6 +185,7 @@ fn build_terminal(
         deriv_symbols.clone(),
         binance_symbols.clone(),
         Arc::clone(&mt5),
+        providers.clone(),
     )))
     .with_symbol(SYMBOL)
     .with_timeframe(Timeframe::Min1)
@@ -182,6 +195,7 @@ fn build_terminal(
         binance_symbols,
         deriv_symbols,
         mt5,
+        providers,
     )))
     .with_alerts(Arc::new(AlertEngine::new()))
     .with_indicator_factory(factory)

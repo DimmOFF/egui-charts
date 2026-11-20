@@ -174,7 +174,11 @@ impl Terminal {
             .map(|(part, _)| *part)
             .collect();
         self.layouts.auto_restore = self.preferences.auto_restore;
-        self.data_providers = self.preferences.providers.clone();
+        if self.data_providers != self.preferences.providers {
+            self.data_providers = self.preferences.providers.clone();
+            // Live charts of a provider that was turned off reload and are refused its data.
+            self.reload_feeds();
+        }
     }
 
     fn preferences_general(&mut self, ui: &mut Ui) {

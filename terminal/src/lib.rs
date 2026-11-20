@@ -373,6 +373,20 @@ impl Terminal {
         &mut self.charts[self.active]
     }
 
+    /// The data providers the settings leave on, which the host's feed reads to gate its venues.
+    pub fn data_providers(&self) -> &DataProviders {
+        &self.data_providers
+    }
+
+    /// Reloads what the feed gates after a change it does not see, such as a data provider
+    /// turned off: every chart's data and the watchlist's quote stream.
+    fn reload_feeds(&mut self) {
+        for chart in &mut self.charts {
+            chart.reload_feed();
+        }
+        self.reload_quote_streams();
+    }
+
     /// The chart context menus, to add host entries.
     pub fn menus_mut(&mut self) -> &mut ChartMenus {
         &mut self.menus

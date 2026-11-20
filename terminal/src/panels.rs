@@ -214,6 +214,16 @@ impl Terminal {
         &mut self.panels.widget_bar
     }
 
+    /// Restarts the quote streams so their next poll subscribes through the venue gate again.
+    pub(super) fn reload_quote_streams(&mut self) {
+        let Some(quotes) = &self.services.quotes else {
+            return;
+        };
+        // Dropping the listener resubscribes through the gate on the next poll.
+        self.panels.market.watchlist.set_service(quotes.clone());
+        self.panels.heatmap_quotes.set_service(quotes.clone());
+    }
+
     pub(super) fn panels_init(&mut self) {
         let market = &mut self.panels.market;
         if let Some(quotes) = &self.services.quotes {

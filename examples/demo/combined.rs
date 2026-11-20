@@ -4,16 +4,17 @@
 use std::sync::Arc;
 
 use egui_charts::data::{
-    Datafeed, FeedCapabilities, HistoryPage, HistoryRequest, Reply, Subscription,
+    Datafeed, FeedCapabilities, FeedError, HistoryPage, HistoryRequest, Reply, Subscription,
 };
 use egui_charts::model::{Instrument, Quote};
-use egui_charts::services::{Events, Quotes};
+use egui_charts::services::{DataProviders, Events, Quotes};
 
 use super::binance_feed::{BinanceFeed, BinanceQuotes, is_futures};
 use super::catalog::Symbols;
 use super::deriv_feed::{DerivFeed, TIMEFRAMES};
 use super::deriv_services::DerivQuotes;
 use super::mt5_feed::{Mt5Feed, Mt5Link, Mt5Quotes};
+use super::providers::Providers;
 
 /// Whether `symbol` trades on Binance: in its catalogue, or a futures pair before the catalogue
 /// finishes loading.
@@ -27,6 +28,26 @@ pub enum Venue {
     Binance,
     Mt5,
     Deriv,
+}
+
+impl Venue {
+    /// The venue as the settings name it.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Binance => "Binance",
+            Self::Mt5 => "MT5 Bridge",
+            Self::Deriv => "Deriv",
+        }
+    }
+}
+
+/// Whether the settings leave `venue` on.
+fn venue_enabled(venue: Venue, providers: &DataProviders) -> bool {
+    match venue {
+        Venue::Binance => providers.binance,
+        Venue::Mt5 => providers.mt5,
+        Venue::Deriv => providers.deriv,
+    }
 }
 
 /// The venue that serves a symbol. Binance wins because its catalogue is the one a saved symbol
@@ -63,6 +84,7 @@ pub struct CombinedFeed {
     /// The Deriv catalogue, filled when the symbol search loads it.
     deriv_symbols: Symbols,
     mt5_link: Arc<Mt5Link>,
+    providers: Providers,
 }
 
 impl CombinedFeed {
@@ -72,6 +94,7 @@ impl CombinedFeed {
         deriv_symbols: Symbols,
         binance_symbols: Symbols,
         mt5: Arc<Mt5Link>,
+        providers: Providers,
     ) -> Self {
         Self {
             deriv: DerivFeed::new(deriv_symbol, deriv_symbols.clone()),
@@ -80,16 +103,28 @@ impl CombinedFeed {
             binance_symbols,
             deriv_symbols,
             mt5_link: mt5,
+            providers,
         }
     }
 
-    fn venue(&self, symbol: &str) -> Venue {
-        venue(
+    /// The venue of `symbol`, refused while its provider is turned off.
+    fn venue(&self, symbol: &str) -> Result<Venue, FeedError> {
+        // A turned-off provider keeps its symbols: a Binance symbol stays Binance, so the chart
+        // says the provider is off rather than asking another venue for it.
+        let venue = venue(
             symbol,
             &self.binance_symbols,
             &self.deriv_symbols,
             &self.mt5_link,
-        )
+        );
+        if venue_enabled(venue, &self.providers.get()) {
+            Ok(venue)
+        } else {
+            Err(FeedError::Other(format!(
+                "The {} data provider is turned off",
+                venue.label()
+            )))
+        }
     }
 }
 
@@ -113,14 +148,23 @@ impl Datafeed for CombinedFeed {
 
     fn resolve(&self, symbol: &str, reply: Reply<Instrument>) {
         match self.venue(symbol) {
-            Venue::Binance => self.binance.resolve(symbol, reply),
-            Venue::Mt5 => self.mt5.resolve(symbol, reply),
-            Venue::Deriv => self.deriv.resolve(symbol, reply),
+            Ok(Venue::Binance) => self.binance.resolve(symbol, reply),
+            Ok(Venue::Mt5) => self.mt5.resolve(symbol, reply),
+            Ok(Venue::Deriv) => self.deriv.resolve(symbol, reply),
+            Err(error) => {
+                reply.send(Err(error));
+            }
         }
     }
 
     fn history(&self, request: HistoryRequest, reply: Reply<HistoryPage>) {
-        let venue = self.venue(&request.symbol);
+        let venue = match self.venue(&request.symbol) {
+            Ok(venue) => venue,
+            Err(error) => {
+                reply.send(Err(error));
+                return;
+            }
+        };
         eprintln!("History for {} via {venue:?}", request.symbol);
         match venue {
             Venue::Binance => self.binance.history(request, reply),
@@ -131,9 +175,10 @@ impl Datafeed for CombinedFeed {
 
     fn subscribe(&self, subscription: Subscription) {
         match self.venue(&subscription.symbol) {
-            Venue::Binance => self.binance.subscribe(subscription),
-            Venue::Mt5 => self.mt5.subscribe(subscription),
-            Venue::Deriv => self.deriv.subscribe(subscription),
+            Ok(Venue::Binance) => self.binance.subscribe(subscription),
+            Ok(Venue::Mt5) => self.mt5.subscribe(subscription),
+            Ok(Venue::Deriv) => self.deriv.subscribe(subscription),
+            Err(error) => eprintln!("No live data for {}: {error}", subscription.symbol),
         }
     }
 }
@@ -146,10 +191,16 @@ pub struct CombinedQuotes {
     binance_symbols: Symbols,
     deriv_symbols: Symbols,
     mt5_link: Arc<Mt5Link>,
+    providers: Providers,
 }
 
 impl CombinedQuotes {
-    pub fn new(binance_symbols: Symbols, deriv_symbols: Symbols, mt5: Arc<Mt5Link>) -> Self {
+    pub fn new(
+        binance_symbols: Symbols,
+        deriv_symbols: Symbols,
+        mt5: Arc<Mt5Link>,
+        providers: Providers,
+    ) -> Self {
         Self {
             deriv: DerivQuotes,
             binance: BinanceQuotes,
@@ -157,16 +208,19 @@ impl CombinedQuotes {
             binance_symbols,
             deriv_symbols,
             mt5_link: mt5,
+            providers,
         }
     }
 
-    fn venue(&self, symbol: &str) -> Venue {
-        venue(
+    /// The venue of `symbol`, or `None` while its provider is turned off.
+    fn venue(&self, symbol: &str) -> Option<Venue> {
+        let venue = venue(
             symbol,
             &self.binance_symbols,
             &self.deriv_symbols,
             &self.mt5_link,
-        )
+        );
+        venue_enabled(venue, &self.providers.get()).then_some(venue)
     }
 }
 
@@ -174,7 +228,10 @@ impl Quotes for CombinedQuotes {
     fn subscribe(&self, symbols: &[String], events: Events<(String, Quote)>) {
         let mut mt5 = Vec::new();
         for symbol in symbols {
-            match self.venue(symbol) {
+            let Some(venue) = self.venue(symbol) else {
+                continue;
+            };
+            match venue {
                 Venue::Binance => self
                     .binance
                     .subscribe(std::slice::from_ref(symbol), events.clone()),
@@ -193,7 +250,8 @@ impl Quotes for CombinedQuotes {
 
 #[cfg(test)]
 mod tests {
-    use super::{Venue, venue_for};
+    use super::{Venue, venue_enabled, venue_for};
+    use egui_charts::services::DataProviders;
 
     /// A saved MT5 symbol must keep going to the terminal when it is off, so the chart says why
     /// instead of asking Deriv for a symbol it does not list.
@@ -207,5 +265,19 @@ mod tests {
         // Before the Deriv catalogue loads, a missing symbol says nothing about its venue.
         assert_eq!(venue_for(false, false, false, false), Venue::Deriv);
         assert_eq!(venue_for(false, false, false, true), Venue::Mt5);
+    }
+
+    /// A provider the settings leave off serves no data, while the ones left on do.
+    #[test]
+    fn a_turned_off_provider_serves_nothing() {
+        let mut providers = DataProviders::default();
+        assert!(venue_enabled(Venue::Binance, &providers));
+        providers.binance = false;
+        assert!(!venue_enabled(Venue::Binance, &providers));
+        assert!(venue_enabled(Venue::Deriv, &providers));
+        providers.deriv = false;
+        providers.mt5 = false;
+        assert!(!venue_enabled(Venue::Deriv, &providers));
+        assert!(!venue_enabled(Venue::Mt5, &providers));
     }
 }

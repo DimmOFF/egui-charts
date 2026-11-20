@@ -14,6 +14,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use super::deriv_feed::DERIV_PUBLIC_WS;
 use super::mt5_feed::{Connection, Mt5Link};
+use super::providers::Providers;
 
 const BINANCE_EXCHANGE_INFO: &str = "https://api.binance.com/api/v3/exchangeInfo";
 const BINANCE_FUTURES_INFO: &str = "https://fapi.binance.com/fapi/v1/exchangeInfo";
@@ -81,11 +82,12 @@ pub struct Catalog {
     deriv: Symbols,
     binance: Symbols,
     mt5: Arc<Mt5Link>,
+    providers: Providers,
 }
 
 impl Catalog {
     /// Starts loading every catalogue and returns the search service at once.
-    pub fn load() -> Self {
+    pub fn load(providers: Providers) -> Self {
         let deriv = Symbols::default();
         let binance = Symbols::default();
         // Local and quick, and the chart's first symbol may be an MT5 one, so it is ready before
@@ -100,6 +102,7 @@ impl Catalog {
             deriv: deriv.clone(),
             binance: binance.clone(),
             mt5: Arc::clone(&mt5),
+            providers,
         };
         let spawn = std::thread::Builder::new()
             .name("symbol-catalogue".into())
@@ -177,13 +180,31 @@ impl Catalog {
             .unwrap_or_else(|error| error.into_inner())
     }
 
-    /// Every instrument loaded so far, the MT5 ones included.
+    /// Every instrument loaded so far from the providers the settings leave on.
     fn catalogue(&self) -> Vec<Instrument> {
-        let mut instruments = self.deriv.all();
-        instruments.extend(self.binance.all());
-        instruments.extend(self.mt5.symbols().all());
-        instruments
+        catalogue(&self.deriv, &self.binance, &self.mt5, &self.providers)
     }
+}
+
+/// The instruments of every loaded catalogue whose provider is on, MT5 included.
+fn catalogue(
+    deriv: &Symbols,
+    binance: &Symbols,
+    mt5: &Mt5Link,
+    providers: &Providers,
+) -> Vec<Instrument> {
+    let providers = providers.get();
+    let mut instruments = Vec::new();
+    if providers.deriv {
+        instruments.extend(deriv.all());
+    }
+    if providers.binance {
+        instruments.extend(binance.all());
+    }
+    if providers.mt5 {
+        instruments.extend(mt5.symbols().all());
+    }
+    instruments
 }
 
 impl SymbolSearch for Catalog {
@@ -197,6 +218,7 @@ impl SymbolSearch for Catalog {
         let deriv = self.deriv.clone();
         let binance = self.binance.clone();
         let mt5 = Arc::clone(&self.mt5);
+        let providers = self.providers.clone();
         std::thread::spawn(move || {
             let loaded = ready
                 .loaded
@@ -207,10 +229,7 @@ impl SymbolSearch for Catalog {
                 .wait_timeout_while(loaded, Duration::from_secs(30), |loaded| !*loaded)
                 .unwrap_or_else(|error| error.into_inner());
             drop(loaded);
-            let mut instruments = deriv.all();
-            instruments.extend(binance.all());
-            instruments.extend(mt5.symbols().all());
-            instruments.search(query, reply);
+            catalogue(&deriv, &binance, &mt5, &providers).search(query, reply);
         });
     }
 }
@@ -376,4 +395,30 @@ fn binance_futures_instruments() -> Result<Vec<Instrument>, String> {
                 .with_symbol_type(SymbolType::Crypto)
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Mt5Link, Providers, Symbols, catalogue};
+    use egui_charts::model::Instrument;
+    use egui_charts::services::DataProviders;
+
+    /// A turned-off provider's symbols leave the search; the ones left on stay.
+    #[test]
+    fn a_turned_off_provider_is_left_out_of_the_search() {
+        let deriv = Symbols::default();
+        deriv.insert(vec![Instrument::new("R_100").with_exchange("Deriv")]);
+        let binance = Symbols::default();
+        binance.insert(vec![Instrument::new("BTCUSDT").with_exchange("Binance")]);
+        let mt5 = Mt5Link::new(Symbols::default(), None);
+        let providers = Providers::default();
+        assert_eq!(catalogue(&deriv, &binance, &mt5, &providers).len(), 2);
+        providers.set(&DataProviders {
+            binance: false,
+            ..DataProviders::default()
+        });
+        let found = catalogue(&deriv, &binance, &mt5, &providers);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].symbol, "R_100");
+    }
 }

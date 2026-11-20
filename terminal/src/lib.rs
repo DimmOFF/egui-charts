@@ -378,9 +378,10 @@ impl Terminal {
         &self.data_providers
     }
 
-    /// Reloads what the feed gates after a change it does not see, such as a data provider
-    /// turned off: every chart's data and the watchlist's quote stream.
-    fn reload_feeds(&mut self) {
+    /// Reloads what the feed gates after the host's data providers changed: every chart's data
+    /// and the watchlist's quote streams. Call it after [`data_providers`](Self::data_providers)
+    /// reports a change, before the next frame, so nothing resubscribes under the old settings.
+    pub fn reload_feeds(&mut self) {
         for chart in &mut self.charts {
             chart.reload_feed();
         }

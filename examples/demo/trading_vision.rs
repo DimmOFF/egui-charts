@@ -26,7 +26,7 @@ use combined::{CombinedFeed, CombinedQuotes};
 use deriv_services::FileStorage;
 use egui_charts::icons::icons;
 use egui_charts::model::Timeframe;
-use egui_charts::services::AlertEngine;
+use egui_charts::services::{AlertEngine, DataProviders};
 use egui_charts::ui::export::ExportFormat;
 use egui_charts::ui::widget_bar::{WidgetBarSection, WidgetBarWidget};
 use egui_charts::widget::SeriesId;
@@ -67,10 +67,12 @@ fn main() -> eframe::Result {
 
     // The catalogues decide which venue serves a symbol. Opening the window before they arrive
     // sent a saved Binance or MT5 symbol to Deriv, which answered `InvalidSymbol`, and the chart
-    // only recovered when the symbol was picked again.
-    // The settings gate every venue, so the feeds, the quotes and the search share them.
+    // only recovered when the symbol was picked again. The settings gate every venue, so the
+    // feeds, the quotes and the search share them.
     let providers = Providers::default();
     let catalog = Arc::new(Catalog::load(providers.clone()));
+    // The providers the gate holds, as the terminal reported them on the last frame.
+    let mut data_providers = DataProviders::default();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -107,6 +109,14 @@ fn main() -> eframe::Result {
                 ));
             }
             let terminal = terminal.as_mut().expect("the terminal was built above");
+            // A provider switch gates every venue before anything asks for data again, so the
+            // watchlist and the charts resubscribe under the settings the user chose.
+            let providers_now = terminal.data_providers().clone();
+            if providers_now != data_providers {
+                data_providers = providers_now;
+                providers.set(&data_providers);
+                terminal.reload_feeds();
+            }
             // A docked editor takes its width from the window before the terminal draws its
             // frame, so the terminal's right rail ends up to its left, as in the reference.
             let on_chart = pine.on_chart(terminal.chart());

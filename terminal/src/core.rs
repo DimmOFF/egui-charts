@@ -315,11 +315,7 @@ impl Terminal {
             Some("light") => Some(false),
             _ => None,
         };
-        if self.data_providers != settings.data_providers {
-            self.data_providers = settings.data_providers.clone();
-            // Charts request before the host can read the settings, so they reload once.
-            self.reload_feeds();
-        }
+        self.data_providers = settings.data_providers.clone();
         self.update_theme(&self.ctx());
         if let Some(symbol) = settings
             .symbol

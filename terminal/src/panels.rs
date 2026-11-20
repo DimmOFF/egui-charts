@@ -908,8 +908,9 @@ mod tests {
     use egui_charts::data::{
         Datafeed, HistoryPage, HistoryRequest, Reply, TradePage, TradeRequest,
     };
-    use egui_charts::model::{Instrument, Watchlist};
-    use std::sync::Arc;
+    use egui_charts::model::{Instrument, Quote, Watchlist};
+    use egui_charts::services::{Events, Quotes};
+    use std::sync::{Arc, Mutex};
 
     /// The test feed, with one recent trade at 181.25.
     struct TapeFeed;
@@ -958,6 +959,35 @@ mod tests {
             .collect();
         output.drop_without_applying_deltas();
         texts
+    }
+
+    /// A quotes service that records the symbol sets it is asked for.
+    #[derive(Default)]
+    struct CountingQuotes(Mutex<Vec<Vec<String>>>);
+
+    impl Quotes for CountingQuotes {
+        fn subscribe(&self, symbols: &[String], _events: Events<(String, Quote)>) {
+            self.0.lock().unwrap().push(symbols.to_vec());
+        }
+    }
+
+    /// A provider the user turned off must restart the watchlist stream, or the symbols it served
+    /// keep ticking on the subscription made before the switch.
+    #[test]
+    fn turning_a_data_provider_off_resubscribes_the_watchlist() {
+        let quotes = Arc::new(CountingQuotes::default());
+        let mut terminal = terminal().with_quotes(quotes.clone());
+        terminal.panels_mut().watchlist.add_symbol("BTCUSDT");
+        frame(&mut terminal, SIZE, vec![]);
+        let before = quotes.0.lock().unwrap().len();
+        assert_eq!(before, 1, "the watchlist subscribed once");
+        terminal.data_providers.binance = false;
+        terminal.reload_feeds();
+        frame(&mut terminal, SIZE, vec![]);
+        assert!(
+            quotes.0.lock().unwrap().len() > before,
+            "the stream restarted"
+        );
     }
 
     #[test]

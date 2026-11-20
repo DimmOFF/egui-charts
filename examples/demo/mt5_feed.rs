@@ -14,6 +14,7 @@ use egui_charts::model::{Bar, Instrument, Quote, SymbolType, Tick, Timeframe};
 use egui_charts::services::{Events, Quotes};
 use mt5_rs::Mt5Client;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -82,7 +83,9 @@ fn symbol_type(path: &str) -> SymbolType {
 pub struct Connection {
     pipe: Arc<str>,
     /// Broker server time minus UTC, in seconds: MT5 stamps bars and ticks in server time.
-    offset: i64,
+    /// Shared, because a terminal that had not synced when this was measured is corrected by the
+    /// live streams once their ticks say what its clock is.
+    offset: Arc<AtomicI64>,
 }
 
 impl Connection {
@@ -99,7 +102,7 @@ impl Connection {
         }
         Some(Self {
             pipe: pipe.into(),
-            offset,
+            offset: Arc::new(AtomicI64::new(offset)),
         })
     }
 
@@ -130,9 +133,26 @@ impl Connection {
         connect(&self.pipe)
     }
 
+    /// Broker server time minus UTC, in seconds.
+    fn offset(&self) -> i64 {
+        self.offset.load(Ordering::Relaxed)
+    }
+
+    /// Corrects the offset from a live server-time stamp. A connection opened while the terminal
+    /// was still syncing measured 0 and would otherwise stamp bars, ticks and quotes hours off.
+    fn observe(&self, server_ms: i64) {
+        let Some(offset) = observed_offset(server_ms, Utc::now().timestamp_millis()) else {
+            return;
+        };
+        if self.offset() != offset {
+            eprintln!("MT5 clock offset corrected to {offset} s");
+            self.offset.store(offset, Ordering::Relaxed);
+        }
+    }
+
     /// A server-time timestamp in milliseconds, as UTC milliseconds.
     fn utc_ms(&self, server_ms: i64) -> i64 {
-        server_ms - self.offset * 1000
+        server_ms - self.offset() * 1000
     }
 }
 
@@ -155,6 +175,18 @@ fn discover() -> Option<String> {
     found
 }
 
+/// A clock difference in seconds rounded to the quarter hours broker clocks sit on.
+fn rounded_offset(delta: i64) -> i64 {
+    (delta as f64 / 900.0).round() as i64 * 900
+}
+
+/// The broker offset a server-time stamp implies, or `None` when the stamp is far behind UTC: that
+/// is history, and measuring the clock from it would shift every bar and quote.
+fn observed_offset(server_ms: i64, now_ms: i64) -> Option<i64> {
+    (server_ms > 0 && now_ms - server_ms <= LIVE_WINDOW * 1000)
+        .then(|| rounded_offset((server_ms - now_ms) / 1000))
+}
+
 /// The terminal's clock offset from UTC, measured from its newest live quote, or 0 while the
 /// market is closed and nothing live is there to compare.
 fn clock_offset(pipe: &str) -> i64 {
@@ -169,8 +201,28 @@ fn clock_offset(pipe: &str) -> i64 {
     if newest == 0 || now - newest > LIVE_WINDOW {
         return 0;
     }
-    // Broker clocks sit on whole, and sometimes half, hours from UTC.
-    ((newest - now) as f64 / 900.0).round() as i64 * 900
+    rounded_offset(newest - now)
+}
+
+/// A tick's server time in milliseconds; older builds only fill the second field.
+fn tick_ms(tick: &mt5_rs::Tick) -> i64 {
+    if tick.time_msc > 0 {
+        tick.time_msc
+    } else {
+        tick.time * 1000
+    }
+}
+
+/// Where a live stream starts, in server time: a minute before the terminal's newest tick, so the
+/// current bar is complete. The cursor must stay in server time; taken from the UTC clock it would
+/// ask for a window the server has not reached whenever the measured offset is short, and the
+/// terminal would answer with old ticks that the filter drops, silently freezing the chart.
+fn tick_anchor(latest: Option<i64>, now_ms: i64, offset: i64) -> i64 {
+    (match latest.filter(|ms| *ms > 0) {
+        Some(ms) => ms,
+        // A symbol with no tick of its own: the UTC clock and the measured offset are all there is.
+        None => now_ms + offset * 1000,
+    }) - 60_000
 }
 
 /// The terminal this session talks to. A terminal started after the app is used from the next
@@ -311,7 +363,7 @@ impl Datafeed for Mt5Feed {
                         Some(before) => {
                             let span =
                                 timeframe_seconds(timeframe) * count as i64 * 1500 + 86_400_000;
-                            let start = before + connection.offset * 1000 - span;
+                            let start = before + connection.offset() * 1000 - span;
                             let rows = client
                                 .copy_rates_from(&symbol, code, start, count + 50)
                                 .map_err(|error| FeedError::Network(error.to_string()))?;
@@ -349,8 +401,10 @@ impl Datafeed for Mt5Feed {
         let spawn = std::thread::Builder::new()
             .name(format!("mt5-stream-{symbol}"))
             .spawn(move || {
-                // The chart builds the current bar from ticks, so a minute of them is plenty.
-                let mut since = Utc::now().timestamp_millis() - 60_000;
+                // The cursor is server time, like the ticks it filters. Its first value comes from
+                // the terminal itself, so a cached connection with no offset measured yet cannot
+                // put the request window out of reach.
+                let mut since: Option<i64> = None;
                 while sink.is_active() {
                     // A terminal started after the chart subscribed is picked up here.
                     let Some(connection) = mt5.connection() else {
@@ -368,8 +422,21 @@ impl Datafeed for Mt5Feed {
                     sink.set_status(FeedStatus::Live);
                     let mut failures = 0;
                     while sink.is_active() && failures < 3 {
-                        let server_since = since + connection.offset * 1000;
-                        match client.copy_ticks_from(&symbol, server_since, TICK_BATCH, TICKS_ALL) {
+                        if since.is_none() {
+                            let latest = client
+                                .symbol_info_tick(&symbol)
+                                .ok()
+                                .flatten()
+                                .map(|tick| tick_ms(&tick));
+                            connection.observe(latest.unwrap_or(0));
+                            since = Some(tick_anchor(
+                                latest,
+                                Utc::now().timestamp_millis(),
+                                connection.offset(),
+                            ));
+                        }
+                        let cursor = since.unwrap_or_default();
+                        match client.copy_ticks_from(&symbol, cursor, TICK_BATCH, TICKS_ALL) {
                             Ok(ticks) => {
                                 failures = 0;
                                 for tick in ticks {
@@ -378,21 +445,17 @@ impl Datafeed for Mt5Feed {
                                     } else {
                                         (tick.bid + tick.ask) / 2.0
                                     };
-                                    let time = connection.utc_ms(if tick.time_msc > 0 {
-                                        tick.time_msc
-                                    } else {
-                                        tick.time * 1000
-                                    });
-                                    let Some(time) = Utc.timestamp_millis_opt(time).single() else {
-                                        continue;
-                                    };
-                                    if !price.is_finite()
-                                        || price <= 0.0
-                                        || time.timestamp_millis() <= since
-                                    {
+                                    let server_ms = tick_ms(&tick);
+                                    if !price.is_finite() || price <= 0.0 || server_ms <= cursor {
                                         continue;
                                     }
-                                    since = time.timestamp_millis();
+                                    since = Some(server_ms);
+                                    connection.observe(server_ms);
+                                    let utc_ms = connection.utc_ms(server_ms);
+                                    let Some(time) = Utc.timestamp_millis_opt(utc_ms).single()
+                                    else {
+                                        continue;
+                                    };
                                     let size = if tick.volume_real > 0.0 {
                                         tick.volume_real
                                     } else {
@@ -483,11 +546,9 @@ impl Quotes for Mt5Quotes {
                                 close
                             }
                         };
-                        let time = connection.utc_ms(if tick.time_msc > 0 {
-                            tick.time_msc
-                        } else {
-                            tick.time * 1000
-                        });
+                        let server_ms = tick_ms(&tick);
+                        connection.observe(server_ms);
+                        let time = connection.utc_ms(server_ms);
                         let time = Utc.timestamp_millis_opt(time).single().unwrap_or_default();
                         events.push((symbol.clone(), Quote::new(price, reference, time)));
                     }
@@ -501,7 +562,7 @@ impl Quotes for Mt5Quotes {
 
 #[cfg(test)]
 mod tests {
-    use super::{timeframe_code, timeframe_seconds};
+    use super::{observed_offset, rounded_offset, tick_anchor, timeframe_code, timeframe_seconds};
     use egui_charts::model::Timeframe;
     use std::num::NonZeroU64;
 
@@ -523,5 +584,39 @@ mod tests {
         assert_eq!(timeframe_code(Timeframe::Day1), 16408);
         assert_eq!(timeframe_seconds(custom(180)), 180);
         assert_eq!(timeframe_seconds(Timeframe::Hour4), 14400);
+    }
+
+    /// The stream's cursor is server time, so its first value must come from the terminal's own
+    /// clock. Taken from UTC while the measured offset was still 0, it asked for a window two hours
+    /// behind the broker, got ticks it then filtered out, and the chart froze.
+    #[test]
+    fn the_tick_cursor_starts_from_the_terminal_clock() {
+        let now = 1_700_000_000_000;
+        // A broker two hours ahead of UTC whose newest tick arrived two seconds ago.
+        let latest = Some(now + 7_200_000 - 2_000);
+        assert_eq!(tick_anchor(latest, now, 0), now + 7_138_000);
+        assert_eq!(tick_anchor(latest, now, 7_200), now + 7_138_000);
+        // A symbol with no tick of its own falls back to the UTC clock and the measured offset.
+        assert_eq!(tick_anchor(None, now, 7_200), now + 7_140_000);
+        assert_eq!(tick_anchor(Some(0), now, 0), now - 60_000);
+    }
+
+    #[test]
+    fn a_clock_offset_rounds_to_the_quarter_hours_brokers_use() {
+        assert_eq!(rounded_offset(7_198), 7_200);
+        assert_eq!(rounded_offset(-2), 0);
+        assert_eq!(rounded_offset(12_600), 12_600);
+        assert_eq!(rounded_offset(-18_002), -18_000);
+    }
+
+    /// A live tick re-measures the clock; a stamp days old must not, or a connection opened before
+    /// the terminal synced would move the offset to whatever its stale history implies.
+    #[test]
+    fn only_a_live_tick_corrects_the_clock() {
+        let now = 1_700_000_000_000;
+        assert_eq!(observed_offset(now + 7_198_000, now), Some(7_200));
+        assert_eq!(observed_offset(now - 1_000, now), Some(0));
+        assert_eq!(observed_offset(now - 86_400_000, now), None);
+        assert_eq!(observed_offset(0, now), None);
     }
 }

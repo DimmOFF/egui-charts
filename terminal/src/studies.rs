@@ -62,6 +62,11 @@ pub(super) fn study_input_summary(study: &dyn Indicator) -> String {
 }
 
 impl Terminal {
+    /// Opens the Keyboard Shortcuts window, as the Help button on the right toolbar does.
+    pub(super) fn shortcuts_open(&mut self) {
+        self.studies.shortcuts.open();
+    }
+
     /// Uses `factory` for the study browser and toolbar additions by name. Without this,
     /// the terminal offers the built-in catalogue.
     ///
@@ -455,12 +460,15 @@ impl Terminal {
         if let Some(id) = self.chart_mut().take_indicator_settings_request() {
             self.open_study_settings(id);
         }
-        let script = self.chart_mut().take_indicator_script_request().and_then(|id| {
-            self.chart()
-                .indicators()
-                .find(|(series, _)| *series == id)
-                .map(|(_, study)| study.name().to_owned())
-        });
+        let script = self
+            .chart_mut()
+            .take_indicator_script_request()
+            .and_then(|id| {
+                self.chart()
+                    .indicators()
+                    .find(|(series, _)| *series == id)
+                    .map(|(_, study)| study.name().to_owned())
+            });
         if let Some(name) = script {
             self.emit(Action::EditScript(name));
         }

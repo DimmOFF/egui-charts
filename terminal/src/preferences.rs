@@ -4,7 +4,7 @@ use super::Terminal;
 use super::layout::Region;
 use egui::{Align2, FontId, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 use egui_charts::localization as l10n;
-use egui_charts::services::{TabTitlePart, default_tab_title};
+use egui_charts::services::{DataProviders, TabTitlePart, default_tab_title};
 use egui_charts::theme::{Theme, ThemeExt};
 use egui_charts::ui_kit::checkbox::checkbox;
 use egui_charts::ui_kit::dialog::DialogFooter;
@@ -17,6 +17,7 @@ enum Pane {
     #[default]
     General,
     Tabs,
+    DataProviders,
 }
 
 /// The parts of a tab title in the order a document that lacks them gets them.
@@ -35,6 +36,8 @@ pub(super) struct State {
     title: Vec<(TabTitlePart, bool)>,
     /// Whether the tabs open at exit come back on start.
     auto_restore: bool,
+    /// The quote providers the user left on, staged until Ok.
+    providers: DataProviders,
 }
 
 impl Default for State {
@@ -47,6 +50,7 @@ impl Default for State {
                 .map(|part| (part, true))
                 .collect(),
             auto_restore: true,
+            providers: DataProviders::default(),
         }
     }
 }
@@ -57,6 +61,7 @@ impl Terminal {
         self.preferences.open = true;
         self.preferences.pane = Pane::General;
         self.preferences.auto_restore = self.layouts.auto_restore;
+        self.preferences.providers = self.data_providers.clone();
         let title = &mut self.preferences.title;
         title.clear();
         for part in &self.layouts.title_parts {
@@ -104,9 +109,11 @@ impl Terminal {
                     SidebarLayout::new(sidebar).show(
                         ui,
                         |ui| {
-                            for (candidate, label) in
-                                [(Pane::General, "General"), (Pane::Tabs, "Tabs")]
-                            {
+                            for (candidate, label) in [
+                                (Pane::General, "General"),
+                                (Pane::Tabs, "Tabs"),
+                                (Pane::DataProviders, "Data Providers"),
+                            ] {
                                 if SidebarTab::new(label, shown == candidate).show(ui) {
                                     pane = candidate;
                                 }
@@ -119,6 +126,7 @@ impl Terminal {
                                 .show(ui, |ui| match shown {
                                     Pane::General => self.preferences_general(ui),
                                     Pane::Tabs => self.preferences_tabs(ui),
+                                    Pane::DataProviders => self.preferences_providers(ui),
                                 });
                         },
                     );
@@ -139,6 +147,7 @@ impl Terminal {
             self.theme_choice = None;
             self.update_theme(&ctx);
             self.preferences.auto_restore = true;
+            self.preferences.providers = DataProviders::default();
             let defaults = default_tab_title();
             let title = &mut self.preferences.title;
             title.clear();
@@ -165,6 +174,7 @@ impl Terminal {
             .map(|(part, _)| *part)
             .collect();
         self.layouts.auto_restore = self.preferences.auto_restore;
+        self.data_providers = self.preferences.providers.clone();
     }
 
     fn preferences_general(&mut self, ui: &mut Ui) {
@@ -193,6 +203,31 @@ impl Terminal {
             self.theme_choice = choice;
             self.update_theme(ui.ctx());
         }
+    }
+
+    fn preferences_providers(&mut self, ui: &mut Ui) {
+        let theme = ui.active_theme().clone();
+        ui.label(
+            RichText::new(l10n::text(ui.ctx(), "Data Providers"))
+                .size(theme.text.heading)
+                .color(theme.ui.text),
+        );
+        ui.add_space(theme.spacing.md);
+        ui.label(
+            RichText::new(l10n::text(
+                ui.ctx(),
+                "Turn off a provider to stop using its market data.",
+            ))
+            .size(theme.text.small)
+            .color(theme.ui.text_muted),
+        );
+        ui.add_space(theme.spacing.lg);
+        let providers = &mut self.preferences.providers;
+        checkbox(ui, &mut providers.deriv, "Deriv");
+        ui.add_space(theme.spacing.sm);
+        checkbox(ui, &mut providers.binance, "Binance");
+        ui.add_space(theme.spacing.sm);
+        checkbox(ui, &mut providers.mt5, "MT5 Bridge");
     }
 
     fn preferences_tabs(&mut self, ui: &mut Ui) {

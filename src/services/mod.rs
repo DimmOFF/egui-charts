@@ -82,7 +82,7 @@ pub use search::{ExpressionError, SymbolExpression, SymbolQuery, SymbolSearch};
 #[cfg(feature = "widget")]
 #[cfg_attr(docsrs, doc(cfg(feature = "widget")))]
 pub use settings::{
-    MarketHeatmapSelection, SettingsStore, TabSettings, TabTitlePart, UserSettings,
+    DataProviders, MarketHeatmapSelection, SettingsStore, TabSettings, TabTitlePart, UserSettings,
     default_tab_title,
 };
 pub use sharing::{ShareKind, ShareLink, ShareOffer, Sharing};

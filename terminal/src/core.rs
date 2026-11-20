@@ -266,6 +266,7 @@ impl Terminal {
         toolbar.state.can_undo = chart.can_undo();
         toolbar.state.can_redo = chart.can_redo();
         let mut open_settings = false;
+        let mut open_shortcuts = false;
         let action = toolbar.show_with_menu(ui, &state, |ui| {
             if ListItem::new()
                 .show_with_icon(ui, "App settings", &icons::SETTINGS_NUT)
@@ -274,12 +275,22 @@ impl Terminal {
                 open_settings = true;
                 ui.close();
             }
+            if ListItem::new()
+                .show_with_icon(ui, "Keyboard Shortcuts", &icons::WIDGET_BAR_HELP)
+                .clicked()
+            {
+                open_shortcuts = true;
+                ui.close();
+            }
         });
         if action != TopToolbarAction::None {
             self.emit(Action::TopToolbar(action));
         }
         if open_settings {
             self.preferences_open();
+        }
+        if open_shortcuts {
+            self.shortcuts_open();
         }
     }
 
@@ -292,6 +303,7 @@ impl Terminal {
             .map(|dark| if dark { "dark" } else { "light" }.into());
         settings.symbol = Some(chart.symbol().to_owned()).filter(|symbol| !symbol.is_empty());
         settings.interval = chart.timeframe();
+        settings.data_providers = self.data_providers.clone();
         self.group_settings(&mut settings, Direction::Save);
         settings
     }
@@ -303,6 +315,7 @@ impl Terminal {
             Some("light") => Some(false),
             _ => None,
         };
+        self.data_providers = settings.data_providers.clone();
         self.update_theme(&self.ctx());
         if let Some(symbol) = settings
             .symbol

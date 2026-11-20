@@ -946,6 +946,10 @@ impl<'a> Legend<'a> {
                     egui::StrokeKind::Inside,
                 );
             }
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                row_hover = true;
+            }
             if response.clicked() {
                 ui.ctx().data_mut(|data| data.insert_temp(id, !collapsed));
             }

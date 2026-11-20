@@ -10,6 +10,28 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The quote providers App Settings offers, each on until the user turns it off.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DataProviders {
+    /// Deriv's public market data.
+    pub deriv: bool,
+    /// Binance spot and futures.
+    pub binance: bool,
+    /// The local MT5 bridge.
+    pub mt5: bool,
+}
+
+impl Default for DataProviders {
+    fn default() -> Self {
+        Self {
+            deriv: true,
+            binance: true,
+            mt5: true,
+        }
+    }
+}
+
 /// What the library keeps of the user between sessions, in the [`StoreKind::Settings`] document
 /// `settings` that [`SettingsStore`] reads and writes.
 ///
@@ -18,6 +40,8 @@ use std::time::Duration;
 #[serde(default)]
 #[non_exhaustive]
 pub struct UserSettings {
+    /// The quote providers the user left on.
+    pub data_providers: DataProviders,
     /// Name of the theme preset, as listed by [`presets`](crate::theme::presets).
     pub theme: Option<String>,
     /// The order of each symbol's listed drawings; a symbol without one keeps the order of the
@@ -109,6 +133,7 @@ impl Default for UserSettings {
     fn default() -> Self {
         Self {
             theme: None,
+            data_providers: DataProviders::default(),
             drawing_sort: BTreeMap::new(),
             symbol: None,
             interval: None,

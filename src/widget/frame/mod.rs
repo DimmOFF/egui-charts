@@ -908,6 +908,12 @@ impl Chart {
                 }
             }
         }
+        // The axes drag to resize: the time axis horizontally and the price axis vertically.
+        if ui.rect_contains_pointer(self.time_axis_rect) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        } else if ui.rect_contains_pointer(price_axis_rect) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
 
         // Draw background (solid or gradient)
         if rect.height() == 0.0

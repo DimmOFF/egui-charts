@@ -52,8 +52,8 @@ pub use services::{ExportContents, ExportFile};
 use egui_charts::data::Datafeed;
 use egui_charts::model::Timeframe;
 use egui_charts::services::{
-    Alerts, Broker, Chats, Marks, Notification, Notifications, Quotes, SettingsStore, Signals,
-    Storage, SymbolSearch,
+    Alerts, Broker, Chats, DataProviders, Marks, Notification, Notifications, Quotes,
+    SettingsStore, Signals, Storage, SymbolSearch,
 };
 use egui_charts::theme::Theme;
 use egui_charts::ui::Control;
@@ -94,6 +94,8 @@ pub struct Terminal {
     theme: Theme,
     /// The user's explicit theme, dark or light; `None` follows the system appearance.
     theme_choice: Option<bool>,
+    /// The quote providers the user left on in App Settings.
+    data_providers: DataProviders,
     toasts: Toasts,
     top_toolbar: TopToolbar,
     menus: ChartMenus,
@@ -170,6 +172,7 @@ impl Terminal {
             ctx: None,
             theme: Theme::light(),
             theme_choice: None,
+            data_providers: DataProviders::default(),
             toasts: Toasts::new(),
             top_toolbar: TopToolbar::new()
                 .with_config(TopToolbarConfig::default().with_height(38.0)),

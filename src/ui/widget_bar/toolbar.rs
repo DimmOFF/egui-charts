@@ -154,6 +154,8 @@ pub struct WidgetBarWidget {
     pub tooltip: String,
     /// Host entries precede the built-in entries in their section.
     pub section: WidgetBarSection,
+    /// Icon size override, for a glyph whose artwork is narrower than the bar's icons.
+    pub icon_size: Option<f32>,
 }
 
 impl WidgetBarWidget {
@@ -164,7 +166,14 @@ impl WidgetBarWidget {
             icon,
             tooltip: tooltip.into(),
             section,
+            icon_size: None,
         }
+    }
+
+    /// Draw the entry's icon at `size` instead of the bar's default.
+    pub fn with_icon_size(mut self, size: f32) -> Self {
+        self.icon_size = Some(size);
+        self
     }
 }
 
@@ -399,6 +408,7 @@ impl WidgetBar {
                                 false,
                                 rect.center().x,
                                 y,
+                                widget.icon_size,
                             );
                             if response.clicked() {
                                 action = WidgetBarAction::WidgetClicked(widget.id);
@@ -427,6 +437,7 @@ impl WidgetBar {
                                 *icon == RightBarIcon::Products,
                                 rect.center().x,
                                 y,
+                                None,
                             );
                             if response.clicked() {
                                 action = WidgetBarAction::Clicked(*icon);
@@ -470,6 +481,7 @@ impl WidgetBar {
         filled: bool,
         center_x: f32,
         y: f32,
+        icon_size: Option<f32>,
     ) -> egui::Response {
         let painter = ui.painter().clone();
         let theme = ui.active_theme();
@@ -525,8 +537,8 @@ impl WidgetBar {
         }
 
         // Render icon centered in button rect (with visibility check)
-        let icon_rect =
-            Rect::from_center_size(btn_rect.center(), Vec2::splat(self.config.icon_size));
+        let size = icon_size.unwrap_or(self.config.icon_size);
+        let icon_rect = Rect::from_center_size(btn_rect.center(), Vec2::splat(size));
         if ui.is_rect_visible(icon_rect) {
             let tint = if filled {
                 // A 34 px disc in the icon colour, the glyph in the bar's fill.
@@ -535,7 +547,7 @@ impl WidgetBar {
             } else {
                 icon_color
             };
-            icon.as_image_tinted(Vec2::splat(self.config.icon_size), tint)
+            icon.as_image_tinted(Vec2::splat(size), tint)
                 .paint_at(ui, icon_rect);
         }
 
@@ -612,6 +624,7 @@ mod tests {
                 icon: embedded_icons::WATCHLIST,
                 tooltip: "Host notes".into(),
                 section: WidgetBarSection::Top,
+                icon_size: None,
             };
             let captured = calls.clone();
             bar.register_panel(widget.clone(), move |ui| {
@@ -841,12 +854,14 @@ mod tests {
                         icon: embedded_icons::WATCHLIST,
                         tooltip: "Watchlist".into(),
                         section: WidgetBarSection::Top,
+                        icon_size: None,
                     },
                     WidgetBarWidget {
                         id: 7,
                         icon: embedded_icons::WIDGET_BAR_CALENDAR,
                         tooltip: "Calendar".into(),
                         section: WidgetBarSection::Bottom,
+                        icon_size: None,
                     },
                 ];
                 let button = |pos, pressed| Event::PointerButton {
@@ -994,6 +1009,7 @@ mod tests {
                     icon: embedded_icons::WATCHLIST,
                     tooltip: format!("Panel {id}"),
                     section: WidgetBarSection::Top,
+                    icon_size: None,
                 }));
                 frame(&mut bar, vec![]);
                 frame(

@@ -18,6 +18,7 @@ use egui_charts::ui::Control;
 use egui_charts::ui::export::{ExportConfig, ExportFormat, ExportResponse};
 use egui_charts::ui::floating_replay_control::ReplayControlAction;
 use egui_charts::ui::top_toolbar::{LayoutAction, LayoutMenu, TopToolbarAction};
+use egui_charts::ui_kit::dialog::DialogFooter;
 use egui_charts::ui_kit::modal::Modal;
 use egui_charts::widget::{
     Chart, ChartBuilder, ChartLayout, ChartLayoutMode, SavedLayout, SeriesId, ShortcutRequest,
@@ -25,7 +26,7 @@ use egui_charts::widget::{
 use std::collections::VecDeque;
 
 /// The height of the strip of layout tabs, as TradingView's window tabs.
-const TAB_STRIP_HEIGHT: f32 = 26.0;
+const TAB_STRIP_HEIGHT: f32 = 32.0;
 
 /// An open tab. The one on show lives in the terminal; the others keep their slots here.
 struct Tab {
@@ -93,6 +94,8 @@ pub(super) struct State {
     tab: usize,
     /// Whether the open-layout chooser is open.
     chooser: bool,
+    /// The name staged in the Create new layout dialog; `None` while the dialog is closed.
+    creating: Option<String>,
     /// Grid changes, counted with the chart edits so autosave sees them.
     grid_edits: u64,
     /// The slot that was active at the last poll, to notice a change of slot.
@@ -117,6 +120,7 @@ impl Default for State {
             tabs: Vec::new(),
             tab: 0,
             chooser: false,
+            creating: None,
             grid_edits: 0,
             seen_active: 0,
             store: LayoutMenu::new_in(StoreKind::Tabs),
@@ -197,7 +201,10 @@ impl Terminal {
             Region::Top => self.show_layout_tabs(ui),
             // The toolbar has been drawn: its grid selector holds this frame's sync options.
             Region::Left => self.layout.sync = self.top_toolbar.chart_grid_selector.sync.clone(),
-            Region::Windows => self.show_open_layout(ui.ctx()),
+            Region::Windows => {
+                self.show_open_layout(ui.ctx());
+                self.show_create_layout(ui.ctx());
+            }
             _ => {}
         }
     }
@@ -296,7 +303,7 @@ impl Terminal {
     }
 
     pub(super) fn layouts_modal(&self) -> bool {
-        self.layouts.chooser
+        self.layouts.chooser || self.layouts.creating.is_some()
     }
 
     /// Whether the tab on show still asks what to open, before it shows a chart.
@@ -354,14 +361,6 @@ impl Terminal {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.add_space(top);
-                        ui.label(
-                            egui::RichText::new(l10n::text(&ctx, "Layouts"))
-                                .size(heading)
-                                .color(text),
-                        );
-                        ui.add_space(gap);
-                        // TradingView's cards: about 260 wide, as many per row as fit.
                         let columns = (((ui.available_width() + gap) / (260.0 + gap)).floor()
                             as usize)
                             .max(1);
@@ -369,11 +368,26 @@ impl Terminal {
                             / columns as f32)
                             .min(260.0);
                         let size = egui::vec2(tile, 84.0);
+                        // TradingView centres the heading and the cards as one block.
+                        let content = columns as f32 * tile + (columns - 1) as f32 * gap;
+                        let left = ((ui.available_width() - content) / 2.0).max(0.0);
+                        ui.add_space(top);
+                        ui.horizontal(|ui| {
+                            ui.add_space(left);
+                            ui.label(
+                                egui::RichText::new(l10n::text(&ctx, "Layouts"))
+                                    .size(heading)
+                                    .color(text),
+                            );
+                        });
+                        ui.add_space(top);
                         let items = std::iter::once(None)
                             .chain(names.iter().map(Some))
                             .collect::<Vec<_>>();
                         for row in items.chunks(columns) {
                             ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = gap;
+                                ui.add_space(left);
                                 for name in row {
                                     let Some(name) = name else {
                                         let (rect, response) =
@@ -537,8 +551,8 @@ impl Terminal {
                     });
             });
         if create {
-            // The tab shows the copy of the active chart it was opened with.
-            self.layouts.tabs[self.layouts.tab].start = false;
+            // The dialog names a new, clean layout before the tab leaves the start page.
+            self.layouts.creating = Some(l10n::text(&ctx, "New layout"));
         }
         if let Some(name) = open {
             self.top_toolbar.layout_menu.open(&name);
@@ -740,142 +754,167 @@ impl Terminal {
             .show(ui, |ui| {
                 // A tab is a click target, not selectable text: hovering it keeps the arrow.
                 ui.style_mut().interaction.selectable_labels = false;
-                egui::ScrollArea::horizontal().show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        for (index, tab) in self.layouts.tabs.iter().enumerate() {
-                            let mut closed = false;
-                            let frame = egui::Frame::new()
-                                .fill(if index == current { active } else { strip })
-                                .inner_margin(egui::Margin::symmetric(8, 0))
-                                .show(ui, |ui| {
-                                    ui.set_height(TAB_STRIP_HEIGHT);
-                                    ui.with_layout(
-                                        egui::Layout::left_to_right(egui::Align::Center),
-                                        |ui| {
-                                            ui.spacing_mut().item_spacing.x = 5.0;
-                                            if let Some(title) = &tab.title {
-                                                ui.label(
-                                                    egui::RichText::new(title).size(body).color(
-                                                        if index == current {
-                                                            self.theme.ui.text
-                                                        } else {
-                                                            self.theme.ui.text_secondary
-                                                        },
-                                                    ),
-                                                );
-                                            } else {
-                                                let color =
-                                                    if tab.change >= 0.0 { up } else { down };
-                                                for part in &parts {
-                                                    match part {
-                                                        TabTitlePart::Ticker => {
-                                                            ui.label(
-                                                                egui::RichText::new(&tab.ticker)
-                                                                    .size(body)
-                                                                    .color(self.theme.ui.text),
-                                                            );
-                                                        }
-                                                        TabTitlePart::ChangeIcon => {
-                                                            ui.label(
-                                                                egui::RichText::new(
-                                                                    if tab.change >= 0.0 {
-                                                                        "↑"
-                                                                    } else {
-                                                                        "↓"
-                                                                    },
-                                                                )
-                                                                .size(body)
-                                                                .color(color),
-                                                            );
-                                                        }
-                                                        TabTitlePart::LastPrice => {
-                                                            ui.label(
-                                                                egui::RichText::new(format!(
-                                                                    "{:.2}",
-                                                                    tab.last
-                                                                ))
-                                                                .size(body)
-                                                                .color(self.theme.ui.text),
-                                                            );
-                                                        }
-                                                        TabTitlePart::ChangePercent => {
-                                                            ui.label(
-                                                                egui::RichText::new(format!(
-                                                                    "{:+.2}%",
-                                                                    tab.change
-                                                                ))
-                                                                .size(body)
-                                                                .color(color),
-                                                            );
-                                                        }
-                                                        TabTitlePart::LayoutName => {
-                                                            if let Some(layout) = &tab.layout {
-                                                                ui.label(
-                                                                    egui::RichText::new(layout)
-                                                                        .size(body)
-                                                                        .color(
-                                                                            self.theme
-                                                                                .ui
-                                                                                .text_muted,
-                                                                        ),
-                                                                );
-                                                            }
-                                                        }
-                                                        _ => {}
-                                                    }
-                                                }
-                                            }
-                                            let close = ui
-                                                .add(
-                                                    egui::Button::new(
-                                                        egui::RichText::new("×").color(muted),
-                                                    )
-                                                    .frame(false),
-                                                )
-                                                .on_hover_text(&close_hint);
-                                            closed = close.clicked();
-                                            close.rect
-                                        },
-                                    )
-                                    .inner
-                                });
-                            // The close cross keeps its own clicks; the rest of the tab selects it
-                            // and opens its context menu.
-                            let mut hit = frame.response.rect;
-                            hit.max.x = hit.max.x.min(frame.inner.left());
-                            let click = ui.interact(
-                                hit,
-                                ui.scope_id().with(("layout_tab", tab.id)),
-                                egui::Sense::click(),
+                let count = self.layouts.tabs.len();
+                let plus = TAB_STRIP_HEIGHT + 6.0;
+                let close_width = TAB_STRIP_HEIGHT * 0.75;
+                // TradingView's tabs: 200 wide until the strip runs out of room, then narrower.
+                let width = ((ui.available_width() - plus - count.saturating_sub(1) as f32)
+                    / count.max(1) as f32)
+                    .clamp(close_width + 16.0, 200.0);
+                let separator = self.theme.ui.border_control;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for (index, tab) in self.layouts.tabs.iter().enumerate() {
+                        if index > 0 {
+                            let (line, _) = ui.allocate_exact_size(
+                                egui::vec2(1.0, TAB_STRIP_HEIGHT),
+                                egui::Sense::hover(),
                             );
-                            click.clone().context_menu(|ui| {
-                                if ui.button(rename_hint.as_str()).clicked() {
-                                    customize = true;
-                                    ui.close();
-                                }
-                                if ui.button(close_hint.as_str()).clicked() {
-                                    close = Some(index);
-                                    ui.close();
-                                }
-                            });
-                            if click.clicked() && !closed {
-                                select = Some(index);
-                            }
-                            if closed {
-                                close = Some(index);
-                            }
+                            ui.painter().rect_filled(
+                                egui::Rect::from_center_size(
+                                    line.center(),
+                                    egui::vec2(1.0, TAB_STRIP_HEIGHT - 8.0),
+                                ),
+                                0.0,
+                                separator,
+                            );
                         }
-                        ui.add_space(6.0);
-                        new = ui
-                            .add(
-                                egui::Button::new("+")
-                                    .frame(false)
-                                    .min_size(egui::vec2(TAB_STRIP_HEIGHT, TAB_STRIP_HEIGHT)),
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(width, TAB_STRIP_HEIGHT),
+                            egui::Sense::hover(),
+                        );
+                        let shown = index == current;
+                        // The close cross keeps its own clicks; the rest of the tab selects it
+                        // and opens its context menu.
+                        let hit = egui::Rect::from_min_max(
+                            rect.min,
+                            egui::pos2(rect.max.x - close_width, rect.max.y),
+                        );
+                        let click = ui.interact(
+                            hit,
+                            ui.scope_id().with(("layout_tab", tab.id)),
+                            egui::Sense::click(),
+                        );
+                        let fill = if shown {
+                            active
+                        } else if click.hovered() {
+                            self.theme.ui.btn_bg_hover
+                        } else {
+                            strip
+                        };
+                        ui.painter().rect_filled(rect, 0.0, fill);
+                        let title = egui::Rect::from_min_max(
+                            egui::pos2(rect.min.x + 8.0, rect.min.y),
+                            egui::pos2(hit.max.x - 4.0, rect.max.y),
+                        );
+                        let label = if tab.start {
+                            let text = l10n::text(ui.ctx(), "New Tab");
+                            let color = if shown {
+                                self.theme.ui.text
+                            } else {
+                                self.theme.ui.text_secondary
+                            };
+                            egui::WidgetText::from(
+                                egui::RichText::new(text).size(body).color(color),
                             )
-                            .on_hover_text(&new_hint)
-                            .clicked();
-                    });
+                        } else if let Some(title) = &tab.title {
+                            let color = if shown {
+                                self.theme.ui.text
+                            } else {
+                                self.theme.ui.text_secondary
+                            };
+                            egui::WidgetText::from(
+                                egui::RichText::new(title).size(body).color(color),
+                            )
+                        } else {
+                            // One job for the parts, so the title truncates as a whole.
+                            let mut job = egui::text::LayoutJob::default();
+                            let format = |color| egui::TextFormat {
+                                font_id: egui::FontId::proportional(body),
+                                color,
+                                ..Default::default()
+                            };
+                            let color = if tab.change >= 0.0 { up } else { down };
+                            for part in &parts {
+                                match part {
+                                    TabTitlePart::Ticker => {
+                                        job.append(&tab.ticker, 0.0, format(self.theme.ui.text));
+                                    }
+                                    TabTitlePart::ChangeIcon => {
+                                        let icon = if tab.change >= 0.0 { "↑" } else { "↓" };
+                                        job.append(icon, 0.0, format(color));
+                                    }
+                                    TabTitlePart::LastPrice => {
+                                        let price = format!("{:.2}", tab.last);
+                                        job.append(&price, 0.0, format(self.theme.ui.text));
+                                    }
+                                    TabTitlePart::ChangePercent => {
+                                        let percent = format!("{:+.2}%", tab.change);
+                                        job.append(&percent, 0.0, format(color));
+                                    }
+                                    TabTitlePart::LayoutName => {
+                                        if let Some(layout) = &tab.layout {
+                                            job.append(
+                                                layout,
+                                                0.0,
+                                                format(self.theme.ui.text_muted),
+                                            );
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            egui::WidgetText::from(job)
+                        };
+                        ui.scope_builder(
+                            egui::UiBuilder::new()
+                                .max_rect(title)
+                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                            |ui| {
+                                ui.spacing_mut().item_spacing.x = 5.0;
+                                ui.set_clip_rect(title.intersect(ui.clip_rect()));
+                                ui.add(egui::Label::new(label).truncate());
+                            },
+                        );
+                        let cross = egui::Rect::from_min_max(
+                            egui::pos2(rect.max.x - close_width, rect.min.y),
+                            rect.max,
+                        );
+                        let close_btn = ui
+                            .put(
+                                cross,
+                                egui::Button::new(egui::RichText::new("×").color(muted))
+                                    .frame(false),
+                            )
+                            .on_hover_text(&close_hint);
+                        // The title and the cross are placed, not laid out: the row keeps the
+                        // tab's width whatever their size.
+                        ui.advance_cursor_after_rect(rect);
+                        click.clone().context_menu(|ui| {
+                            if ui.button(rename_hint.as_str()).clicked() {
+                                customize = true;
+                                ui.close();
+                            }
+                            if ui.button(close_hint.as_str()).clicked() {
+                                close = Some(index);
+                                ui.close();
+                            }
+                        });
+                        if close_btn.clicked() {
+                            close = Some(index);
+                        } else if click.clicked() {
+                            select = Some(index);
+                        }
+                    }
+                    ui.add_space(6.0);
+                    new = ui
+                        .add(
+                            egui::Button::new("+")
+                                .frame(false)
+                                .min_size(egui::vec2(TAB_STRIP_HEIGHT, TAB_STRIP_HEIGHT)),
+                        )
+                        .on_hover_text(&new_hint)
+                        .clicked();
                 });
             });
         if customize {
@@ -946,7 +985,7 @@ impl Terminal {
             };
             (vec![chart], ChartLayout::default(), 0)
         };
-        let mut name = name.unwrap_or_else(|| "Unnamed".into());
+        let mut name = name.unwrap_or_else(|| "New Tab".into());
         let base = name.clone();
         let mut suffix = 2;
         while self.layouts.tabs.iter().any(|tab| tab.name == name) {
@@ -1039,6 +1078,93 @@ impl Terminal {
         if let Some(name) = chosen {
             self.perform_layout_action(LayoutAction::Open(name));
         }
+    }
+
+    /// The Create new layout dialog of the start page.
+    fn show_create_layout(&mut self, ctx: &egui::Context) {
+        let Some(mut name) = self.layouts.creating.take() else {
+            return;
+        };
+        let theme = self.theme.clone();
+        let taken = self
+            .top_toolbar
+            .layout_menu
+            .layouts
+            .iter()
+            .any(|layout| layout.trim() == name.trim());
+        let mut open = true;
+        let mut create = false;
+        let mut cancelled = false;
+        Modal::new("create_layout", l10n::text(ctx, "Create new layout"))
+            .width(360.0)
+            .show(ctx, &mut open, |ui| {
+                ui.label(l10n::text(ctx, "Layout name"));
+                ui.add(
+                    egui::TextEdit::singleline(&mut name)
+                        .id(egui::Id::unique("create_layout_name"))
+                        .desired_width(ui.available_width()),
+                );
+                if taken {
+                    ui.label(
+                        egui::RichText::new(l10n::text(
+                            ctx,
+                            "A layout with this name already exists",
+                        ))
+                        .size(theme.text.small)
+                        .color(theme.ui.error),
+                    );
+                }
+                let (ok, cancel) = DialogFooter::new("Create")
+                    .secondary("Cancel")
+                    .accent_primary()
+                    .primary_enabled(!name.trim().is_empty() && !taken)
+                    .show(ui);
+                create = ok;
+                cancelled = cancel;
+            });
+        if create {
+            self.create_layout(name.trim().to_owned());
+            return;
+        }
+        if open && !cancelled {
+            self.layouts.creating = Some(name);
+        }
+    }
+
+    /// Gives the tab on show a clean layout named `name`, with no studies and default settings.
+    fn create_layout(&mut self, name: String) {
+        let source = self.chart();
+        let symbol = source.symbol().to_owned();
+        let timeframe = source.timeframe().unwrap_or_default();
+        let theme = source
+            .theme_override()
+            .cloned()
+            .unwrap_or_else(|| self.theme.clone());
+        let registry = source.drawings().registry.clone();
+        let chart = ChartBuilder::new()
+            .with_feed(self.feed.clone())
+            .with_symbol(&symbol)
+            .with_timeframe(timeframe)
+            .with_theme(theme)
+            .with_drawing_registry(registry)
+            .build();
+        self.layout_stop_replay();
+        self.charts = vec![chart];
+        self.layout = ChartLayout::default();
+        self.active = 0;
+        self.layout.set_active(0);
+        self.top_toolbar
+            .chart_grid_selector
+            .set_layout(ChartLayoutMode::Single);
+        let tab = &mut self.layouts.tabs[self.layouts.tab];
+        tab.name = name;
+        tab.layout = None;
+        tab.start = false;
+        tab.title = None;
+        refresh_tab_market(&self.charts, tab);
+        // Saved before the chart takes a drawing store, whose load the snapshot would wait for.
+        self.save_layout();
+        self.wire_slot(0);
     }
 
     fn refresh_layout_menu(&mut self) {
@@ -1496,7 +1622,7 @@ mod tests {
         layout(&mut terminal, LayoutAction::CreateNew);
         // The new layout is one slot with a copy of the active chart; the strip lists both.
         let names: Vec<_> = terminal.layouts.tabs.iter().map(|tab| &*tab.name).collect();
-        assert_eq!(names, ["Unnamed", "Unnamed 2"]);
+        assert_eq!(names, ["Unnamed", "New Tab"]);
         assert!(
             storage.get(StoreKind::Layouts, "Unnamed").is_some(),
             "the layout saved before the new tab stays stored"
@@ -1560,7 +1686,7 @@ mod tests {
             .expect("close button");
         click(&mut terminal, SIZE, close);
         assert_eq!(terminal.layouts.tabs.len(), 1);
-        assert_eq!(terminal.layouts.tabs[0].name, "Unnamed 2");
+        assert_eq!(terminal.layouts.tabs[0].name, "New Tab");
         assert_eq!(terminal.layouts.tab, 0);
         assert_eq!(terminal.chart().symbol(), "MSFT");
     }
@@ -1965,7 +2091,7 @@ mod tests {
             .iter()
             .map(|tab| tab.name.clone())
             .collect();
-        assert_eq!(names, ["Unnamed", "Unnamed 2", "Unnamed 3"]);
+        assert_eq!(names, ["Unnamed", "New Tab", "New Tab 2"]);
         // The middle tab was on show last.
         terminal.select_layout(1);
         terminal.run(Action::TopToolbar(TopToolbarAction::Save));
@@ -2014,7 +2140,7 @@ mod tests {
             .iter()
             .map(|tab| tab.name.clone())
             .collect();
-        assert_eq!(names, ["Unnamed", "Unnamed 2", "Unnamed 3"]);
+        assert_eq!(names, ["Unnamed", "New Tab", "New Tab 2"]);
         for _ in 0..6 {
             frame(&mut terminal, SIZE, vec![]);
         }
@@ -2066,6 +2192,36 @@ mod tests {
             terminal.layouts.tabs.len(),
             2,
             "the new tab keeps its place"
+        );
+    }
+
+    #[test]
+    fn a_layout_created_from_the_start_page_starts_clean() {
+        let storage = Arc::new(MemoryStorage::default());
+        let mut terminal = new_terminal(&storage);
+        settle(&mut terminal);
+        terminal.chart_mut().add_indicator(Box::new(SMA::new(7)));
+        layout(&mut terminal, LayoutAction::CreateNew);
+        assert!(terminal.start_page(), "the new tab asks what to open");
+        terminal.create_layout("Fresh".into());
+        for _ in 0..8 {
+            frame(&mut terminal, SIZE, vec![]);
+        }
+        assert!(!terminal.start_page(), "the created layout is on show");
+        let studies: Vec<_> = terminal
+            .chart()
+            .indicators()
+            .map(|(_, study)| study.name().to_owned())
+            .collect();
+        assert_eq!(
+            studies,
+            ["Volume"],
+            "the created layout carries no studies of its own"
+        );
+        assert_eq!(terminal.layouts.tabs[terminal.layouts.tab].name, "Fresh");
+        assert!(
+            storage.get(StoreKind::Layouts, "Fresh").is_some(),
+            "the created layout is stored under the name it was given"
         );
     }
 }

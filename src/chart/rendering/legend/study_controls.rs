@@ -161,8 +161,12 @@ pub(crate) fn study_controls(
         let response = response.on_hover_text(&label);
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
         if response.hovered() || ui.rect_contains_pointer(rect) {
-            ui.painter()
-                .rect_filled(rect, theme.radius.sm, theme.ui.btn_bg_hover);
+            // Mixed from the chart colours, so it stays subtle in light and dark themes.
+            ui.painter().rect_filled(
+                rect,
+                theme.radius.sm,
+                theme.chart.bg.lerp_to_gamma(foreground, 0.12),
+            );
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         if index == 5 {
@@ -595,6 +599,50 @@ mod tests {
             egui::CursorIcon::Default
         );
         output.drop_without_applying_deltas();
+    }
+
+    /// The button hover is mixed from the chart colours, so it stays subtle in both themes
+    /// instead of using the brighter UI hover fill.
+    #[test]
+    fn study_button_hover_fill_follows_the_chart_colours() {
+        for theme in [crate::theme::Theme::light(), crate::theme::Theme::dark()] {
+            let ctx = Context::default();
+            crate::theme::apply_to_egui(&ctx, &theme);
+            let study = crate::studies::CustomIndicator::new("Plain", |_| Vec::new());
+            let row = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(220.0, 20.0));
+            let controls = Rect::from_min_size(Pos2::new(134.0, 10.0), Vec2::new(96.0, 20.0));
+            let settings = Rect::from_min_size(
+                controls.min + Vec2::new(BUTTON_SIZE, 0.0),
+                Vec2::splat(BUTTON_SIZE),
+            )
+            .intersect(controls);
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![Event::PointerMoved(settings.center())],
+                    ..Default::default()
+                },
+                |ui| {
+                    study_controls(
+                        ui,
+                        row,
+                        controls,
+                        None,
+                        theme.chart.axis_text,
+                        egui::Id::unique("hover fill"),
+                        &study,
+                    );
+                },
+            );
+            let fill = output.shapes.iter().find_map(|shape| match &shape.shape {
+                Shape::Rect(rect) if rect.rect == settings => Some(rect.fill),
+                _ => None,
+            });
+            assert_eq!(
+                fill,
+                Some(theme.chart.bg.lerp_to_gamma(theme.chart.axis_text, 0.12))
+            );
+            output.drop_without_applying_deltas();
+        }
     }
 
     /// A script study offers its edit button between the settings and the remove one.

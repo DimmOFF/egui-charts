@@ -632,7 +632,11 @@ impl<'a> Legend<'a> {
                         egui::WidgetInfo::labeled(egui::Role::Button, true, &label)
                     });
                     if response.hovered() || ui.rect_contains_pointer(rect) {
-                        painter.rect_filled(rect, theme.radius.sm, theme.ui.btn_bg_hover);
+                        painter.rect_filled(
+                            rect,
+                            theme.radius.sm,
+                            theme.chart.bg.lerp_to_gamma(colors.text, 0.12),
+                        );
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
                     icon.as_image_tinted(Vec2::splat(14.0), colors.text)

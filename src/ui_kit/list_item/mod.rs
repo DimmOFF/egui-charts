@@ -170,6 +170,17 @@ impl ListItem {
     }
 }
 
+/// One row of a hamburger menu: 40 points tall, with a larger icon and a wider gap to the label.
+pub fn menu_item(ui: &mut Ui, label: impl Into<String>, icon: &crate::icons::Icon) -> Response {
+    ListItem::new().height(40.0).show(
+        ui,
+        LabelContent::new(label)
+            .with_icon(icon)
+            .icon_size(20.0)
+            .icon_gap(12.0),
+    )
+}
+
 /// Create a simple list of items
 ///
 /// # Example
@@ -202,6 +213,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_menu_item_is_forty_points_tall() {
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let row = menu_item(ui, "Settings", &crate::icons::icons::SETTINGS);
+                assert_eq!(row.rect.height(), 40.0);
+            });
+        })
+        .drop_without_applying_deltas();
+    }
 
     #[test]
     fn show_advances_by_exactly_one_row() {

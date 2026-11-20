@@ -308,6 +308,12 @@ impl WatchlistPanel {
         self.quotes.get(symbol)
     }
 
+    /// Drops every quote the panel holds. The next [`poll`](Self::poll) subscribes again, so a
+    /// host that turned a data provider off shows no values for the symbols it no longer serves.
+    pub fn clear_quotes(&mut self) {
+        self.quotes.clear();
+    }
+
     /// Shows the prices of `symbol` with `decimals`, as `Instrument::price_decimals`. Without
     /// them, the decimals follow the size of the last price.
     pub fn set_price_decimals(&mut self, symbol: &str, decimals: u8) {

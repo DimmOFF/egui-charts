@@ -29,6 +29,7 @@ pub struct LabelContent<'a> {
     italics: bool,
     strong: bool,
     icon_size: f32,
+    icon_gap: Option<f32>,
 }
 
 impl<'a> LabelContent<'a> {
@@ -41,6 +42,7 @@ impl<'a> LabelContent<'a> {
             italics: false,
             strong: false,
             icon_size: icons::SM,
+            icon_gap: None,
         }
     }
 
@@ -78,6 +80,13 @@ impl<'a> LabelContent<'a> {
         self.icon_size = size;
         self
     }
+
+    /// Set the gap between the icon and the label
+    #[must_use]
+    pub fn icon_gap(mut self, gap: f32) -> Self {
+        self.icon_gap = Some(gap);
+        self
+    }
 }
 
 impl<'a> ListItemContent for LabelContent<'a> {
@@ -99,7 +108,7 @@ impl<'a> ListItemContent for LabelContent<'a> {
 
         // Calculate layout
         let icon_width = if self.icon.is_some() {
-            self.icon_size + ui.active_theme().spacing.sm
+            self.icon_size + self.icon_gap.unwrap_or(ui.active_theme().spacing.sm)
         } else {
             0.0
         };

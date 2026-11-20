@@ -10,7 +10,7 @@ use crate::localization as l10n;
 use crate::model::Timeframe;
 use crate::theme::ThemeExt;
 use crate::ui_kit::buttons::IconButton;
-use crate::ui_kit::list_item::{LabelContent, ListItem};
+use crate::ui_kit::list_item::{LabelContent, ListItem, menu_item};
 use egui::{Role, Ui, WidgetInfo};
 
 use super::{
@@ -472,13 +472,18 @@ impl TopToolbar {
         egui::Popup::menu(&response)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
-                ui.set_width(DESIGN_TOKENS.sizing.dialog.submenu_width);
+                ui.set_width(250.0);
+                // The menu's rows are larger than the list items elsewhere.
+                let text = egui::FontId::proportional(ui.active_theme().text.title);
+                ui.style_mut()
+                    .text_styles
+                    .insert(egui::TextStyle::Body, text);
                 for (control, visible) in [S::QuickSearch, S::Theme].into_iter().zip(visible) {
                     if !visible {
                         continue;
                     }
                     if let Some((icon, label, clicked_action)) = control.entry()
-                        && ListItem::new().show_with_icon(ui, label, icon).clicked()
+                        && menu_item(ui, label, icon).clicked()
                     {
                         *action = clicked_action;
                         ui.close();

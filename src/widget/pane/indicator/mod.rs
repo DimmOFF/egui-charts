@@ -703,6 +703,7 @@ impl IndicatorPane {
                 row,
                 controls,
                 Some(self.background_at(ui.ctx(), controls.center())),
+                text_color,
                 response.id.with("study_controls"),
                 indicator,
             )

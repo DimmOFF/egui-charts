@@ -360,9 +360,9 @@ impl<'a> Legend<'a> {
                 title,
                 theme.text.chart_title,
                 if self.series_visible {
-                    theme.ui.text
+                    colors.text
                 } else {
-                    theme.ui.text_muted
+                    colors.text.gamma_multiply(0.7)
                 },
                 title_width,
             );
@@ -547,7 +547,7 @@ impl<'a> Legend<'a> {
                         if flagged {
                             theme.ui.accent
                         } else {
-                            theme.ui.text
+                            colors.text
                         },
                     )
                     .paint_at(ui, flag.shrink(2.0));
@@ -562,7 +562,7 @@ impl<'a> Legend<'a> {
                     .interact(more, id.with("more"), Sense::click())
                     .on_hover_text(l10n::text(ui.ctx(), "Series actions"));
                 crate::icons::icons::UI_MORE_HORIZONTAL
-                    .as_image_tinted(Vec2::splat(16.0), theme.ui.text)
+                    .as_image_tinted(Vec2::splat(16.0), colors.text)
                     .paint_at(ui, more.shrink(2.0));
                 egui::Popup::menu(&more_response).show(|ui| {
                     if ui.button(l10n::text(ui.ctx(), "Copy symbol")).clicked() {
@@ -631,11 +631,11 @@ impl<'a> Legend<'a> {
                     response.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::Role::Button, true, &label)
                     });
-                    if response.hovered() {
+                    if response.hovered() || ui.rect_contains_pointer(rect) {
                         painter.rect_filled(rect, theme.radius.sm, theme.ui.btn_bg_hover);
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
-                    icon.as_image_tinted(Vec2::splat(14.0), theme.ui.text)
+                    icon.as_image_tinted(Vec2::splat(14.0), colors.text)
                         .paint_at(ui, rect.shrink(3.0));
                     if response.clicked() {
                         series_action = Some(action);
@@ -761,11 +761,11 @@ impl<'a> Legend<'a> {
                 } else {
                     0.0
                 };
-                // TradingView dims a hidden study's name, as it does the symbol's.
+                // Only a hidden study's text fades; its icons stay at full contrast.
                 let name_color = if study.is_visible() {
                     colors.text
                 } else {
-                    theme.ui.text_muted
+                    colors.text.gamma_multiply(0.7)
                 };
                 // TradingView hides everything after a study's name, its inputs caption too,
                 // when "Values in status line" is off.
@@ -787,7 +787,7 @@ impl<'a> Legend<'a> {
                         layout.text(
                             study.line_names().get(2).cloned().unwrap_or_default(),
                             theme.text.ohlc,
-                            theme.ui.text_muted,
+                            name_color,
                             bounds.width(),
                         );
                     }
@@ -822,7 +822,7 @@ impl<'a> Legend<'a> {
                         layout.text(
                             (*inputs).to_owned(),
                             theme.text.ohlc,
-                            theme.ui.text_muted,
+                            name_color,
                             bounds.width(),
                         );
                     }
@@ -884,6 +884,7 @@ impl<'a> Legend<'a> {
                     row,
                     controls,
                     None,
+                    colors.text,
                     id.with(("study", index)),
                     study.as_ref(),
                 );
@@ -1206,10 +1207,7 @@ impl<'a> Layout<'a> {
         job.append(
             label,
             0.0,
-            egui::text::TextFormat::simple(
-                font.clone(),
-                self.painter.ctx().active_theme().ui.text_secondary,
-            ),
+            egui::text::TextFormat::simple(font.clone(), self.colors.text),
         );
         job.append(&value, 0.0, egui::text::TextFormat::simple(font, color));
         job.wrap.max_width = self.bounds.width();
@@ -1730,7 +1728,7 @@ mod layout_tests {
     /// backdrop shows only while the pointer is on it.
     #[cfg(feature = "studies")]
     #[test]
-    fn hidden_study_names_are_muted_and_rows_back_only_on_hover() {
+    fn hidden_study_names_fade_and_rows_back_only_on_hover() {
         use crate::chart::rendering::Legend;
         use crate::studies::{CustomIndicator, Indicator};
         let theme = crate::theme::Theme::dark();
@@ -1773,7 +1771,11 @@ mod layout_tests {
                 _ => None,
             })
             .expect("hidden study name");
-        assert_eq!(color, theme.ui.text_muted, "a hidden study's name is muted");
+        assert_eq!(
+            color,
+            theme.ui.text.gamma_multiply(0.7),
+            "a hidden study's name fades, its icons do not"
+        );
         let bounds = Rect::from_min_size(pos, size);
         let backed = |shapes: &[egui::epaint::ClippedShape]| {
             shapes.iter().any(|shape| {
@@ -1935,7 +1937,7 @@ mod layout_tests {
                     .filter(|text| text.galley.text().starts_with("O "))
                 {
                     let sections = &field.galley.job.sections;
-                    assert_eq!(sections[0].format.color, theme.ui.text_secondary);
+                    assert_eq!(sections[0].format.color, theme.ui.text);
                     assert_eq!(sections[1].format.color, theme.chart.candle_up);
                 }
                 let idle: Vec<_> = text

@@ -326,8 +326,12 @@ mod tests {
                     .expect("the series title is visible");
                 assert_eq!(
                     title.galley.job.sections[0].format.color,
-                    if clear { global.ui.text } else { local.ui.text },
-                    "series titles use UI ink even when axis ink differs"
+                    if clear {
+                        global.chart.axis_text
+                    } else {
+                        local.chart.axis_text
+                    },
+                    "series titles use the chart's foreground ink"
                 );
                 assert!(!sizes.is_empty());
                 assert_eq!(sizes.contains(&local.text.label), !clear, "{sizes:?}");

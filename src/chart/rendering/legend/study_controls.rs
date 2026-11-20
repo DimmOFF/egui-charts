@@ -25,6 +25,7 @@ pub(crate) fn study_controls(
     row: Rect,
     controls: Rect,
     backdrop: Option<egui::Color32>,
+    foreground: egui::Color32,
     id: egui::Id,
     study: &dyn crate::studies::Indicator,
 ) -> ([Response; 4], Option<Pos2>) {
@@ -139,10 +140,11 @@ pub(crate) fn study_controls(
         );
         // A hidden study keeps its crossed-out eye on show, as TradingView does.
         let hidden_eye = index == 0 && !visible;
-        if hidden_eye {
+        // Without a row to hover, nothing follows to paint the icon above the hover fill.
+        if hidden_eye && !revealed {
             #[cfg(feature = "icons")]
             crate::icons::icons::EYE_HIDE
-                .as_image_tinted(Vec2::splat(18.0), theme.ui.text)
+                .as_image_tinted(Vec2::splat(18.0), foreground)
                 .paint_at(ui, rect.shrink(3.0));
             #[cfg(not(feature = "icons"))]
             ui.painter().text(
@@ -150,7 +152,7 @@ pub(crate) fn study_controls(
                 egui::Align2::CENTER_CENTER,
                 "+",
                 FontId::proportional(16.0),
-                theme.ui.text,
+                foreground,
             );
         }
         if !revealed || !shown {
@@ -158,7 +160,7 @@ pub(crate) fn study_controls(
         }
         let response = response.on_hover_text(&label);
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-        if response.hovered() {
+        if response.hovered() || ui.rect_contains_pointer(rect) {
             ui.painter()
                 .rect_filled(rect, theme.radius.sm, theme.ui.btn_bg_hover);
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -169,14 +171,14 @@ pub(crate) fn study_controls(
                 egui::Align2::CENTER_CENTER,
                 "?",
                 FontId::proportional(16.0),
-                theme.ui.text,
+                foreground,
             );
             if response.clicked()
                 && let Some(url) = help
             {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(url));
             }
-        } else if !hidden_eye {
+        } else {
             #[cfg(feature = "icons")]
             {
                 let icon = match index {
@@ -187,7 +189,7 @@ pub(crate) fn study_controls(
                     3 => &crate::icons::icons::TRASH,
                     _ => &crate::icons::icons::UI_MORE_HORIZONTAL,
                 };
-                icon.as_image_tinted(Vec2::splat(18.0), theme.ui.text)
+                icon.as_image_tinted(Vec2::splat(18.0), foreground)
                     .paint_at(ui, rect.shrink(3.0));
             }
             #[cfg(not(feature = "icons"))]
@@ -196,7 +198,7 @@ pub(crate) fn study_controls(
                 egui::Align2::CENTER_CENTER,
                 [if visible { "−" } else { "+" }, "...", "{}", "×", "•••"][index],
                 FontId::proportional(16.0),
-                theme.ui.text,
+                foreground,
             );
         }
         response
@@ -239,6 +241,7 @@ mod tests {
                             row,
                             controls,
                             Some(theme.chart.bg),
+                            theme.chart.axis_text,
                             egui::Id::unique("study"),
                             &crate::studies::CustomIndicator::new("Plain", |_| Vec::new()),
                         );
@@ -396,6 +399,7 @@ mod tests {
                             row,
                             controls,
                             Some(theme.chart.bg),
+                            theme.chart.axis_text,
                             egui::Id::unique("locked"),
                             &study,
                         );
@@ -475,6 +479,7 @@ mod tests {
                             row,
                             controls,
                             Some(theme.chart.bg),
+                            theme.chart.axis_text,
                             egui::Id::unique("locked"),
                             &study,
                         );
@@ -574,7 +579,15 @@ mod tests {
             },
             |ui| {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-                study_controls(ui, row, controls, None, egui::Id::unique("arrow"), &study);
+                study_controls(
+                    ui,
+                    row,
+                    controls,
+                    None,
+                    theme.chart.axis_text,
+                    egui::Id::unique("arrow"),
+                    &study,
+                );
             },
         );
         assert_eq!(
@@ -605,8 +618,15 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    let (buttons, _) =
-                        study_controls(ui, row, controls, None, egui::Id::unique("script"), &study);
+                    let (buttons, _) = study_controls(
+                        ui,
+                        row,
+                        controls,
+                        None,
+                        theme.chart.axis_text,
+                        egui::Id::unique("script"),
+                        &study,
+                    );
                     clicked = buttons.map(|response| response.clicked());
                 },
             )

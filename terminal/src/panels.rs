@@ -216,6 +216,8 @@ impl Terminal {
 
     /// Restarts the quote streams so their next poll subscribes through the venue gate again.
     pub(super) fn reload_quote_streams(&mut self) {
+        // A turned-off venue serves nothing, so its rows must stop showing the last quote.
+        self.panels.market.watchlist.clear_quotes();
         let Some(quotes) = &self.services.quotes else {
             return;
         };
@@ -981,8 +983,16 @@ mod tests {
         frame(&mut terminal, SIZE, vec![]);
         let before = quotes.0.lock().unwrap().len();
         assert_eq!(before, 1, "the watchlist subscribed once");
+        terminal
+            .panels_mut()
+            .watchlist
+            .set_quote("BTCUSDT", Quote::new(100.0, 90.0, Default::default()));
         terminal.data_providers.binance = false;
         terminal.reload_feeds();
+        assert!(
+            terminal.panels_mut().watchlist.quote("BTCUSDT").is_none(),
+            "a turned-off venue shows no values"
+        );
         frame(&mut terminal, SIZE, vec![]);
         assert!(
             quotes.0.lock().unwrap().len() > before,

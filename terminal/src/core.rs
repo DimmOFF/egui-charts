@@ -13,7 +13,7 @@ use egui_charts::ui::app_state::ChartAppState;
 use egui_charts::ui::dialogs::StorageConflictDialog;
 use egui_charts::ui::floating_replay_control::ReplayControlAction;
 use egui_charts::ui::top_toolbar::TopToolbarAction;
-use egui_charts::ui_kit::list_item::ListItem;
+use egui_charts::ui_kit::list_item::menu_item;
 use egui_charts::widget::SeriesId;
 
 /// Whether settings are being read into the terminal or written from it.
@@ -268,17 +268,11 @@ impl Terminal {
         let mut open_settings = false;
         let mut open_shortcuts = false;
         let action = toolbar.show_with_menu(ui, &state, |ui| {
-            if ListItem::new()
-                .show_with_icon(ui, "App settings", &icons::SETTINGS_NUT)
-                .clicked()
-            {
+            if menu_item(ui, "App settings", &icons::SETTINGS_NUT).clicked() {
                 open_settings = true;
                 ui.close();
             }
-            if ListItem::new()
-                .show_with_icon(ui, "Keyboard Shortcuts", &icons::WIDGET_BAR_HELP)
-                .clicked()
-            {
+            if menu_item(ui, "Keyboard Shortcuts", &icons::WIDGET_BAR_HELP).clicked() {
                 open_shortcuts = true;
                 ui.close();
             }

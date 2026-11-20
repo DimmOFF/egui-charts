@@ -18,7 +18,7 @@
 //! A host that embeds the editor hands the panel the chart each frame:
 //!
 //! ```text
-//! let mut pine = PineScripts::load("TradingVision");
+//! let mut pine = PineScripts::load("TradeVision");
 //! // In the frame:
 //! let on_chart = pine.on_chart(chart);
 //! if pine.show(ui, on_chart) {

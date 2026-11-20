@@ -11,10 +11,10 @@ default-run = "egui-charts-demo"
 name = "egui-charts-demo"
 path = "main.rs"
 
-# The assembled terminal on Deriv's and Binance's public endpoints; see `trading_vision.rs`.
+# The assembled terminal on Deriv's and Binance's public endpoints; see `trade_vision.rs`.
 [[bin]]
-name = "TradingVision"
-path = "trading_vision.rs"
+name = "TradeVision"
+path = "trade_vision.rs"
 
 [dependencies]
 egui-charts = { path = "../..", features = ["ui", "alert-engine", "strategies", "detectors"] }

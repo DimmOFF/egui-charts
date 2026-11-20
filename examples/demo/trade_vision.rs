@@ -1,7 +1,7 @@
 //! Full egui-charts terminal on Deriv's and Binance's public endpoints, plus the local
 //! MetaTrader 5 terminal when one runs.
 //!
-//! Run natively with `cargo run --release --bin TradingVision`.
+//! Run natively with `cargo run --release --bin TradeVision`.
 
 // The release build is a window, not a console application. Debug keeps the console for its logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -76,18 +76,21 @@ fn main() -> eframe::Result {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            // A valid app id gives eframe a storage folder it can actually create, so the
+            // window size and position come back on the next launch.
+            .with_app_id("TradeVision")
             .with_inner_size([1440.0, 900.0])
             .with_icon(Arc::new(window_icon())),
         ..Default::default()
     };
     let mut terminal: Option<Terminal> = None;
-    let mut pine = PineScripts::load("TradingVision");
+    let mut pine = PineScripts::load("TradeVision");
     let started = std::time::Instant::now();
     let mut flushing = false;
     let mut deadline: Option<std::time::Instant> = None;
     let mut scale_off = false;
     eframe::run_ui_native(
-        "TradingVision: Deriv + Binance + MT5",
+        "TradeVision: Deriv + Binance + MT5",
         options,
         move |ui, _frame| {
             // The factory captures the frame context when it is built, and scripts added from

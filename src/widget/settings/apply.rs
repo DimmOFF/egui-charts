@@ -325,8 +325,10 @@ impl ChartSettingsState {
         settings.margins.bottom_percent =
             (chart.state().price_scale().options().scale_margins.bottom * 100.0) as f32;
         settings.margins.right_bars = right_margin_bars(chart);
-        settings.margins.keep_right_margin_on_new_bar =
-            chart.chart_options().time_scale.keep_right_offset_on_new_bar;
+        settings.margins.keep_right_margin_on_new_bar = chart
+            .chart_options()
+            .time_scale
+            .keep_right_offset_on_new_bar;
         settings.margins.right_pixels = right_margin_pixels(chart);
         let scale = chart.state().price_scale();
         settings.scales_and_lines.auto_scale = !scale.is_manual();

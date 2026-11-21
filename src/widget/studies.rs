@@ -1241,7 +1241,11 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 0);
         chart.set_indicator_visible(hidden, true);
         chart.refresh_studies(4.0);
-        assert_eq!(calls.load(Ordering::Relaxed), 1, "shown again, it catches up");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "shown again, it catches up"
+        );
 
         // A visible study reads the hidden one's values, so that one keeps calculating.
         let source_calls = Arc::new(AtomicUsize::new(0));

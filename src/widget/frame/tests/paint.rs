@@ -2119,8 +2119,8 @@ fn study_drawings_paint_on_the_price_pane() {
     let plot = chart.last_rendered_price_rect;
     assert!(
         painted.iter().any(|shape| match shape {
-            Shape::LineSegment { points, stroke } => stroke.color == color
-                && points.iter().all(|point| plot.contains(*point)),
+            Shape::LineSegment { points, stroke } =>
+                stroke.color == color && points.iter().all(|point| plot.contains(*point)),
             _ => false,
         }),
         "the study's line must reach the price pane, in its own colour"

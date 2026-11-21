@@ -30,6 +30,41 @@ struct RunTask {
     cancel: Arc<AtomicBool>,
 }
 
+/// One run handed to the study's worker thread.
+struct Job {
+    script: Script,
+    context: Context,
+    bars: Vec<Bar>,
+    sources: Vec<SecurityData>,
+    result: Arc<Mutex<Option<RunOutput>>>,
+    cancel: Arc<AtomicBool>,
+    ctx: egui::Context,
+}
+
+/// Starts the thread that runs one study's scripts one after another, the newest queued run
+/// first. One thread serves every run: a thread per run costs a stack each time, and some
+/// injected hooks keep per-thread state that is never given back.
+fn runner() -> std::sync::mpsc::Sender<Job> {
+    let (sender, jobs) = std::sync::mpsc::channel::<Job>();
+    std::thread::Builder::new()
+        .name("pine-study".into())
+        .spawn(move || {
+            while let Ok(mut job) = jobs.recv() {
+                // A newer run is for other bars, so the queued ones would be dropped anyway.
+                while let Ok(newer) = jobs.try_recv() {
+                    job = newer;
+                }
+                let output = job.script.run(&job.bars, &job.context, &job.sources);
+                if !job.cancel.load(Ordering::Relaxed) {
+                    *job.result.lock().unwrap_or_else(|error| error.into_inner()) = Some(output);
+                }
+                job.ctx.request_repaint();
+            }
+        })
+        .expect("the study worker starts");
+    sender
+}
+
 /// What a run was calculated from, so a finished run is only applied to the same state.
 type Version = (u64, usize, Option<i64>, Option<i64>);
 
@@ -67,6 +102,8 @@ pub struct PineStudy {
     /// Where the next frame is drawn: a finished run asks it to repaint so it is collected.
     ctx: Option<egui::Context>,
     task: Option<RunTask>,
+    /// The thread that runs this study's scripts, started on the first run off the frame.
+    runner: Option<std::sync::mpsc::Sender<Job>>,
     /// The bars the drawn values belong to, so a run for other bars clears them and a run for
     /// these keeps the picture until it lands.
     stored: Option<Version>,
@@ -109,6 +146,7 @@ impl PineStudy {
             visible: true,
             ctx: None,
             task: None,
+            runner: None,
             stored: None,
             stored_tail: None,
             generation: 0,
@@ -335,21 +373,31 @@ impl Indicator for PineStudy {
             self.clear_output();
         }
         let sources = security_sources(sources);
-        let script = self.script.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let mut context = self.context.clone();
         context.cancel = Some(Arc::clone(&cancel));
-        let bars = data.to_vec();
         let result: Arc<Mutex<Option<RunOutput>>> = Arc::new(Mutex::new(None));
-        let slot = Arc::clone(&result);
-        let finished = Arc::clone(&cancel);
-        std::thread::spawn(move || {
-            let output = script.run(&bars, &context, &sources);
-            if !finished.load(Ordering::Relaxed) {
-                *slot.lock().unwrap_or_else(|error| error.into_inner()) = Some(output);
+        let job = Job {
+            script: self.script.clone(),
+            context,
+            bars: data.to_vec(),
+            sources,
+            result: Arc::clone(&result),
+            cancel: Arc::clone(&cancel),
+            ctx,
+        };
+        if self.runner.is_none() {
+            self.runner = Some(runner());
+        }
+        if let Some(worker) = &self.runner {
+            if let Err(error) = worker.send(job) {
+                // The worker is gone; a fresh one takes this run.
+                self.runner = Some(runner());
+                if let Some(worker) = &self.runner {
+                    let _ = worker.send(error.0);
+                }
             }
-            ctx.request_repaint();
-        });
+        }
         self.task = Some(RunTask {
             result,
             version,
